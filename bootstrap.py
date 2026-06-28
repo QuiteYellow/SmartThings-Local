@@ -34,7 +34,7 @@ try:
 except ImportError:
     sys.exit("cbor2 not installed — pip install -r requirements-bootstrap.txt")
 
-from samsung_dryer.coap import (
+from samsung_appliance.coap_dtls import (
     URI_PATH, CSM, enc_opts, enc_tcp, read_tcp, fmt_code,
 )
 
