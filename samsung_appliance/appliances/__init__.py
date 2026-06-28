@@ -12,11 +12,13 @@ startup; the bridge itself stays class-agnostic.
 from .base import ApplianceDescriptor
 from .dryer import DRYER
 from .oven import OVEN
+from .fridge import FRIDGE
 
 
 DESCRIPTORS: dict[str, ApplianceDescriptor] = {
     DRYER.name: DRYER,
     OVEN.name:  OVEN,
+    FRIDGE.name: FRIDGE,
 }
 
 
