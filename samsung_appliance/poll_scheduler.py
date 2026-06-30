@@ -146,6 +146,11 @@ class PollScheduler:
             t0 = time.monotonic()
             try:
                 code, body = self.session.get(list(path), timeout=self.timeout_s)
+            except ConnectionError as e:
+                self._poll_error_count += 1
+                self._record_rtt((time.monotonic() - t0) * 1000.0)
+                if self.log: self.log.debug("poll %s: %s", href, e)
+                return
             except Exception as e:
                 self._poll_error_count += 1
                 self._record_rtt((time.monotonic() - t0) * 1000.0)
@@ -171,6 +176,11 @@ class PollScheduler:
         self._poll_count += 1
         try:
             code, body = self.session.get(path, timeout=self.timeout_s)
+        except ConnectionError as e:
+            self._poll_error_count += 1
+            self._record_rtt((time.monotonic() - t0) * 1000.0)
+            if self.log: self.log.debug("sweep %s: %s", path, e)
+            return
         except Exception as e:
             self._poll_error_count += 1
             self._record_rtt((time.monotonic() - t0) * 1000.0)
