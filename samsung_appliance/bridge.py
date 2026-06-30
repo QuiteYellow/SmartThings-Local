@@ -83,6 +83,7 @@ class PushBridge:
         self._last_change_source: str | None = None
         self._last_observe_change_ts: float | None = None
         self._last_push_active_pub: str | None = None
+        self._session_stop: threading.Event | None = None
 
         # Push is considered "active" if an OBSERVE-sourced change
         # arrived within this window. Long enough that a quiet but
@@ -285,11 +286,14 @@ class PushBridge:
         self.scheduler = scheduler
         self.keepalive = keepalive
 
+        session_stop = threading.Event()
+        self._session_stop = session_stop
+
         sched_t = threading.Thread(
-            target=scheduler.run_forever, args=(self.stop,),
+            target=scheduler.run_forever, args=(session_stop,),
             daemon=True, name=f'{self.app.klass}-poll')
         ka_t = threading.Thread(
-            target=keepalive.run_forever, args=(self.stop,),
+            target=keepalive.run_forever, args=(session_stop,),
             daemon=True, name=f'{self.app.klass}-ping')
         sched_t.start()
         ka_t.start()
@@ -561,6 +565,19 @@ class PushBridge:
             self.log.warning("health publish: %s", e)
 
         self.publish_push_active(push_active)
+        if d_poll > 0 and window_polls_ok == 0:
+            self.log.warning(
+                "session dead — all polls failing — reconnecting")
+            if self._session_stop is not None:
+                self._session_stop.set()
+            if ka is not None:
+                ka.on_unreachable = None
+            sess = self.session
+            if sess is not None:
+                try:
+                    sess.close()
+                except Exception as e:
+                    self.log.warning("dead-session close: %s", e)
 
         if d_poll > 0 or d_err > 0 or d_ping_fail > 0:
             self.log.info(
