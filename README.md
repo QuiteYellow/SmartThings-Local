@@ -52,8 +52,17 @@ Read the result:
 |---|---|---|
 | Dryer | DV5000T (`DA_WM_TP2_20_COMMON`, `mnid=0AJT`) | All entities, ≤1s hot-tier poll (OBSERVE accelerates when online) |
 | Oven | NV7000BS-class (`TP1X_DA-KS-OVEN-0107X`, `mnid=0AJT`) | All entities; hot-tier poll covers door + operational state regardless of cloud reachability |
+| Fridge | ARTIK051_REF_17K (`DA-REF-ART-COMMON-1_20201124`) | Contributed by [@aminorjourney](https://github.com/aminorjourney) (PR #1). Older firmware family; port 49155, minimal `/oic/res` with full tree under `/device/0` |
 
 Other appliances on the same firmware family (washers, dishwashers, AC units) almost certainly speak the same protocol — the auth path and read primitives are common. You'd write one new descriptor in `samsung_appliance/appliances/`.
+
+### Firmware families — a limitation
+
+Descriptors are firmware-family-specific. Each file in `samsung_appliance/appliances/` hardcodes the resource layout of one firmware family: which hrefs it polls, which fields it reads, which write surfaces it exposes. There's no runtime feature detection.
+
+**What this means in practice:** if you set `APPLIANCE_<n>_CLASS=fridge` on a fridge that speaks a different firmware family than the one this descriptor was built for, the bridge will start and connect fine, but many sensors will publish as unknown and some controls won't work. Nothing catastrophic — you just get a half-broken HA device card.
+
+If your appliance model doesn't match a row in the tested table above, it may still work if it's on the same firmware family; otherwise you'd write a new descriptor (see "Adding a new appliance class" below). The ARTIK051 fridge and the newer RF9000B-class fridge, for example, expose genuinely different resource models (collection-resource vs per-instance-resource) and can't share a descriptor even though they're both "fridges".
 
 ---
 
@@ -241,6 +250,27 @@ The dryer's `/operational/state/vs/0` is on the bridge's hot poll tier (1s idle 
 2. **Scheduler reconciliation** — the PollScheduler defers polling the just-written resource for ~4s (past Samsung's fetchback-revert window), then refreshes it on its tier cadence. If the device silently coerced the value, the corrected state is republished and HA reverts.
 3. **Periodic `/device/0` sweep** — every 5 minutes the scheduler's sweep tier re-fetches the whole device tree, bounding worst-case drift on any resource the per-tier polls don't cover.
 
+### Fridge (ARTIK051)
+
+Contributed by [@aminorjourney](https://github.com/aminorjourney) in PR #1, verified against an `ARTIK051_REF_17K` fridge-freezer on firmware `DA-REF-ART-COMMON-1_20201124`. First public documentation of this firmware's local resource layout.
+
+| Capability | Works? | Notes |
+|---|---|---|
+| Read temperatures | ✅ | Fridge + freezer current + setpoint via `/temperatures/vs/0` |
+| Read doors | ✅ | Fridge, freezer, convertible zone via `/doors/vs/0` items array; plus an "any door open" binary sensor |
+| Energy monitoring | ✅ | Instantaneous W + cumulative Wh via `/energy/consumption/vs/0` |
+| Water filter | ✅ | Usage % + status via `/filter/waterfilter/vs/0` |
+| Ice maker | ✅ | State + ice-making status via `/icemaker/one/vs/0` |
+| Setpoint slider (fridge / freezer) | ✅ | Fridge 1–7°C, freezer -23 to -15°C |
+| Power Cool, Power Freeze, Sabbath, Ice Maker switches | ✅ | |
+| Active modes | ✅ | Read-only sensor of the fridge's mode list |
+
+Notes specific to this firmware family:
+- **Port 49155**, not the 49154 the oven defaults to.
+- `/oic/res` only advertises 15 paths — the full resource tree lives at `/device/0` (32 links). The bridge's periodic `/device/0` sweep handles this transparently; no descriptor change needed.
+- `/hass/state/vs/0` and `/hass/command/vs/0` return `4.04` — they're vestigial paths from an earlier firmware and are ignored.
+- Doors are exposed as a Samsung-plural collection resource (`/doors/vs/0` with an `items[]` array keyed by `x.com.samsung.da.description`), not as per-room OCF resources like the newer RF9000B-class fridges use. This is one of the concrete divergences behind the "Firmware families" caveat in Part 1.
+
 ---
 
 ## Reference
@@ -250,9 +280,9 @@ The dryer's `/operational/state/vs/0` is on the bridge's hot poll tier (1s idle 
 | Key | Meaning |
 |---|---|
 | `APPLIANCE_COUNT` | Number of `APPLIANCE_<n>_*` blocks to read (1-indexed) |
-| `APPLIANCE_<n>_CLASS` | Descriptor name: `dryer`, `oven` |
+| `APPLIANCE_<n>_CLASS` | Descriptor name: `dryer`, `oven`, `fridge` |
 | `APPLIANCE_<n>_IP` | LAN IP of the appliance |
-| `APPLIANCE_<n>_OCF_PORT` | Optional override (blank → descriptor default: dryer=49155, oven=49154) |
+| `APPLIANCE_<n>_OCF_PORT` | Optional override (blank → descriptor default: dryer=49155, oven=49154, fridge=49155) |
 | `APPLIANCE_<n>_TOPIC` | MQTT topic prefix (also the HA device identifier — changing it re-keys the device) |
 | `APPLIANCE_<n>_NAME` | Friendly name on the HA device card |
 | `MQTT_BROKER` / `MQTT_PORT` / `MQTT_USER` / `MQTT_PASS` | Broker config |
