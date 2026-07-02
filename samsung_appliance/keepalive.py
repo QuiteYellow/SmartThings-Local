@@ -67,6 +67,8 @@ class KeepaliveTask:
         try:
             self.session.ping()
             ok = True
+        except ConnectionError as e:
+            if self.log: self.log.debug("ping: %s", e)
         except Exception as e:
             if self.log: self.log.warning("ping: %s", e)
         # Real half-open detection: ping sends can succeed against a
