@@ -409,6 +409,11 @@ class PushBridge:
         self.log.warning(
             "unreachable for %.0fs — forcing session reconnect", elapsed)
         self._force_close_in_flight = True
+        # Null the dying session's on_unreachable so its keepalive thread
+        # can't flip availability offline after the new session takes over.
+        ka = self.keepalive
+        if ka is not None:
+            ka.on_unreachable = None
         try:
             sess.close()
         except Exception as e:

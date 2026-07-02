@@ -15,6 +15,7 @@ from .oven import OVEN
 from .fridge import FRIDGE
 
 
+
 DESCRIPTORS: dict[str, ApplianceDescriptor] = {
     DRYER.name: DRYER,
     OVEN.name:  OVEN,

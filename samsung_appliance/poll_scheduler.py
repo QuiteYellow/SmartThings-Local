@@ -237,6 +237,11 @@ class PollScheduler:
                     self.log.warning("poll %s timeout (cooldown %.0fs)",
                                      href, cooldown)
                 return
+            except ConnectionError as e:
+                self._poll_error_count += 1
+                self._record_rtt((time.monotonic() - t0) * 1000.0)
+                if self.log: self.log.debug("poll %s: %s", href, e)
+                return
             except Exception as e:
                 self._poll_error_count += 1
                 self._record_rtt((time.monotonic() - t0) * 1000.0)
@@ -273,6 +278,11 @@ class PollScheduler:
             if self.log:
                 self.log.warning("sweep %s timeout (cooldown %.0fs)",
                                  path, cooldown)
+            return
+        except ConnectionError as e:
+            self._poll_error_count += 1
+            self._record_rtt((time.monotonic() - t0) * 1000.0)
+            if self.log: self.log.debug("sweep %s: %s", path, e)
             return
         except Exception as e:
             self._poll_error_count += 1
