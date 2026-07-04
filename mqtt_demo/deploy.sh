@@ -60,6 +60,7 @@ COPYFILE_DISABLE=1 tar cz \
     mqtt_demo/ \
     README.md \
     .gitignore \
+    .dockerignore \
   | ssh "${SSH_HOST}" "cd ${REMOTE_DIR} && tar xz && find . -name '._*' -delete"
 
 # Ship .env separately and lock it down on the remote.
