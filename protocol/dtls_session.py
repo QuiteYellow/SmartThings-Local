@@ -54,6 +54,13 @@ DEBUG_BRIDGE = os.environ.get('DEBUG_BRIDGE') == '1'
 _BLOCK_MAX_ATTEMPTS = 3
 _BLOCK_ACK_TIMEOUT  = 4.0
 
+# Inter-request pacing: minimum seconds between CoAP CON sends on one session.
+# Samsung's RT-OCF stacks drop requests when hit faster than their firmware
+# ceiling (dryer ~14 req/s, oven ~8 req/s, dishwasher unknown). 5 req/s
+# (200 ms) is conservative enough for all tested devices; tune per device
+# once the ceiling is measured empirically.
+_DEFAULT_RATE_LIMIT_RPS = 5.0
+
 
 class DtlsCoapSession:
     """Single sustained DTLS-CoAP session.
@@ -73,13 +80,15 @@ class DtlsCoapSession:
     MAX_BLOCKS = 32              # safety bound for Block2 fetches
 
     def __init__(self, host, port, cert_path, key_path,
-                 on_notification=None, mtu=1200):
+                 on_notification=None, mtu=1200,
+                 rate_limit_rps: float = _DEFAULT_RATE_LIMIT_RPS):
         self.host = host
         self.port = port
         self.cert_path = str(cert_path)
         self.key_path  = str(key_path)
         self.on_notification = on_notification  # fn(href, payload_bytes)
         self.mtu = mtu
+        self._min_req_interval = 1.0 / rate_limit_rps
 
         self.sock = None
         self.conn = None
@@ -104,6 +113,10 @@ class DtlsCoapSession:
 
         self._stop = threading.Event()
         self._reader_thread = None
+
+    def pace(self) -> None:
+        """Sleep one rate-limit interval. Uses _stop so session teardown wakes it."""
+        self._stop.wait(self._min_req_interval)
 
     # ---- lifecycle ---------------------------------------------------
 
