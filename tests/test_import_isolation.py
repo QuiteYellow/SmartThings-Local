@@ -3,6 +3,7 @@ on mqtt_demo/. This copies just those two directories into an empty
 temp dir and imports every module in them there, so a stray
 `from mqtt_demo... import ...` fails loudly instead of silently
 passing because mqtt_demo/ happens to also be on sys.path in-repo."""
+import os
 import shutil
 import subprocess
 import sys
@@ -25,9 +26,13 @@ def test_protocol_and_ocf_import_without_mqtt_demo_present(tmp_path):
     ]
     script = "\n".join(import_lines) + "\nprint('OK')\n"
 
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(tmp_path)
+
     result = subprocess.run(
         [sys.executable, "-c", script],
         cwd=str(tmp_path),
+        env=env,
         capture_output=True, text=True,
     )
     assert result.returncode == 0, (
