@@ -1,4 +1,4 @@
-from samsung_appliance.coap_dtls import (
+from protocol.coap import (
     build_coap, parse_coap, encode_options, block_value, fmt_code,
     TYPE_CON, METHOD_GET, URI_PATH, ACCEPT, CF_CBOR, BLOCK2,
 )
