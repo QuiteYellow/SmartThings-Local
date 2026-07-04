@@ -48,6 +48,12 @@ _OCF_ROOT_CA = str(Path(__file__).parent / 'ocf_root_ca.pem')
 # new resources and field semantics; otherwise quiet.
 DEBUG_BRIDGE = os.environ.get('DEBUG_BRIDGE') == '1'
 
+# Per-block retransmission: send up to this many times before giving up.
+# Each attempt waits at most _BLOCK_ACK_TIMEOUT seconds (capped by the
+# overall deadline). Matches RFC 7252 CON retransmit behaviour.
+_BLOCK_MAX_ATTEMPTS = 3
+_BLOCK_ACK_TIMEOUT  = 4.0
+
 
 class DtlsCoapSession:
     """Single sustained DTLS-CoAP session.
@@ -252,8 +258,8 @@ class DtlsCoapSession:
         with self._send_lock:
             if self.conn is None:
                 raise ConnectionError("DTLS session closed")
-            self.conn.send(datagram)
             try:
+                self.conn.send(datagram)
                 while True:
                     o = self.conn.bio_read(65535)
                     if not o:
@@ -399,28 +405,37 @@ class DtlsCoapSession:
         last_code = None
         last_opts = []
         deadline = time.time() + timeout
+        szx = BLOCK_SZX   # server may negotiate down; track per-transfer
         while True:
-            ev = threading.Event()
+            if num > 0:
+                self.pace()
             container = {}
-            self._pending[tok] = (ev, container)
-            try:
-                mid = self._next_mid()
-                opts = [(URI_PATH, s.encode()) for s in path_segs]
-                for q in query:
-                    opts.append((URI_QUERY, q.encode()))
-                opts.append((ACCEPT, CF_CBOR))
-                if num > 0:
-                    opts.append((BLOCK2, block_value(num, 0, BLOCK_SZX)))
-                self._send_dgram(
-                    build_coap(TYPE_CON, METHOD_GET, mid, tok, opts))
-                wait = max(0.1, deadline - time.time())
-                if not ev.wait(wait):
-                    raise TimeoutError(
-                        f"GET /{'/'.join(path_segs)} block {num} timeout")
-                if 'err' in container:
-                    raise ConnectionError(container['err'])
-            finally:
-                self._pending.pop(tok, None)
+            for attempt in range(_BLOCK_MAX_ATTEMPTS):
+                ev = threading.Event()
+                container = {}
+                self._pending[tok] = (ev, container)
+                try:
+                    mid = self._next_mid()
+                    opts = [(URI_PATH, s.encode()) for s in path_segs]
+                    for q in query:
+                        opts.append((URI_QUERY, q.encode()))
+                    opts.append((ACCEPT, CF_CBOR))
+                    if num > 0:
+                        opts.append((BLOCK2, block_value(num, 0, szx)))
+                    self._send_dgram(
+                        build_coap(TYPE_CON, METHOD_GET, mid, tok, opts))
+                    per_wait = min(_BLOCK_ACK_TIMEOUT,
+                                   max(0.1, deadline - time.time()))
+                    if ev.wait(per_wait):
+                        break  # got a response
+                    remaining = deadline - time.time()
+                    if remaining <= 0 or attempt == _BLOCK_MAX_ATTEMPTS - 1:
+                        raise TimeoutError(
+                            f"GET /{'/'.join(path_segs)} block {num} timeout")
+                finally:
+                    self._pending.pop(tok, None)
+            if 'err' in container:
+                raise ConnectionError(container['err'])
 
             code = container['code']
             payload = container['payload']
@@ -437,6 +452,9 @@ class DtlsCoapSession:
             if b2:
                 bv = int.from_bytes(b2[0], 'big')
                 more = (bv >> 3) & 1
+                server_szx = bv & 0x07
+                if server_szx != szx:
+                    szx = server_szx
             if not more:
                 break
             num += 1
