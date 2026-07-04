@@ -24,14 +24,13 @@ import time
 import cbor2
 
 from .appliances.base import ApplianceDescriptor, bridge_diagnostic_discovery
-from .coap_dtls import DtlsCoapSession, fmt_code
 from .config import ApplianceConfig, SharedConfig
-from .keepalive import KeepaliveTask
 from .logger import bridge_logger
-from .observe_refresh import ObserveRefreshTask
-from .poll_scheduler import PollScheduler
-from .sensors import index_links
-from .state_cache import StateCache
+from protocol.dtls_session import DtlsCoapSession, fmt_code
+from ocf.keepalive import KeepaliveTask
+from ocf.observe_refresh import ObserveRefreshTask
+from ocf.poll_scheduler import PollScheduler
+from ocf.state_cache import StateCache
 
 
 DEBUG_BRIDGE = os.environ.get('DEBUG_BRIDGE') == '1'
@@ -295,7 +294,6 @@ class PushBridge:
         scheduler = PollScheduler(
             sess, self.cache,
             tiers=self.descriptor.poll_tiers,
-            sweep_index_fn=index_links,
             is_active_fn=self.descriptor.is_active,
             logger=self.log,
         )
@@ -357,7 +355,7 @@ class PushBridge:
         # During the seed we want the cache populated without triggering
         # a publish per resource — gate the on_change callback off until
         # the publish gate opens just below.
-        for href, rep in index_links(body).items():
+        for href, rep in StateCache.index_device_tree(body).items():
             if href not in self.cache.links:
                 self.cache.apply_rep(href, rep, source='seed')
         self.last_seed_ts = time.time()

@@ -36,7 +36,7 @@ from typing import Callable, Optional, TYPE_CHECKING
 
 import cbor2
 
-from .coap_dtls import DtlsCoapSession, fmt_code
+from protocol.dtls_session import DtlsCoapSession, fmt_code
 
 if TYPE_CHECKING:
     from .state_cache import StateCache
@@ -61,7 +61,6 @@ class PollScheduler:
                  session: DtlsCoapSession,
                  cache: 'StateCache',
                  tiers: list[PollTier],
-                 sweep_index_fn: Callable[[object], dict[str, dict]],
                  is_active_fn: Optional[Callable[[dict[str, dict]], bool]] = None,
                  logger=None,
                  timeout_s: float = 8.0,
@@ -69,7 +68,6 @@ class PollScheduler:
         self.session = session
         self.cache = cache
         self.tiers = tiers
-        self.sweep_index = sweep_index_fn
         self.is_active_fn = is_active_fn
         self.log = logger
         self.timeout_s = timeout_s
@@ -301,7 +299,7 @@ class PollScheduler:
             self._poll_error_count += 1
             if self.log: self.log.warning("sweep cbor: %s", e)
             return
-        indexed = self.sweep_index(tree)
+        indexed = self.cache.index_device_tree(tree)
         for href, rep in indexed.items():
             with self._defer_lock:
                 if self._defer_until.get(href, 0) > time.monotonic():

@@ -58,6 +58,23 @@ class StateCache:
             merged.update(body)
         return self.apply_rep(href, merged, source='optimistic')
 
+    @staticmethod
+    def index_device_tree(device0_body) -> dict[str, dict]:
+        """Turn a /device/0 CBOR list-of-{href, rep} sweep response into
+        a dict keyed by href. Entry [0] is the device-level rep itself
+        and isn't useful here, so it's skipped.
+
+        Replaces the old standalone sensors.index_links — folded in
+        here because every current and future caller immediately feeds
+        the result into apply_rep on this same cache."""
+        out: dict[str, dict] = {}
+        if not isinstance(device0_body, list):
+            return out
+        for entry in device0_body[1:]:
+            if isinstance(entry, dict) and 'href' in entry:
+                out[entry['href']] = entry.get('rep') or {}
+        return out
+
     def get(self, href: str) -> Optional[dict]:
         with self._lock:
             return self.links.get(href)
