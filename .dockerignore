@@ -1,0 +1,15 @@
+# Build context is the repo root (see mqtt_demo/docker-compose.yml's
+# `context: ..`). The Dockerfile COPYs whole directories (protocol/,
+# ocf/, mqtt_demo/), so anything under them that shouldn't land in the
+# image has to be excluded here explicitly.
+
+# Secrets — never bake these into the image. Mounted at runtime via
+# the /config volume instead.
+**/.env
+certs/
+
+# Local dev cruft.
+**/__pycache__/
+**/*.pyc
+.git/
+.venv/
