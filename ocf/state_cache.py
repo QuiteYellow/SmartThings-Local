@@ -8,15 +8,16 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import Callable, Optional, Protocol
 
-if TYPE_CHECKING:
-    from .appliances.base import ApplianceDescriptor
+
+class _ObservationHook(Protocol):
+    def on_observation(self, state: dict, href: str, rep: dict) -> None: ...
 
 
 class StateCache:
 
-    def __init__(self, descriptor: 'ApplianceDescriptor'):
+    def __init__(self, descriptor: '_ObservationHook'):
         self.descriptor = descriptor
         self.links: dict[str, dict] = {}
         self.last_updated: dict[str, float] = {}
