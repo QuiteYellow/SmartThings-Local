@@ -4,6 +4,12 @@
 
 <img width="778" height="367" alt="image" src="https://github.com/user-attachments/assets/cc1dca15-f272-4625-a13c-2dc82283ff95" />
 
+> **Looking to control your Samsung appliance from Home Assistant?**
+> Use [localthings](https://github.com/mbillow/localthings) — a Home
+> Assistant custom component built on this repo's `protocol/` + `ocf/`
+> layers. This repo is the protocol research project and a
+> self-contained MQTT bridge demo; new appliance support (capability
+> mappings, HA entities) should go to localthings, not here.
 
 > ### Proof of concept — collaborators wanted
 >
@@ -54,11 +60,11 @@ Read the result:
 | Oven | NV7000BS-class (`TP1X_DA-KS-OVEN-0107X`, `mnid=0AJT`) | All entities; hot-tier poll covers door + operational state regardless of cloud reachability |
 | Fridge | ARTIK051_REF_17K (`DA-REF-ART-COMMON-1_20201124`) | Contributed by [@aminorjourney](https://github.com/aminorjourney) (PR #1). Older firmware family; port 49155, minimal `/oic/res` with full tree under `/device/0` |
 
-Other appliances on the same firmware family (washers, dishwashers, AC units) almost certainly speak the same protocol — the auth path and read primitives are common. You'd write one new descriptor in `samsung_appliance/appliances/`.
+Other appliances on the same firmware family (washers, dishwashers, AC units) almost certainly speak the same protocol — the auth path and read primitives are common. You'd write one new descriptor for the `localthings` registry.
 
 ### Firmware families — a limitation
 
-Descriptors are firmware-family-specific. Each file in `samsung_appliance/appliances/` hardcodes the resource layout of one firmware family: which hrefs it polls, which fields it reads, which write surfaces it exposes. There's no runtime feature detection.
+Descriptors are firmware-family-specific. Each descriptor hardcodes the resource layout of one firmware family: which hrefs it polls, which fields it reads, which write surfaces it exposes. There's no runtime feature detection. The three sample descriptors here (`mqtt_demo/samples/`) are frozen references.
 
 **What this means in practice:** if you set `APPLIANCE_<n>_CLASS=fridge` on a fridge that speaks a different firmware family than the one this descriptor was built for, the bridge will start and connect fine, but many sensors will publish as unknown and some controls won't work. Nothing catastrophic — you just get a half-broken HA device card.
 
@@ -162,7 +168,7 @@ APPLIANCE_2_TOPIC=samsung_oven
 APPLIANCE_2_NAME=Samsung Oven
 ```
 
-Each `APPLIANCE_<n>_CLASS` must match a descriptor key in `samsung_appliance/appliances/__init__.py::DESCRIPTORS` — currently `dryer` and `oven`.
+Each `APPLIANCE_<n>_CLASS` must match a descriptor key in `mqtt_demo/samples/__init__.py::DESCRIPTORS` — currently `dryer`, `oven`, and `fridge`.
 
 ---
 
@@ -194,18 +200,18 @@ Set `SSH_HOST`, `REMOTE_DIR`, `APPDATA_DIR` in `.env`. `deploy.sh` extracts thos
 
 ```sh
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python main.py
+.venv/bin/pip install -r mqtt_demo/requirements.txt
+.venv/bin/python -m mqtt_demo
 ```
 
 ### Expected first-run logs
 
 ```
-14:08:42  INFO   samsung_appliance        SmartThings-Local Bridge starting (2 appliances)
-14:08:42  INFO   samsung_appliance          broker = <broker-ip>:1883 (user=<mqtt-user>)
-14:08:42  INFO   samsung_appliance          [1] dryer @ <dryer-ip>:49155 (DTLS) → topic samsung_dryer/*
-14:08:42  INFO   samsung_appliance          [2] oven  @ <oven-ip>:49154 (DTLS) → topic samsung_oven/*
-14:08:42  INFO   samsung_appliance        MQTT connected → <broker-ip>:1883
+14:08:42  INFO   mqtt_demo                SmartThings-Local Bridge starting (2 appliances)
+14:08:42  INFO   mqtt_demo                  broker = <broker-ip>:1883 (user=<mqtt-user>)
+14:08:42  INFO   mqtt_demo                  [1] dryer @ <dryer-ip>:49155 (DTLS) → topic samsung_dryer/*
+14:08:42  INFO   mqtt_demo                  [2] oven  @ <oven-ip>:49154 (DTLS) → topic samsung_oven/*
+14:08:42  INFO   mqtt_demo                MQTT connected → <broker-ip>:1883
 14:08:43  INFO   dryer                    DTLS connected — subscribing 11 paths
 14:08:44  INFO   dryer.<dryer-serial>     identified — serial=…
 14:08:44  INFO   dryer.<dryer-serial>     seeded → 25 links; sensors live
@@ -344,45 +350,52 @@ Gated control entities use HA's `availability_mode: all` against `<prefix>/avail
 ### Repo layout
 
 ```
-main.py                              Entry point — loads config, spawns one PushBridge per appliance
 setup_cert.py                        One-shot cert minting script (live-fetches AC14K_M + UUID)
-samsung_appliance/                   The bridge package
+protocol/                            DTLS-CoAP protocol layer (reusable for non-MQTT bridges)
   __init__.py
+  auth.py                            DTLS client cert setup + authentication
+  dtls_session.py                    DTLS session management, handshake, liveness
+  coap.py                            CoAP wire protocol: message encode/decode, token handling
+ocf/                                 OCF resource + state management (reusable layer)
+  __init__.py
+  state_cache.py                     StateCache — single source of truth for appliance state
+  poll_scheduler.py                  Tiered adaptive polling (hot/warm/cold + sweep)
+  keepalive.py                       CoAP liveness checks (empty-CON pings)
+  observe_refresh.py                 OBSERVE registration management
+mqtt_demo/                           MQTT bridge demo (uses protocol/ + ocf/)
+  __init__.py
+  __main__.py                        Entry point — loads config, spawns one bridge per appliance
   config.py                          SharedConfig + ApplianceConfig dataclasses
   logger.py                          Tagged logger helpers
-  bridge.py                          PushBridge — one DTLS session per appliance, descriptor-driven
-  coap_dtls.py                       DTLS-CoAP session: handshake, token-stable Block2 GET, POST, OBSERVE
-  sensors.py                         /device/0 link-dict indexer (shared util)
-  appliances/
-    __init__.py                      DESCRIPTORS registry + get_descriptor()
-    base.py                          ApplianceDescriptor dataclass + HA discovery helpers
+  bridge.py                          Bridge — one DTLS session per appliance, descriptor-driven
+  descriptor.py                      ApplianceDescriptor dataclass + HA discovery helpers
+  samples/
+    __init__.py                      Sample DESCRIPTORS registry (frozen reference implementations)
     dryer.py                         Dryer descriptor (paths, flatten, discovery, commands)
     oven.py                          Oven descriptor
-Dockerfile                           Container build (python:3.11-slim + 3 deps)
-docker-compose.yml                   One service: smartthings-local
-deploy.sh                            tar + ssh + docker compose up --build
-.env.example                         Template — copy to .env, fill in
+    fridge.py                        Fridge descriptor (ARTIK051 firmware family)
+  Dockerfile                         Container build (python:3.11-slim + 3 deps)
+  docker-compose.yml                 One service: smartthings-local
+  deploy.sh                          tar + ssh + docker compose up --build
+  requirements.txt                   Python dependencies for the bridge
+  .env.example                       Template — copy to .env, fill in
 ```
 
-`certs/` is gitignored. Drop the privileged client cert + key there; the container mounts that directory read-only at `/config`.
+`certs/` is gitignored. Drop the privileged client cert + key there; the container mounts that directory read-only at `/config`. See [`localthings`](https://github.com/mbillow/localthings) for production HA integration.
 
 ---
 
-## Adding a new appliance class
+## Adding appliance support
 
-The bridge is appliance-agnostic. Adding e.g. a washer is mechanical:
+The three descriptors in `mqtt_demo/samples/` (dryer, oven, fridge) are
+frozen reference implementations — enough to exercise both the newer
+Tizen RT 3.x family and the older ARTIK051 family, proving the
+`protocol/` + `ocf/` layers generalize across firmware generations.
+They are not updated for new appliance models.
 
-1. Capture the appliance's `/device/0` to see what resources/fields it exposes. Use the GET helpers in `samsung_appliance/coap_dtls.py` against your authenticated session.
-2. Create `samsung_appliance/appliances/washer.py` with:
-   - `OBSERVE_PATHS` — list of `[seg, …]` paths to subscribe to (only `/<x>/vs/0` resources push; the OCF-standard `/<x>/0` siblings register but never fire)
-   - `flatten(links) -> dict` — map link dict to the flat sensor dict that goes on MQTT
-   - `build_discovery(prefix, ha_prefix, name) -> [(topic, payload), …]` — HA discovery configs
-   - `command_handlers() -> {suffix: fn(payload, links)}` — MQTT commands → `(path_segs, body_dict)`
-   - A module-level `WASHER = ApplianceDescriptor(name='washer', default_observe_port=…, …)`
-3. Add `WASHER` to `DESCRIPTORS` in `samsung_appliance/appliances/__init__.py`.
-4. Add `APPLIANCE_<n>_CLASS=washer` to `.env`, bump `APPLIANCE_COUNT`, redeploy.
-
-For a new appliance class also declare a `poll_tiers: list[PollTier]` and (optionally) an `is_active(links) -> bool` predicate on the descriptor. Hot-tier resources are whatever needs sub-second freshness for HA UX; warm covers everything else that's not static; the `/device/0` sweep tier catches anything you forgot. The descriptor pattern handles everything else — DTLS, MQTT, HA discovery, optimistic writes, Block2 reads, OBSERVE accelerator, reconnect, liveness pings.
+**To add support for a new appliance, submit it to
+[localthings](https://github.com/mbillow/localthings)**, which owns
+the capability registry and Home Assistant integration.
 
 ---
 
@@ -393,7 +406,7 @@ These each looked like obvious improvements at some point. Each one broke someth
 - **Don't add OBSERVE subscriptions on OCF-standard `/<x>/0` paths.** They register successfully but never push. Use the Samsung `/<x>/vs/0` siblings (which do).
 - **Don't assume OBSERVE silence means the appliance is broken.** When the appliance can't reach Samsung's cloud, its OBSERVE notify dispatch goes quiet even though the local DTLS session, GETs, POSTs, and the cache continue to work normally (measured at `~14 req/s` dryer / `~8 req/s` oven with 200/200 GETs successful while firewalled). The polling tiers are the structural answer to this; treat OBSERVE strictly as an optional accelerator.
 - **Don't touch `/oic/sec/*` (doxm, pstat, cred, acl).** The bridge doesn't, and you shouldn't from helper scripts either — those resources have wedge/brick risk on Samsung's RT-OCF security stack. The bridge surfaces are strictly `/<x>/vs/0` and `/device/0`.
-- **Don't run two clients against the same appliance simultaneously.** Samsung's RT-OCF DTLS allows one active session per peer; a second handshake will get the device to drop the new socket. If HA seems to flap, check whether you've got `main.py` running locally AND the Docker container up.
+- **Don't run two clients against the same appliance simultaneously.** Samsung's RT-OCF DTLS allows one active session per peer; a second handshake will get the device to drop the new socket. If HA seems to flap, check whether you've got `python -m mqtt_demo` running locally AND the Docker container up.
 - **Don't expect parity from every write surface.** Samsung's firmware accepts a lot of writes with `2.04 Changed` but only some of them stick — power, child-lock, and remote-control writes are accepted-then-reverted because they're hardware-mirrored. The bridge's optimistic-publish-then-verify pattern handles this transparently: HA briefly shows the new value, the 3s fetch-back republishes the actual value, HA reverts.
 
 ---
