@@ -9,7 +9,7 @@ Adding a new appliance class:
 main.py imports get_descriptor(name) to look up the descriptor at
 startup; the bridge itself stays class-agnostic.
 """
-from .base import ApplianceDescriptor
+from ..descriptor import ApplianceDescriptor
 from .dryer import DRYER
 from .oven import OVEN
 from .fridge import FRIDGE

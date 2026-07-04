@@ -23,10 +23,10 @@ import threading
 
 import paho.mqtt.client as mqtt
 
-from samsung_appliance.appliances import get_descriptor
-from samsung_appliance.bridge import PushBridge
-from samsung_appliance.config import SharedConfig, load_appliances
-from samsung_appliance.logger import logger
+from mqtt_demo.samples import get_descriptor
+from mqtt_demo.bridge import PushBridge
+from mqtt_demo.config import SharedConfig, load_appliances
+from mqtt_demo.logger import logger
 
 
 def main():

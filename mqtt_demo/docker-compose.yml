@@ -1,6 +1,8 @@
 services:
   smartthings-local:
-    build: .
+    build:
+      context: ..
+      dockerfile: mqtt_demo/Dockerfile
     container_name: smartthings-local
     restart: unless-stopped
 

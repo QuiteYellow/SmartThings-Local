@@ -33,7 +33,9 @@ from .coap import (
     encode_options, parse_coap, build_coap, block_value, fmt_code,
     split_dtls as _split_dtls,
 )
-from samsung_appliance.logger import logger
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 # Diagnostic logging — when DEBUG_BRIDGE=1 in env, the bridge dumps

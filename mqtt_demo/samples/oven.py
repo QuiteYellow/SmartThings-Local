@@ -23,7 +23,7 @@ Untested writes are gated behind <prefix>/remote_available so HA
 disables them in the UI when the oven's Remote Control switch is off."""
 import time
 
-from .base import (
+from ..descriptor import (
     ApplianceDescriptor,
     avail_base,
     avail_with_cycle,
@@ -31,7 +31,7 @@ from .base import (
     device_block,
     encode,
 )
-from ..poll_scheduler import PollTier
+from ocf.poll_scheduler import PollTier
 
 
 # ---------------------------------------------------------------------

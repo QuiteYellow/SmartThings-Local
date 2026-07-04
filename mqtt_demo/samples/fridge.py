@@ -24,13 +24,13 @@ Key differences from newer Tizen RT firmware:
 """
 import time
 
-from .base import (
+from ..descriptor import (
     ApplianceDescriptor,
     avail_base,
     device_block,
     encode,
 )
-from ..poll_scheduler import PollTier
+from ocf.poll_scheduler import PollTier
 
 
 MODEL = 'ARTIK051_REF_17K'

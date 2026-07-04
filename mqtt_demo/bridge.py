@@ -23,14 +23,16 @@ import time
 
 import cbor2
 
-from .appliances.base import ApplianceDescriptor, bridge_diagnostic_discovery
-from .config import ApplianceConfig, SharedConfig
-from .logger import bridge_logger
 from protocol.dtls_session import DtlsCoapSession, fmt_code
+
 from ocf.keepalive import KeepaliveTask
 from ocf.observe_refresh import ObserveRefreshTask
 from ocf.poll_scheduler import PollScheduler
 from ocf.state_cache import StateCache
+
+from .descriptor import ApplianceDescriptor, bridge_diagnostic_discovery
+from .config import ApplianceConfig, SharedConfig
+from .logger import bridge_logger
 
 
 DEBUG_BRIDGE = os.environ.get('DEBUG_BRIDGE') == '1'

@@ -6,14 +6,14 @@ samsung_dryer/{bridge,sensors,discovery}.py modules into one place.
 """
 import time
 
-from .base import (
+from ..descriptor import (
     ApplianceDescriptor,
     avail_base,
     avail_with_remote,
     device_block,
     encode,
 )
-from ..poll_scheduler import PollTier
+from ocf.poll_scheduler import PollTier
 
 
 # --- OBSERVE paths -----------------------------------------------------
