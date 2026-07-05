@@ -113,10 +113,14 @@ class DtlsCoapSession:
 
         self._stop = threading.Event()
         self._reader_thread = None
+        self._last_send_ts = 0.0
 
     def pace(self) -> None:
-        """Sleep one rate-limit interval. Uses _stop so session teardown wakes it."""
-        self._stop.wait(self._min_req_interval)
+        """Sleep only the part of the rate-limit interval not already consumed
+        since the last real send. Uses _stop so session teardown wakes it."""
+        remaining = self._min_req_interval - (time.monotonic() - self._last_send_ts)
+        if remaining > 0:
+            self._stop.wait(remaining)
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -273,6 +277,7 @@ class DtlsCoapSession:
                 raise ConnectionError("DTLS session closed")
             try:
                 self.conn.send(datagram)
+                self._last_send_ts = time.monotonic()
                 while True:
                     o = self.conn.bio_read(65535)
                     if not o:
