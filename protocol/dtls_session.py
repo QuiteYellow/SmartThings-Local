@@ -448,8 +448,17 @@ class DtlsCoapSession:
                         break  # got a response
                     remaining = deadline - time.time()
                     if remaining <= 0 or attempt == _BLOCK_MAX_ATTEMPTS - 1:
+                        logger.debug(
+                            "GET %s /%s block %d: timed out after %d attempt(s)",
+                            self.host, '/'.join(path_segs), num, attempt + 1,
+                        )
                         raise TimeoutError(
                             f"GET /{'/'.join(path_segs)} block {num} timeout")
+                    logger.debug(
+                        "GET %s /%s block %d: attempt %d/%d timeout, retrying",
+                        self.host, '/'.join(path_segs), num,
+                        attempt + 1, _BLOCK_MAX_ATTEMPTS,
+                    )
                 finally:
                     self._pending.pop(tok, None)
             if 'err' in container:
