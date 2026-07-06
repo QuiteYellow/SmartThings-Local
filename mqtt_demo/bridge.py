@@ -23,12 +23,12 @@ import time
 
 import cbor2
 
-from protocol.dtls_session import DtlsCoapSession, fmt_code
+from smartthings_local.protocol.dtls_session import DtlsCoapSession, fmt_code
 
-from ocf.keepalive import KeepaliveTask
-from ocf.observe_refresh import ObserveRefreshTask
-from ocf.poll_scheduler import PollScheduler
-from ocf.state_cache import StateCache
+from smartthings_local.ocf.keepalive import KeepaliveTask
+from smartthings_local.ocf.observe_refresh import ObserveRefreshTask
+from smartthings_local.ocf.poll_scheduler import PollScheduler
+from smartthings_local.ocf.state_cache import StateCache
 
 from .descriptor import ApplianceDescriptor, bridge_diagnostic_discovery
 from .config import ApplianceConfig, SharedConfig

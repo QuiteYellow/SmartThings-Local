@@ -1,5 +1,5 @@
 # tests/test_state_cache.py
-from ocf.state_cache import StateCache
+from smartthings_local.ocf.state_cache import StateCache
 
 
 class _FakeDescriptor:

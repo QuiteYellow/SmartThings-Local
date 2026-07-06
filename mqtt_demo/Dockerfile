@@ -8,9 +8,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Application code — build context is the repo root (see
 # docker-compose.yml's `context: ..`) since mqtt_demo/ depends on the
-# protocol/ and ocf/ library packages that live alongside it.
-COPY protocol/ ./protocol/
-COPY ocf/ ./ocf/
+# smartthings_local library package that lives alongside it.
+COPY smartthings_local/ ./smartthings_local/
 COPY mqtt_demo/ ./mqtt_demo/
 
 # /config holds the ab0b0ac4 client cert + key. Mount from the host so
