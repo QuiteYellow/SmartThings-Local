@@ -20,13 +20,25 @@ delivered via the on_notification callback.
 """
 import os
 import socket
-import struct
 import threading
 import time
+from pathlib import Path
 
 from OpenSSL import SSL
 
-from .logger import logger
+from .coap import (
+    URI_PATH, URI_QUERY, OBSERVE, CONTENT_FORMAT, ACCEPT, BLOCK2, SIZE2,
+    TYPE_CON, TYPE_NON, TYPE_ACK, TYPE_RST,
+    METHOD_GET, METHOD_POST, CF_CBOR,
+    OBSERVE_REGISTER, OBSERVE_DEREGISTER, BLOCK_SZX,
+    encode_options, parse_coap, build_coap, block_value, fmt_code,
+    split_dtls as _split_dtls,
+)
+import logging
+
+logger = logging.getLogger(__name__)
+
+_OCF_ROOT_CA = str(Path(__file__).parent / 'ocf_root_ca.pem')
 
 
 # Diagnostic logging — when DEBUG_BRIDGE=1 in env, the bridge dumps
@@ -36,137 +48,18 @@ from .logger import logger
 # new resources and field semantics; otherwise quiet.
 DEBUG_BRIDGE = os.environ.get('DEBUG_BRIDGE') == '1'
 
+# Per-block retransmission: send up to this many times before giving up.
+# Each attempt waits at most _BLOCK_ACK_TIMEOUT seconds (capped by the
+# overall deadline). Matches RFC 7252 CON retransmit behaviour.
+_BLOCK_MAX_ATTEMPTS = 3
+_BLOCK_ACK_TIMEOUT  = 4.0
 
-# CoAP option numbers (RFC 7252 + 7641 + 7959)
-URI_PATH       = 11
-URI_QUERY      = 15
-OBSERVE        =  6
-CONTENT_FORMAT = 12
-ACCEPT         = 17
-BLOCK2         = 23
-SIZE2          = 28
-
-# CoAP message types
-TYPE_CON = 0
-TYPE_NON = 1
-TYPE_ACK = 2
-TYPE_RST = 3
-
-# CoAP method codes
-METHOD_GET  = 0x01
-METHOD_POST = 0x02
-
-# CoAP content-format value for application/cbor
-CF_CBOR = b'\x3c'
-
-# OBSERVE option values (RFC 7641 §2)
-OBSERVE_REGISTER   = b''           # register / refresh
-OBSERVE_DEREGISTER = bytes([1])    # deregister
-
-# Block2 SZX=6 → 1024-byte blocks. The largest size Samsung's RT-OCF
-# will honour and the only one the probes have validated end-to-end.
-BLOCK_SZX = 6
-
-
-def _vlen(v):
-    """Variable-length integer encoder used in option deltas + lengths."""
-    if v < 13:    return v, b''
-    if v < 269:   return 13, bytes([v - 13])
-    return 14, struct.pack('>H', v - 269)
-
-
-def encode_options(opts):
-    """Encode a list of (option_number, value_bytes) tuples."""
-    out = b''
-    prev = 0
-    for n, val in sorted(opts, key=lambda x: x[0]):
-        d, dx = _vlen(n - prev)
-        l, lx = _vlen(len(val))
-        out += bytes([(d << 4) | l]) + dx + lx + val
-        prev = n
-    return out
-
-
-def parse_coap(data):
-    """Decode a CoAP datagram. Returns (mtype, code, mid, token,
-    options, payload). options is a list of (num, value_bytes)."""
-    mt = (data[0] >> 4) & 0x03
-    tkl = data[0] & 0x0F
-    code = data[1]
-    mid = int.from_bytes(data[2:4], 'big')
-    tok = data[4:4 + tkl]
-    i = 4 + tkl
-    opts = []
-    prev = 0
-    payload = b''
-    while i < len(data):
-        b = data[i]
-        if b == 0xFF:
-            payload = data[i + 1:]
-            break
-        d_nib, l_nib = b >> 4, b & 0x0F
-        i += 1
-        if d_nib == 13:
-            delta = 13 + data[i]; i += 1
-        elif d_nib == 14:
-            delta = 269 + int.from_bytes(data[i:i + 2], 'big'); i += 2
-        elif d_nib == 15:
-            raise ValueError("reserved option delta nibble 15")
-        else:
-            delta = d_nib
-        if l_nib == 13:
-            length = 13 + data[i]; i += 1
-        elif l_nib == 14:
-            length = 269 + int.from_bytes(data[i:i + 2], 'big'); i += 2
-        elif l_nib == 15:
-            raise ValueError("reserved option length nibble 15")
-        else:
-            length = l_nib
-        num = prev + delta
-        opts.append((num, data[i:i + length]))
-        i += length
-        prev = num
-    return mt, code, mid, tok, opts, payload
-
-
-def build_coap(mtype, code, mid, token, options, payload=b''):
-    """Build a CoAP datagram. mtype: CON/NON/ACK/RST. token: bytes (may
-    be empty for ACK). options: list of (num, value_bytes)."""
-    tkl = len(token)
-    hdr = bytes([(1 << 6) | (mtype << 4) | tkl, code,
-                 (mid >> 8) & 0xFF, mid & 0xFF])
-    body = hdr + token + encode_options(options)
-    if payload:
-        body += b'\xFF' + payload
-    return body
-
-
-def block_value(num, more, szx):
-    """Encode a CoAP Block-N option value."""
-    v = (num << 4) | ((more & 1) << 3) | (szx & 7)
-    if v <= 0xFF:    return bytes([v])
-    if v <= 0xFFFF:  return struct.pack('>H', v)
-    return struct.pack('>I', v)[1:]
-
-
-def fmt_code(c):
-    """0x45 → '2.05', 0x84 → '4.04'. Used in log lines."""
-    return f"{c >> 5}.{c & 0x1F:02d}"
-
-
-def _split_dtls(buf):
-    """Split a UDP datagram that contains one-or-more DTLS records.
-    OpenSSL sometimes hands the BIO multiple records back-to-back; we
-    must send each as its own UDP datagram or TizenRT drops them."""
-    o, out = 0, []
-    while o + 13 <= len(buf):
-        L = int.from_bytes(buf[o + 11:o + 13], 'big')
-        end = o + 13 + L
-        if end > len(buf):
-            break
-        out.append(buf[o:end])
-        o = end
-    return out
+# Inter-request pacing: minimum seconds between CoAP CON sends on one session.
+# Samsung's RT-OCF stacks drop requests when hit faster than their firmware
+# ceiling (dryer ~14 req/s, oven ~8 req/s, dishwasher unknown). 5 req/s
+# (200 ms) is conservative enough for all tested devices; tune per device
+# once the ceiling is measured empirically.
+_DEFAULT_RATE_LIMIT_RPS = 5.0
 
 
 class DtlsCoapSession:
@@ -187,13 +80,15 @@ class DtlsCoapSession:
     MAX_BLOCKS = 32              # safety bound for Block2 fetches
 
     def __init__(self, host, port, cert_path, key_path,
-                 on_notification=None, mtu=1200):
+                 on_notification=None, mtu=1200,
+                 rate_limit_rps: float = _DEFAULT_RATE_LIMIT_RPS):
         self.host = host
         self.port = port
         self.cert_path = str(cert_path)
         self.key_path  = str(key_path)
         self.on_notification = on_notification  # fn(href, payload_bytes)
         self.mtu = mtu
+        self._min_req_interval = 1.0 / rate_limit_rps
 
         self.sock = None
         self.conn = None
@@ -218,6 +113,14 @@ class DtlsCoapSession:
 
         self._stop = threading.Event()
         self._reader_thread = None
+        self._last_send_ts = 0.0
+
+    def pace(self) -> None:
+        """Sleep only the part of the rate-limit interval not already consumed
+        since the last real send. Uses _stop so session teardown wakes it."""
+        remaining = self._min_req_interval - (time.monotonic() - self._last_send_ts)
+        if remaining > 0:
+            self._stop.wait(remaining)
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -225,9 +128,13 @@ class DtlsCoapSession:
         """DTLS handshake. Blocks up to HANDSHAKE_TIMEOUT_S. Raises
         ConnectionError / TimeoutError on failure."""
         ctx = SSL.Context(SSL.DTLS_METHOD)
-        ctx.set_verify(SSL.VERIFY_NONE, lambda *_: True)
-        # @SECLEVEL=0 — the AC14K_M-rooted chain is SHA-1 signed, which
-        # OpenSSL 3.x's default security level rejects.
+
+        ctx.load_verify_locations(_OCF_ROOT_CA)
+        ctx.set_verify(SSL.VERIFY_PEER, lambda conn, cert, err, depth, ok: ok)
+        # @SECLEVEL=0 permits SHA-1 in Samsung's server cert chain (AC14K_M
+        # intermediate is SHA-1 signed). This is the only channel that reaches
+        # the OpenSSL instance cryptography bundles — ctypes and cffi bindings
+        # do not expose SSL_CTX_set_security_level on this build.
         ctx.set_cipher_list(b'ECDHE-ECDSA-AES128-GCM-SHA256:@SECLEVEL=0')
         ctx.use_certificate_chain_file(self.cert_path)
         ctx.use_privatekey_file(self.key_path)
@@ -368,8 +275,9 @@ class DtlsCoapSession:
         with self._send_lock:
             if self.conn is None:
                 raise ConnectionError("DTLS session closed")
-            self.conn.send(datagram)
             try:
+                self.conn.send(datagram)
+                self._last_send_ts = time.monotonic()
                 while True:
                     o = self.conn.bio_read(65535)
                     if not o:
@@ -515,28 +423,46 @@ class DtlsCoapSession:
         last_code = None
         last_opts = []
         deadline = time.time() + timeout
+        szx = BLOCK_SZX   # server may negotiate down; track per-transfer
         while True:
-            ev = threading.Event()
+            if num > 0:
+                self.pace()
             container = {}
-            self._pending[tok] = (ev, container)
-            try:
-                mid = self._next_mid()
-                opts = [(URI_PATH, s.encode()) for s in path_segs]
-                for q in query:
-                    opts.append((URI_QUERY, q.encode()))
-                opts.append((ACCEPT, CF_CBOR))
-                if num > 0:
-                    opts.append((BLOCK2, block_value(num, 0, BLOCK_SZX)))
-                self._send_dgram(
-                    build_coap(TYPE_CON, METHOD_GET, mid, tok, opts))
-                wait = max(0.1, deadline - time.time())
-                if not ev.wait(wait):
-                    raise TimeoutError(
-                        f"GET /{'/'.join(path_segs)} block {num} timeout")
-                if 'err' in container:
-                    raise ConnectionError(container['err'])
-            finally:
-                self._pending.pop(tok, None)
+            for attempt in range(_BLOCK_MAX_ATTEMPTS):
+                ev = threading.Event()
+                container = {}
+                self._pending[tok] = (ev, container)
+                try:
+                    mid = self._next_mid()
+                    opts = [(URI_PATH, s.encode()) for s in path_segs]
+                    for q in query:
+                        opts.append((URI_QUERY, q.encode()))
+                    opts.append((ACCEPT, CF_CBOR))
+                    if num > 0:
+                        opts.append((BLOCK2, block_value(num, 0, szx)))
+                    self._send_dgram(
+                        build_coap(TYPE_CON, METHOD_GET, mid, tok, opts))
+                    per_wait = min(_BLOCK_ACK_TIMEOUT,
+                                   max(0.1, deadline - time.time()))
+                    if ev.wait(per_wait):
+                        break  # got a response
+                    remaining = deadline - time.time()
+                    if remaining <= 0 or attempt == _BLOCK_MAX_ATTEMPTS - 1:
+                        logger.debug(
+                            "GET %s /%s block %d: timed out after %d attempt(s)",
+                            self.host, '/'.join(path_segs), num, attempt + 1,
+                        )
+                        raise TimeoutError(
+                            f"GET /{'/'.join(path_segs)} block {num} timeout")
+                    logger.debug(
+                        "GET %s /%s block %d: attempt %d/%d timeout, retrying",
+                        self.host, '/'.join(path_segs), num,
+                        attempt + 1, _BLOCK_MAX_ATTEMPTS,
+                    )
+                finally:
+                    self._pending.pop(tok, None)
+            if 'err' in container:
+                raise ConnectionError(container['err'])
 
             code = container['code']
             payload = container['payload']
@@ -553,6 +479,9 @@ class DtlsCoapSession:
             if b2:
                 bv = int.from_bytes(b2[0], 'big')
                 more = (bv >> 3) & 1
+                server_szx = bv & 0x07
+                if server_szx != szx:
+                    szx = server_szx
             if not more:
                 break
             num += 1

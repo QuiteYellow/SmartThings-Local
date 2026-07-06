@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..poll_scheduler import PollTier
+    from ocf.poll_scheduler import PollTier
 
 
 @dataclass

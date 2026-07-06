@@ -17,7 +17,7 @@ from __future__ import annotations
 import threading
 from typing import Optional
 
-from .coap_dtls import DtlsCoapSession
+from protocol.dtls_session import DtlsCoapSession
 
 
 class ObserveRefreshTask:

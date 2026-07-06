@@ -8,15 +8,16 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import Callable, Optional, Protocol
 
-if TYPE_CHECKING:
-    from .appliances.base import ApplianceDescriptor
+
+class _ObservationHook(Protocol):
+    def on_observation(self, state: dict, href: str, rep: dict) -> None: ...
 
 
 class StateCache:
 
-    def __init__(self, descriptor: 'ApplianceDescriptor'):
+    def __init__(self, descriptor: '_ObservationHook'):
         self.descriptor = descriptor
         self.links: dict[str, dict] = {}
         self.last_updated: dict[str, float] = {}
@@ -57,6 +58,23 @@ class StateCache:
             merged = dict(self.links.get(href) or {})
             merged.update(body)
         return self.apply_rep(href, merged, source='optimistic')
+
+    @staticmethod
+    def index_device_tree(device0_body) -> dict[str, dict]:
+        """Turn a /device/0 CBOR list-of-{href, rep} sweep response into
+        a dict keyed by href. Entry [0] is the device-level rep itself
+        and isn't useful here, so it's skipped.
+
+        Replaces the old standalone sensors.index_links — folded in
+        here because every current and future caller immediately feeds
+        the result into apply_rep on this same cache."""
+        out: dict[str, dict] = {}
+        if not isinstance(device0_body, list):
+            return out
+        for entry in device0_body[1:]:
+            if isinstance(entry, dict) and 'href' in entry:
+                out[entry['href']] = entry.get('rep') or {}
+        return out
 
     def get(self, href: str) -> Optional[dict]:
         with self._lock:

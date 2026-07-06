@@ -3,8 +3,8 @@
 Tiers are descriptor-declared (hot/warm/cold + sweep). Per tick:
 each tier whose deadline has passed polls all its paths sequentially
 on the shared session, writing into the StateCache. The sweep tier
-issues one Block2 GET of /device/0 and uses index_links to fan its
-result into many href reps.
+issues one Block2 GET of /device/0 and uses
+StateCache.index_device_tree to fan its result into many href reps.
 
 Adaptive cadence: when descriptor.is_active(cache.links) returns True
 and tier.active_interval_s is set, that tier uses the tighter cadence.
@@ -36,7 +36,7 @@ from typing import Callable, Optional, TYPE_CHECKING
 
 import cbor2
 
-from .coap_dtls import DtlsCoapSession, fmt_code
+from protocol.dtls_session import DtlsCoapSession, fmt_code
 
 if TYPE_CHECKING:
     from .state_cache import StateCache
@@ -61,7 +61,6 @@ class PollScheduler:
                  session: DtlsCoapSession,
                  cache: 'StateCache',
                  tiers: list[PollTier],
-                 sweep_index_fn: Callable[[object], dict[str, dict]],
                  is_active_fn: Optional[Callable[[dict[str, dict]], bool]] = None,
                  logger=None,
                  timeout_s: float = 8.0,
@@ -69,7 +68,6 @@ class PollScheduler:
         self.session = session
         self.cache = cache
         self.tiers = tiers
-        self.sweep_index = sweep_index_fn
         self.is_active_fn = is_active_fn
         self.log = logger
         self.timeout_s = timeout_s
@@ -220,11 +218,13 @@ class PollScheduler:
     def _do_tier(self, tier: PollTier) -> None:
         timeout = self._tier_timeout(tier)
         cooldown = self._cooldown_for(tier)
-        for path in tier.paths:
+        for i, path in enumerate(tier.paths):
             href = '/' + '/'.join(path)
             with self._defer_lock:
                 if self._defer_until.get(href, 0) > time.monotonic():
                     continue
+            if i > 0:
+                self.session.pace()
             self._poll_count += 1
             t0 = time.monotonic()
             try:
@@ -301,7 +301,7 @@ class PollScheduler:
             self._poll_error_count += 1
             if self.log: self.log.warning("sweep cbor: %s", e)
             return
-        indexed = self.sweep_index(tree)
+        indexed = self.cache.index_device_tree(tree)
         for href, rep in indexed.items():
             with self._defer_lock:
                 if self._defer_until.get(href, 0) > time.monotonic():

@@ -20,8 +20,15 @@
 # certs in $APPDATA_DIR are preserved.
 set -e
 
-if [ ! -f .env ]; then
-    echo "Error: .env file not found. Copy .env.example to .env and configure it."
+# This script lives in mqtt_demo/ but the build context is the repo
+# root (mqtt_demo/docker-compose.yml uses `context: ..`, since the
+# image needs the protocol/ and ocf/ library packages alongside
+# mqtt_demo/). Run everything from the repo root so the tar allowlist
+# and remote layout line up with that context.
+cd "$(dirname "$0")/.."
+
+if [ ! -f mqtt_demo/.env ]; then
+    echo "Error: mqtt_demo/.env file not found. Copy mqtt_demo/.env.example to mqtt_demo/.env and configure it."
     exit 1
 fi
 
@@ -29,7 +36,7 @@ fi
 # Sourcing would tokenize unquoted spaces in values (e.g.
 # `APPLIANCE_1_NAME=Samsung Dryer`) as shell commands.
 get_env() {
-    grep -E "^${1}=" .env | head -1 | cut -d= -f2-
+    grep -E "^${1}=" mqtt_demo/.env | head -1 | cut -d= -f2-
 }
 SSH_HOST=$(get_env SSH_HOST)
 REMOTE_DIR=$(get_env REMOTE_DIR)
@@ -44,22 +51,21 @@ ssh "${SSH_HOST}" mkdir -p "${REMOTE_DIR}" "${APPDATA_DIR}"
 
 # Source code — explicit allowlist instead of an excludelist. Anything
 # else in the repo (research files, certs, logs, the .git dir) stays
-# local.
+# local. protocol/ and ocf/ are the library packages mqtt_demo/ imports
+# from; they need to land as REMOTE_DIR's siblings of mqtt_demo/ so the
+# compose file's `context: ..` resolves the same way it does locally.
 COPYFILE_DISABLE=1 tar cz \
-    main.py \
-    samsung_appliance/ \
-    Dockerfile \
-    docker-compose.yml \
-    requirements.txt \
-    deploy.sh \
+    protocol/ \
+    ocf/ \
+    mqtt_demo/ \
     README.md \
-    .env.example \
     .gitignore \
+    .dockerignore \
   | ssh "${SSH_HOST}" "cd ${REMOTE_DIR} && tar xz && find . -name '._*' -delete"
 
 # Ship .env separately and lock it down on the remote.
-scp .env "${SSH_HOST}:${REMOTE_DIR}/.env"
-ssh "${SSH_HOST}" "chmod 600 ${REMOTE_DIR}/.env"
+scp mqtt_demo/.env "${SSH_HOST}:${REMOTE_DIR}/mqtt_demo/.env"
+ssh "${SSH_HOST}" "chmod 600 ${REMOTE_DIR}/mqtt_demo/.env"
 
 # Verify certs are present on the remote — they have to be uploaded
 # once before the first build.
@@ -74,7 +80,7 @@ if ! ssh "${SSH_HOST}" "test -s ${APPDATA_DIR}/client_fullchain.pem && test -s $
 fi
 
 echo "Rebuilding container…"
-ssh "${SSH_HOST}" "cd ${REMOTE_DIR} && docker compose up -d --build"
+ssh "${SSH_HOST}" "cd ${REMOTE_DIR}/mqtt_demo && docker compose up -d --build"
 
 echo "Done."
-echo "Logs:  ssh ${SSH_HOST} 'cd ${REMOTE_DIR} && docker compose logs -f'"
+echo "Logs:  ssh ${SSH_HOST} 'cd ${REMOTE_DIR}/mqtt_demo && docker compose logs -f'"

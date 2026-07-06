@@ -1,7 +1,7 @@
 """Stdout logging — works correctly under Docker's PYTHONUNBUFFERED=1.
 
 Two logger families share the root handler:
-  * `samsung_appliance` (and its children) for module-level lines —
+  * `mqtt_demo` (and its children) for module-level lines —
     DTLS warnings, generic startup chatter, MQTT plumbing.
   * `<class>.<serial>` for per-appliance bridge lines — e.g.
     `dryer.<serial>`. Each PushBridge gets its own such logger
@@ -58,7 +58,7 @@ _handler.setFormatter(_LevelColourFormatter(
 
 logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 
-logger = logging.getLogger("samsung_appliance")
+logger = logging.getLogger("mqtt_demo")
 
 
 def bridge_logger(klass: str, serial: str | None = None) -> logging.Logger:
