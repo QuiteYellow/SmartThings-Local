@@ -1,25 +1,56 @@
 # SmartThings-Local
 
-**Local-first Home Assistant integration for newer-generation Samsung connected appliances.** One process supervises multiple appliances (dryer + oven currently), each over its own CoAP-DTLS session, publishing state + writes through MQTT with HA auto-discovery — no SmartThings cloud round-trip for any of it.
+**`smartthings-local` is a Python library for local, cloud-free control of newer-generation Samsung connected appliances over cert-authenticated CoAP-DTLS.** It gives you the DTLS-CoAP transport, a tiered polling + OBSERVE state layer, and one-command identity-cert minting — everything needed to read state from and write commands to a Samsung dryer, oven, fridge, etc. on your LAN, with no SmartThings cloud round-trip.
+
+The repo also ships a self-contained **reference bridge demo** (`mqtt_demo/`) that turns the library into auto-discovered Home Assistant entities over MQTT — one process supervising multiple appliances, each on its own DTLS session.
 
 <img width="778" height="367" alt="image" src="https://github.com/user-attachments/assets/cc1dca15-f272-4625-a13c-2dc82283ff95" />
 
-> **Looking to control your Samsung appliance from Home Assistant?**
+> **Just want to control your Samsung appliance from Home Assistant?**
 > Use [localthings](https://github.com/mbillow/localthings) — a Home
-> Assistant custom component built on this repo's `protocol/` + `ocf/`
-> layers. This repo is the protocol research project and a
+> Assistant custom component built on the `smartthings-local` package.
+> This repo is the protocol research project, the library itself, and a
 > self-contained MQTT bridge demo; new appliance support (capability
 > mappings, HA entities) should go to localthings, not here.
 
-> ### Proof of concept — collaborators wanted
->
-> This is working code running in my home and I rely on it daily, but it's a **proof of concept**, not a polished product. No unit tests; one person's hardware as the validation set (one dryer model, one oven model); hand-rolled MQTT-based integration instead of a proper HA custom component; "wired-but-untested" comments scattered through the oven descriptor; brittle to per-firmware quirks (the "oven doesn't push OBSERVE on options writes" finding is the kind of thing that needs ongoing care).
->
-> **I would love for someone to take this further and build a proper HA integration out of it.** All the protocol research is done — DTLS auth via Samsung's published cloud identity, token-stable Block2 reads, OBSERVE-then-fetchback notifications, write semantics, the optimistic-publish-then-verify pattern, brick-avoiding resource boundaries — and the descriptor pattern is the seed of a clean per-appliance abstraction. The HA-side polish that's missing is custom-component shape: config flow, native entity classes, async-Python DTLS instead of MQTT round-trips, error surfacing into HA's notification system, support across more firmware versions, and someone who actually lives in the HA codebase.
->
-> If you're that person, get in touch — happy to co-author, hand off, or hand over entirely.
+## Quick start (library)
 
-### What you get
+`smartthings-local` is on PyPI:
+
+```sh
+pip install smartthings-local
+```
+
+Mint a client cert once (see [Part 2](#part-2--auth-get-the-identity-cert)), then drive a session directly:
+
+```python
+import cbor2
+from smartthings_local.protocol.dtls_session import DtlsCoapSession
+
+sess = DtlsCoapSession(
+    "192.168.1.100", 49154,
+    cert_path="certs/client_fullchain.pem",
+    key_path="certs/client.key",
+)
+sess.connect()
+sess.start_reader()
+
+code, body = sess.get(["device", "0"])                       # Block2-aware read
+code, _    = sess.post(["mode", "vs", "0"], cbor2.dumps({}))  # write
+sess.subscribe(["operational", "state", "vs", "0"],          # OBSERVE
+               on_notification=lambda href, payload: ...)
+sess.close()
+```
+
+If the cert/key are minted at runtime and never written to disk (e.g. inside an HA config flow), pass them in memory instead of by path:
+
+```python
+sess = DtlsCoapSession("192.168.1.100", 49154, cert_pem=cert_pem, key_pem=key_pem)
+```
+
+For a full worked integration, the higher-level `smartthings_local.ocf` layer — `StateCache`, `PollScheduler`, `KeepaliveTask`, `ObserveRefreshTask` — coordinates tiered polling and OBSERVE on top of a session. The MQTT bridge demo below wires all of it together.
+
+### What the demo bridge gives you
 
 - **Multi-appliance, one container.** Single Docker service holds N DTLS sessions in parallel, one per appliance, sharing one MQTT client. Adding an appliance class is ~150 lines and one descriptor file.
 - **Bounded state latency.** Hot-tier resources (job state, door, operational state) refresh on a sub-second cadence regardless of whether the appliance has internet. Worst-case lag is the tier interval (≤1s idle, ≤500ms during an active cycle on the dryer).
@@ -29,6 +60,7 @@
 - **Bridge logs tagged per-appliance** with `<class>.<serial>` once each device's serial is read on connect — `dryer.<serial>` vs `oven.<serial>` interleaved in the same log stream, easy to grep.
 - **Zero HA YAML.** Every entity is auto-discovered via MQTT discovery.
 - **Your state stays on your LAN.** Bridge → broker → HA. Samsung's cloud sees nothing from HA. *(The appliance still maintains its own TLS session to Samsung — appliance design, not ours.)*
+- **A few controls the cloud HA integration doesn't offer.** Talking to the appliance directly happens to surface some writes the official SmartThings integration doesn't currently expose for these models — for example dryer course selection ([HA core #162501](https://github.com/home-assistant/core/issues/162501)) and the oven temperature setpoint (where the cloud integration provides a read-only sensor). It's not a strict superset — the cloud integration still covers surfaces this doesn't — but the reverse-engineered write set has genuine reach.
 
 ### Under the hood
 
@@ -350,19 +382,20 @@ Gated control entities use HA's `availability_mode: all` against `<prefix>/avail
 ### Repo layout
 
 ```
-setup_cert.py                        One-shot cert minting script (live-fetches AC14K_M + UUID)
-protocol/                            DTLS-CoAP protocol layer (reusable for non-MQTT bridges)
+smartthings_local/                   The installable library — `pip install smartthings-local`
   __init__.py
-  auth.py                            DTLS client cert setup + authentication
-  dtls_session.py                    DTLS session management, handshake, liveness
-  coap.py                            CoAP wire protocol: message encode/decode, token handling
-ocf/                                 OCF resource + state management (reusable layer)
-  __init__.py
-  state_cache.py                     StateCache — single source of truth for appliance state
-  poll_scheduler.py                  Tiered adaptive polling (hot/warm/cold + sweep)
-  keepalive.py                       CoAP liveness checks (empty-CON pings)
-  observe_refresh.py                 OBSERVE registration management
-mqtt_demo/                           MQTT bridge demo (uses protocol/ + ocf/)
+  protocol/                          DTLS-CoAP transport (reusable by any consumer, not just MQTT)
+    __init__.py
+    coap.py                          CoAP wire protocol: message encode/decode, token handling
+    dtls_session.py                  DTLS session: handshake, client-cert auth (file or in-memory PEM), Block2, liveness
+    ocf_root_ca.pem                  Samsung OCF root CA, bundled for handshake verification
+  ocf/                               OCF resource + state layer (reusable)
+    __init__.py
+    state_cache.py                   StateCache — single source of truth for appliance state
+    poll_scheduler.py                Tiered adaptive polling (hot/warm/cold + sweep)
+    keepalive.py                     CoAP liveness checks (empty-CON pings)
+    observe_refresh.py               OBSERVE registration management
+mqtt_demo/                           MQTT bridge demo (consumes smartthings_local)
   __init__.py
   __main__.py                        Entry point — loads config, spawns one bridge per appliance
   config.py                          SharedConfig + ApplianceConfig dataclasses
@@ -379,6 +412,10 @@ mqtt_demo/                           MQTT bridge demo (uses protocol/ + ocf/)
   deploy.sh                          tar + ssh + docker compose up --build
   requirements.txt                   Python dependencies for the bridge
   .env.example                       Template — copy to .env, fill in
+setup_cert.py                        One-shot cert minting script (live-fetches AC14K_M + UUID)
+pyproject.toml                       Packaging — PyPI dist `smartthings-local`, hatch-vcs versioning
+tests/                               pytest suite (CoAP wire, state cache, import isolation, cert loading)
+.github/workflows/publish.yml        Build + PyPI Trusted Publishing on `v*` tags
 ```
 
 `certs/` is gitignored. Drop the privileged client cert + key there; the container mounts that directory read-only at `/config`. See [`localthings`](https://github.com/mbillow/localthings) for production HA integration.
@@ -390,7 +427,7 @@ mqtt_demo/                           MQTT bridge demo (uses protocol/ + ocf/)
 The three descriptors in `mqtt_demo/samples/` (dryer, oven, fridge) are
 frozen reference implementations — enough to exercise both the newer
 Tizen RT 3.x family and the older ARTIK051 family, proving the
-`protocol/` + `ocf/` layers generalize across firmware generations.
+`smartthings_local` library layers generalize across firmware generations.
 They are not updated for new appliance models.
 
 **To add support for a new appliance, submit it to
@@ -407,7 +444,7 @@ These each looked like obvious improvements at some point. Each one broke someth
 - **Don't assume OBSERVE silence means the appliance is broken.** When the appliance can't reach Samsung's cloud, its OBSERVE notify dispatch goes quiet even though the local DTLS session, GETs, POSTs, and the cache continue to work normally (measured at `~14 req/s` dryer / `~8 req/s` oven with 200/200 GETs successful while firewalled). The polling tiers are the structural answer to this; treat OBSERVE strictly as an optional accelerator.
 - **Don't touch `/oic/sec/*` (doxm, pstat, cred, acl).** The bridge doesn't, and you shouldn't from helper scripts either — those resources have wedge/brick risk on Samsung's RT-OCF security stack. The bridge surfaces are strictly `/<x>/vs/0` and `/device/0`.
 - **Don't run two clients against the same appliance simultaneously.** Samsung's RT-OCF DTLS allows one active session per peer; a second handshake will get the device to drop the new socket. If HA seems to flap, check whether you've got `python -m mqtt_demo` running locally AND the Docker container up.
-- **Don't expect parity from every write surface.** Samsung's firmware accepts a lot of writes with `2.04 Changed` but only some of them stick — power, child-lock, and remote-control writes are accepted-then-reverted because they're hardware-mirrored. The bridge's optimistic-publish-then-verify pattern handles this transparently: HA briefly shows the new value, the 3s fetch-back republishes the actual value, HA reverts.
+- **Expect gaps in write coverage, but few are hard limits.** The local DTLS surface appears to expose every write Samsung's own app uses — the ceiling is per-surface reverse-engineering (finding the resource, field, and encoding), not an API boundary. A control that isn't wired yet usually just hasn't been mapped. **Oven cavity remote-start is the marquee open example:** it works today through Samsung's cloud, and locally the write is accepted (`2.04`) but the cavity never engages — a reverse-engineering problem we haven't cracked yet, not a dead end. The genuine hard limits are the few surfaces Samsung gates in hardware/firmware — **power, child lock, remote-control enable** — which accept the write then snap back to the physical switch. **That mirrors Samsung's own behaviour, not a shortfall of the local path: the SmartThings app can't flip those remotely either** (Remote Control is a button you press on the appliance). The optimistic-publish-then-verify pattern absorbs the reverts transparently: HA briefly shows the new value, then the PollScheduler's next tier poll — deferred ~4s past Samsung's revert window — re-reads and republishes the actual state. (The bridge deliberately does **not** fetch-back right after a write; that GET is itself what triggers the revert.)
 
 ---
 
@@ -427,11 +464,5 @@ If reconnects become persistent (e.g. >10 in a minute) something's actually wron
 ---
 
 ## Contributing
-
-Patches welcome — especially:
-
-- New appliance descriptors (washer, dishwasher, AC, fridge, etc.) on the same Tizen RT 3.x firmware family.
-- Confirmation/refutation on additional dryer or oven models. `nmap` + `/device/0` dump + `/oic/d` GET is enough to know if you're on the same firmware family.
-- A proper HA custom component wrapping the bridge so there's a config flow instead of YAML/env editing.
 
 If you submit a PR, please don't include real device UUIDs, MACs, serials, IPs, or bearer tokens — use the placeholders from `.env.example`.
