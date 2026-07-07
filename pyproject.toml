@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "smartthings-local"
+dynamic = ["version"]
+description = "Local CoAP-over-DTLS (OCF) transport + polling layer for Samsung SmartThings appliances"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Jack Nagy" }]
+keywords = ["smartthings", "samsung", "ocf", "coap", "dtls", "home-assistant", "iot"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Home Automation",
+    "Topic :: System :: Networking",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "cbor2>=5.6",
+    "pyOpenSSL>=23.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/QuiteYellow/SmartThings-Local"
+Repository = "https://github.com/QuiteYellow/SmartThings-Local"
+Issues = "https://github.com/QuiteYellow/SmartThings-Local/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.hatch.version]
+source = "vcs"
+
+# Derive the version from git tags of the form v1.2.3.
+[tool.hatch.version.raw-options]
+version_scheme = "no-guess-dev"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "smartthings_local/_version.py"
+
+# ocf_root_ca.pem is tracked, but the repo .gitignore's `*.pem` rule makes
+# hatchling's VCS-based file selection drop it. It's loaded at runtime by
+# protocol/dtls_session.py (load_verify_locations), so force it into every
+# build target (wheel + sdist).
+[tool.hatch.build]
+artifacts = ["smartthings_local/protocol/ocf_root_ca.pem"]
+
+[tool.hatch.build.targets.wheel]
+# Ship only the library; the mqtt_demo/, tests/, and setup_cert.py stay
+# in-repo and are not part of the distributable package.
+packages = ["smartthings_local"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "smartthings_local",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]

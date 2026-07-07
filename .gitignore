@@ -17,6 +17,11 @@ __pycache__/
 .venv/
 venv/
 
+# Packaging / build artifacts
+/smartthings_local/_version.py
+/dist/
+*.egg-info/
+
 # Bridge runtime
 bridge.log
 course_mapper.log

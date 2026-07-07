@@ -36,7 +36,7 @@ from typing import Callable, Optional, TYPE_CHECKING
 
 import cbor2
 
-from protocol.dtls_session import DtlsCoapSession, fmt_code
+from smartthings_local.protocol.dtls_session import DtlsCoapSession, fmt_code
 
 if TYPE_CHECKING:
     from .state_cache import StateCache

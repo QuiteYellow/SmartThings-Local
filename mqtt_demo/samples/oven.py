@@ -31,7 +31,7 @@ from ..descriptor import (
     device_block,
     encode,
 )
-from ocf.poll_scheduler import PollTier
+from smartthings_local.ocf.poll_scheduler import PollTier
 
 
 # ---------------------------------------------------------------------

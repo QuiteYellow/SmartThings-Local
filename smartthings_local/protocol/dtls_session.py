@@ -19,6 +19,7 @@ on a per-token Event the reader signals. OBSERVE notifications are
 delivered via the on_notification callback.
 """
 import os
+import re as _re
 import socket
 import threading
 import time
@@ -61,31 +62,75 @@ _BLOCK_ACK_TIMEOUT  = 4.0
 # once the ceiling is measured empirically.
 _DEFAULT_RATE_LIMIT_RPS = 5.0
 
+_PEM_CERT_RE = _re.compile(
+    rb'-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----',
+    _re.DOTALL,
+)
+
+
+def _load_pem_chain(ctx: SSL.Context, cert_pem: str, key_pem: str) -> None:
+    """Load a PEM cert chain and private key into an SSL context in memory.
+
+    Parses all certificate blocks from cert_pem: the first is the leaf
+    (use_certificate), the rest are intermediates (add_extra_chain_cert).
+    No temp files are written.
+    """
+    from OpenSSL import crypto
+    certs = _PEM_CERT_RE.findall(cert_pem.encode())
+    if not certs:
+        raise ValueError("No certificates found in cert_pem")
+    ctx.use_certificate(crypto.load_certificate(crypto.FILETYPE_PEM, certs[0]))
+    for extra in certs[1:]:
+        ctx.add_extra_chain_cert(
+            crypto.load_certificate(crypto.FILETYPE_PEM, extra)
+        )
+    ctx.use_privatekey(crypto.load_privatekey(crypto.FILETYPE_PEM, key_pem.encode()))
+    ctx.check_privatekey()
+
 
 class DtlsCoapSession:
     """Single sustained DTLS-CoAP session.
 
     Caller drives lifecycle:
-        sess = DtlsCoapSession(host, port, cert, key)
+        sess = DtlsCoapSession(host, port, cert_path=cert, key_path=key)
         sess.connect()
         sess.start_reader()
         sess.subscribe([...], on_notification=cb)   # OBSERVE
         code, body = sess.get(['device', '0'])      # Block2 fetch
         code, _    = sess.post(['mode','vs','0'], cbor)
         sess.close()
+
+    Cert material comes from either a file pair (cert_path, key_path) or
+    an in-memory PEM pair (cert_pem, key_pem) — exactly one pair required.
+    The in-memory path exists for callers (e.g. an HA config flow) that
+    mint a client cert at runtime and never write it to disk.
     """
 
     HANDSHAKE_TIMEOUT_S = 12.0
     READER_RECV_TIMEOUT_S = 1.0  # short so stop_event propagates quickly
     MAX_BLOCKS = 32              # safety bound for Block2 fetches
 
-    def __init__(self, host, port, cert_path, key_path,
+    def __init__(self, host, port, cert_path=None, key_path=None, *,
+                 cert_pem=None, key_pem=None,
                  on_notification=None, mtu=1200,
                  rate_limit_rps: float = _DEFAULT_RATE_LIMIT_RPS):
+        if (cert_path is not None or key_path is not None) and \
+                (cert_pem is not None or key_pem is not None):
+            raise ValueError(
+                "pass either cert_path/key_path or cert_pem/key_pem, not both")
+        if cert_pem is not None or key_pem is not None:
+            if cert_pem is None or key_pem is None:
+                raise ValueError("cert_pem and key_pem must be passed together")
+        elif cert_path is None or key_path is None:
+            raise ValueError(
+                "must pass either cert_path/key_path or cert_pem/key_pem")
+
         self.host = host
         self.port = port
-        self.cert_path = str(cert_path)
-        self.key_path  = str(key_path)
+        self.cert_path = str(cert_path) if cert_path is not None else None
+        self.key_path  = str(key_path) if key_path is not None else None
+        self.cert_pem = cert_pem
+        self.key_pem  = key_pem
         self.on_notification = on_notification  # fn(href, payload_bytes)
         self.mtu = mtu
         self._min_req_interval = 1.0 / rate_limit_rps
@@ -136,9 +181,12 @@ class DtlsCoapSession:
         # the OpenSSL instance cryptography bundles — ctypes and cffi bindings
         # do not expose SSL_CTX_set_security_level on this build.
         ctx.set_cipher_list(b'ECDHE-ECDSA-AES128-GCM-SHA256:@SECLEVEL=0')
-        ctx.use_certificate_chain_file(self.cert_path)
-        ctx.use_privatekey_file(self.key_path)
-        ctx.check_privatekey()
+        if self.cert_pem is not None:
+            _load_pem_chain(ctx, self.cert_pem, self.key_pem)
+        else:
+            ctx.use_certificate_chain_file(self.cert_path)
+            ctx.use_privatekey_file(self.key_path)
+            ctx.check_privatekey()
 
         conn = SSL.Connection(ctx, None)
         conn.set_connect_state()

@@ -22,7 +22,7 @@ set -e
 
 # This script lives in mqtt_demo/ but the build context is the repo
 # root (mqtt_demo/docker-compose.yml uses `context: ..`, since the
-# image needs the protocol/ and ocf/ library packages alongside
+# image needs the smartthings_local library package alongside
 # mqtt_demo/). Run everything from the repo root so the tar allowlist
 # and remote layout line up with that context.
 cd "$(dirname "$0")/.."
@@ -51,12 +51,11 @@ ssh "${SSH_HOST}" mkdir -p "${REMOTE_DIR}" "${APPDATA_DIR}"
 
 # Source code — explicit allowlist instead of an excludelist. Anything
 # else in the repo (research files, certs, logs, the .git dir) stays
-# local. protocol/ and ocf/ are the library packages mqtt_demo/ imports
-# from; they need to land as REMOTE_DIR's siblings of mqtt_demo/ so the
+# local. smartthings_local/ is the library package mqtt_demo/ imports
+# from; it needs to land as REMOTE_DIR's sibling of mqtt_demo/ so the
 # compose file's `context: ..` resolves the same way it does locally.
 COPYFILE_DISABLE=1 tar cz \
-    protocol/ \
-    ocf/ \
+    smartthings_local/ \
     mqtt_demo/ \
     README.md \
     .gitignore \
