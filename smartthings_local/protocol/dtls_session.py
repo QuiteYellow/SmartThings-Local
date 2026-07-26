@@ -100,6 +100,12 @@ class DtlsCoapSession:
         code, _    = sess.post(['mode','vs','0'], cbor)
         sess.close()
 
+    Or with stale-session detection (recommended for always-on devices):
+        sess = DtlsCoapSession(host, port, cert_pem=cert, key_pem=key)
+        sess.connect(probe_timeout=5.0)   # handshake + reader + CoAP probe
+        sess.start_reader()               # idempotent, safe to call again
+        ...
+
     Cert material comes from either a file pair (cert_path, key_path) or
     an in-memory PEM pair (cert_pem, key_pem) — exactly one pair required.
     The in-memory path exists for callers (e.g. an HA config flow) that
@@ -107,6 +113,7 @@ class DtlsCoapSession:
     """
 
     HANDSHAKE_TIMEOUT_S = 12.0
+    PROBE_TIMEOUT_S = 5.0        # CoAP-layer validation after handshake
     READER_RECV_TIMEOUT_S = 1.0  # short so stop_event propagates quickly
     MAX_BLOCKS = 32              # safety bound for Block2 fetches
 
@@ -169,9 +176,25 @@ class DtlsCoapSession:
 
     # ---- lifecycle ---------------------------------------------------
 
-    def connect(self):
-        """DTLS handshake. Blocks up to HANDSHAKE_TIMEOUT_S. Raises
-        ConnectionError / TimeoutError on failure."""
+    def connect(self, probe_timeout=None):
+        """DTLS handshake + optional CoAP-layer validation probe.
+
+        When *probe_timeout* is None (default), behaviour is identical to
+        the original: only the TLS handshake is performed and the caller
+        must call start_reader() before issuing requests.
+
+        When *probe_timeout* is a positive number of seconds, connect()
+        additionally starts the reader thread and sends a lightweight
+        GET /device/0 to verify the CoAP application layer is responsive.
+        This catches "stale DTLS sessions" where the handshake succeeds
+        but the device's CoAP stack is still bound to a previous session
+        (common on Samsung always-on appliances after an HA restart).
+        If the probe fails, the session is torn down and ConnectionError
+        is raised — total worst-case latency is HANDSHAKE_TIMEOUT_S +
+        probe_timeout rather than the caller's full poll timeout.
+
+        Raises ConnectionError / TimeoutError on failure.
+        """
         ctx = SSL.Context(SSL.DTLS_METHOD)
 
         ctx.load_verify_locations(_OCF_ROOT_CA)
@@ -230,10 +253,41 @@ class DtlsCoapSession:
         self.dest = dest
         self._stop.clear()
 
+        if probe_timeout is not None:
+            self._probe_coap_layer(float(probe_timeout))
+
+    def _probe_coap_layer(self, timeout: float) -> None:
+        """Post-handshake validation: start the reader and confirm CoAP
+        responds within *timeout* seconds.
+
+        On failure the session is torn down before raising, so the caller
+        doesn't inherit a half-open connection."""
+        self.start_reader()
+        try:
+            code, _ = self.get(['device', '0'], timeout=timeout)
+            if code >> 5 != 2:
+                raise ConnectionError(
+                    f"session probe: unexpected code {fmt_code(code)}")
+        except TimeoutError as e:
+            self.close()
+            raise ConnectionError(
+                f"DTLS connected but CoAP unresponsive "
+                f"(stale session?): {e}"
+            ) from e
+        except ConnectionError:
+            self.close()
+            raise
+
     def start_reader(self):
-        """Spawn the reader thread. Must be called after connect()."""
+        """Spawn the reader thread. Must be called after connect().
+
+        Idempotent — safe to call if the reader is already running
+        (e.g. after connect(probe_timeout=...) which starts it
+        internally)."""
         if self.sock is None:
             raise RuntimeError("connect() before start_reader()")
+        if self._reader_thread is not None and self._reader_thread.is_alive():
+            return
         t = threading.Thread(target=self._reader_loop,
                              daemon=True, name='dtls-reader')
         t.start()
