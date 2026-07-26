@@ -240,7 +240,7 @@ class PushBridge:
             key_path=self.shared.KEY_PATH,
             on_notification=self._on_notification,
         )
-        sess.connect()
+        sess.connect(probe_timeout=DtlsCoapSession.PROBE_TIMEOUT_S)
         self.session = sess
         self.session_started_ts = time.time()
         self.connect_count += 1
