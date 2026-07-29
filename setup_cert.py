@@ -184,8 +184,46 @@ def verify_cert_key_pair(cert_path, key_path):
             f"AC14K_M cert and key do not pair (cert modulus != key modulus)")
 
 
+# OpenSSL config that force-enables SHA-1 signatures. Fedora/RHEL (and some
+# other hardened OpenSSL 3.x builds) reject SHA-1 signing under the default
+# crypto policy, but the AC14K_M trust chain requires a SHA-1-signed leaf, so
+# we re-enable it just for the signing step via a scoped OPENSSL_CONF.
+SHA1_OVERRIDE_CONF = """\
+openssl_conf = openssl_init
+
+[openssl_init]
+alg_section = evp_properties
+
+[evp_properties]
+rh-allow-sha1-signatures = yes
+"""
+
+
+class CommandError(RuntimeError):
+    """A subprocess exited non-zero; carries the command and its output."""
+
+
 def run(cmd, **kw):
-    return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
+    proc = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or '').strip()
+        raise CommandError(
+            f"command failed (exit {proc.returncode}): {' '.join(cmd)}"
+            + (f"\n{detail}" if detail else ""))
+    return proc
+
+
+def run_allow_sha1(cmd):
+    """Run an openssl command with SHA-1 signatures force-enabled, for
+    distros whose crypto policy otherwise blocks SHA-1 signing."""
+    conf = tempfile.NamedTemporaryFile(
+        'w', suffix='.cnf', prefix='sha1_ok_', delete=False)
+    conf.write(SHA1_OVERRIDE_CONF)
+    conf.close()
+    try:
+        return run(cmd, env=dict(os.environ, OPENSSL_CONF=conf.name))
+    finally:
+        os.unlink(conf.name)
 
 
 def mint_cert(uuid, ac14k_cert, ac14k_key, chain_files, out_dir):
@@ -229,11 +267,23 @@ DNS.1 = {uuid}
     run(['openssl', 'req', '-new', '-key', str(paths['key']),
          '-out', str(paths['csr']), '-subj', subject])
 
-    run(['openssl', 'x509', '-req', '-in', str(paths['csr']),
-         '-CA', str(ac14k_cert), '-CAkey', str(ac14k_key),
-         '-CAcreateserial', '-CAserial', str(paths['srl']),
-         '-out', str(paths['leaf']), '-days', '3650',
-         '-extfile', str(paths['ext']), '-sha1'])
+    sign_cmd = ['openssl', 'x509', '-req', '-in', str(paths['csr']),
+                '-CA', str(ac14k_cert), '-CAkey', str(ac14k_key),
+                '-CAcreateserial', '-CAserial', str(paths['srl']),
+                '-out', str(paths['leaf']), '-days', '3650',
+                '-extfile', str(paths['ext']), '-sha1']
+    try:
+        run(sign_cmd)
+    except CommandError as first:
+        # Most likely the local crypto policy blocks SHA-1 signing
+        # (common on Fedora/RHEL). Retry once with SHA-1 force-enabled;
+        # if that still fails, surface the original error.
+        print("  SHA-1 signing was rejected by the local OpenSSL policy; "
+              "retrying with a SHA-1 override...")
+        try:
+            run_allow_sha1(sign_cmd)
+        except CommandError:
+            raise first
 
     parts = [paths['leaf'].read_text()]
     for p in chain_files:
@@ -459,7 +509,20 @@ def main():
     print("=" * 60)
     print(f"Phase 3: mint client cert with UUID {uuid}")
     print("=" * 60)
-    paths = mint_cert(uuid, ac14k_cert, ac14k_key, chain_files, out_dir)
+    try:
+        paths = mint_cert(uuid, ac14k_cert, ac14k_key, chain_files, out_dir)
+    except CommandError as e:
+        print(f"\n[!] Failed to mint the client cert:\n{e}", file=sys.stderr)
+        print(
+            "\n  If the failure mentions SHA-1 / disabled digests, your "
+            "OpenSSL build blocks SHA-1 signing (common on Fedora/RHEL).\n"
+            "  The AC14K_M chain requires SHA-1, so allow it and re-run:\n"
+            "    sudo update-crypto-policies --set DEFAULT:SHA1\n"
+            "  (or LEGACY). Undo afterwards with: "
+            "sudo update-crypto-policies --set DEFAULT",
+            file=sys.stderr)
+        return 4
+
     print(f"  key:       {paths['key']}")
     print(f"  leaf:      {paths['leaf']}")
     print(f"  fullchain: {paths['fullchain']}")
