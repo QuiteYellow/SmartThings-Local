@@ -6,6 +6,7 @@ import inspect
 
 from smartthings_local.ocf.observe_refresh import ObserveRefreshTask
 from smartthings_local.ocf.state_cache import StateCache
+from smartthings_local.protocol.auth import AuthenticationProvider, CertificateAuth
 from smartthings_local.protocol.dtls_session import DtlsCoapSession
 
 
@@ -40,6 +41,14 @@ def test_dtls_session_constructor_keeps_file_memory_and_local_port_inputs():
             "local_port",
         ],
     )
+    auth_parameter = inspect.signature(DtlsCoapSession).parameters["auth"]
+    assert auth_parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert auth_parameter.default is None
+
+
+def test_certificate_auth_is_a_public_authentication_provider():
+    provider = CertificateAuth.from_files("/synthetic/cert.pem", "/synthetic/key")
+    assert isinstance(provider, AuthenticationProvider)
 
 
 def test_dtls_session_keeps_current_consumer_methods():
