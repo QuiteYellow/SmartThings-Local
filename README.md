@@ -27,12 +27,16 @@ session directly:
 
 ```python
 import cbor2
+from smartthings_local.protocol.auth import CertificateAuth
 from smartthings_local.protocol.dtls_session import DtlsCoapSession
 
+auth = CertificateAuth.from_files(
+    "certs/client_fullchain.pem",
+    "certs/client.key",
+)
 sess = DtlsCoapSession(
     "192.0.2.100", 49154,
-    cert_path="certs/client_fullchain.pem",
-    key_path="certs/client.key",
+    auth=auth,
 )
 sess.connect()
 sess.start_reader()
@@ -44,11 +48,18 @@ sess.subscribe(["operational", "state", "vs", "0"],          # OBSERVE
 sess.close()
 ```
 
-If the cert/key are minted at runtime and never written to disk (e.g. inside an HA config flow), pass them in memory instead of by path:
+If the cert/key are minted at runtime and never written to disk (e.g. inside
+an HA config flow), create the provider from memory instead:
 
 ```python
-sess = DtlsCoapSession("192.0.2.100", 49154, cert_pem=cert_pem, key_pem=key_pem)
+auth = CertificateAuth.from_memory(cert_pem, key_pem)
+sess = DtlsCoapSession("192.0.2.100", 49154, auth=auth)
 ```
+
+For compatibility, the existing `cert_path` / `key_path` and `cert_pem` /
+`key_pem` session arguments remain supported without a deprecation warning.
+They are routed through `CertificateAuth` internally. Do not combine `auth`
+with those legacy arguments.
 
 ### Classified errors
 
@@ -479,6 +490,7 @@ smartthings_local/                   The installable library — `pip install sm
   __init__.py
   protocol/                          DTLS-CoAP transport (reusable by any consumer, not just MQTT)
     __init__.py
+    auth.py                          Immutable DTLS authentication providers
     coap.py                          CoAP wire protocol: message encode/decode, token handling
     dtls_session.py                  DTLS session: handshake, client-cert auth (file or in-memory PEM), Block2, liveness
     dtls_probe.py                    Stateless DTLS liveness + opt-in stateful diagnostic

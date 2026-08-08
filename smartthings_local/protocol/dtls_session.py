@@ -19,11 +19,9 @@ on a per-token Event the reader signals. OBSERVE notifications are
 delivered via the on_notification callback.
 """
 import os
-import re as _re
 import socket
 import threading
 import time
-from pathlib import Path
 
 from OpenSSL import SSL
 
@@ -42,14 +40,17 @@ from .coap import (
     encode_options, parse_coap, build_coap, block_value, fmt_code,
     split_dtls as _split_dtls,
 )
+from .auth import (
+    AuthenticationProvider,
+    CertificateAuth,
+    _DTLS_CIPHERS,
+    _OCF_ROOT_CA,
+    _load_pem_chain,
+)
 from .endpoint import open_connected_udp_socket
 import logging
 
 logger = logging.getLogger(__name__)
-
-_OCF_ROOT_CA = str(Path(__file__).parent / 'ocf_root_ca.pem')
-_DTLS_CIPHERS = b'ECDHE-ECDSA-AES128-GCM-SHA256:@SECLEVEL=0'
-
 
 # Diagnostic logging — when DEBUG_BRIDGE=1 in env, the bridge dumps
 # every received CoAP frame, every /operational/state/vs/0 + /oven/vs/0
@@ -71,32 +72,6 @@ _BLOCK_ACK_TIMEOUT  = 4.0
 # once the ceiling is measured empirically.
 _DEFAULT_RATE_LIMIT_RPS = 5.0
 
-_PEM_CERT_RE = _re.compile(
-    rb'-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----',
-    _re.DOTALL,
-)
-
-
-def _load_pem_chain(ctx: SSL.Context, cert_pem: str, key_pem: str) -> None:
-    """Load a PEM cert chain and private key into an SSL context in memory.
-
-    Parses all certificate blocks from cert_pem: the first is the leaf
-    (use_certificate), the rest are intermediates (add_extra_chain_cert).
-    No temp files are written.
-    """
-    from OpenSSL import crypto
-    certs = _PEM_CERT_RE.findall(cert_pem.encode())
-    if not certs:
-        raise ValueError("No certificates found in cert_pem")
-    ctx.use_certificate(crypto.load_certificate(crypto.FILETYPE_PEM, certs[0]))
-    for extra in certs[1:]:
-        ctx.add_extra_chain_cert(
-            crypto.load_certificate(crypto.FILETYPE_PEM, extra)
-        )
-    ctx.use_privatekey(crypto.load_privatekey(crypto.FILETYPE_PEM, key_pem.encode()))
-    ctx.check_privatekey()
-
-
 class DtlsCoapSession:
     """Single sustained DTLS-CoAP session.
 
@@ -109,10 +84,9 @@ class DtlsCoapSession:
         code, _    = sess.post(['mode','vs','0'], cbor)
         sess.close()
 
-    Cert material comes from either a file pair (cert_path, key_path) or
-    an in-memory PEM pair (cert_pem, key_pem) — exactly one pair required.
-    The in-memory path exists for callers (e.g. an HA config flow) that
-    mint a client cert at runtime and never write it to disk.
+    Authentication comes from an immutable provider. For compatibility,
+    cert_path/key_path and cert_pem/key_pem create a CertificateAuth provider
+    internally — exactly one legacy pair is required when auth is omitted.
     """
 
     HANDSHAKE_TIMEOUT_S = 12.0
@@ -123,17 +97,24 @@ class DtlsCoapSession:
                  cert_pem=None, key_pem=None,
                  on_notification=None, mtu=1200,
                  rate_limit_rps: float = _DEFAULT_RATE_LIMIT_RPS,
-                 local_port=None, family=socket.AF_UNSPEC):
-        if (cert_path is not None or key_path is not None) and \
-                (cert_pem is not None or key_pem is not None):
+                 local_port=None, family=socket.AF_UNSPEC,
+                 auth: AuthenticationProvider | None = None):
+        file_supplied = cert_path is not None or key_path is not None
+        memory_supplied = cert_pem is not None or key_pem is not None
+        if auth is not None and (file_supplied or memory_supplied):
+            raise ValueError(
+                "pass auth or legacy certificate arguments, not both")
+        if auth is None and file_supplied and memory_supplied:
             raise ValueError(
                 "pass either cert_path/key_path or cert_pem/key_pem, not both")
-        if cert_pem is not None or key_pem is not None:
+        if auth is None and memory_supplied:
             if cert_pem is None or key_pem is None:
                 raise ValueError("cert_pem and key_pem must be passed together")
-        elif cert_path is None or key_path is None:
+        elif auth is None and (cert_path is None or key_path is None):
             raise ValueError(
                 "must pass either cert_path/key_path or cert_pem/key_pem")
+        if auth is not None and not isinstance(auth, AuthenticationProvider):
+            raise TypeError("auth must implement AuthenticationProvider")
 
         self.host = host
         self.port = port
@@ -141,6 +122,12 @@ class DtlsCoapSession:
         self.key_path  = str(key_path) if key_path is not None else None
         self.cert_pem = cert_pem
         self.key_pem  = key_pem
+        if auth is None:
+            if cert_pem is not None:
+                auth = CertificateAuth.from_memory(cert_pem, key_pem)
+            else:
+                auth = CertificateAuth.from_files(self.cert_path, self.key_path)
+        self.auth = auth
         self.on_notification = on_notification  # fn(href, payload_bytes)
         self.mtu = mtu
         self._min_req_interval = 1.0 / rate_limit_rps
@@ -196,20 +183,7 @@ class DtlsCoapSession:
         """DTLS handshake. Blocks up to HANDSHAKE_TIMEOUT_S. Raises
         ConnectionError / TimeoutError on failure."""
         ctx = SSL.Context(SSL.DTLS_METHOD)
-
-        ctx.load_verify_locations(_OCF_ROOT_CA)
-        ctx.set_verify(SSL.VERIFY_PEER, lambda conn, cert, err, depth, ok: ok)
-        # @SECLEVEL=0 permits SHA-1 in Samsung's server cert chain (AC14K_M
-        # intermediate is SHA-1 signed). This is the only channel that reaches
-        # the OpenSSL instance cryptography bundles — ctypes and cffi bindings
-        # do not expose SSL_CTX_set_security_level on this build.
-        ctx.set_cipher_list(_DTLS_CIPHERS)
-        if self.cert_pem is not None:
-            _load_pem_chain(ctx, self.cert_pem, self.key_pem)
-        else:
-            ctx.use_certificate_chain_file(self.cert_path)
-            ctx.use_privatekey_file(self.key_path)
-            ctx.check_privatekey()
+        self.auth.configure_context(ctx)
 
         conn = SSL.Connection(ctx, None)
         conn.set_connect_state()
