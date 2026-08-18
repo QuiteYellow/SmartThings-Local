@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from smartthings_local.errors import SessionTimeoutError
+from smartthings_local.errors import (
+    BlockwiseError,
+    SessionClosedError,
+    SessionTimeoutError,
+)
+from smartthings_local.protocol import dtls_session
 from smartthings_local.protocol.coap import (
     ACCEPT,
     BLOCK1,
@@ -48,16 +53,34 @@ def _session(responder):
         request = parse_coap(datagram)
         requests.append(request)
         response = responder(request, len(requests) - 1)
-        if response is not None:
-            session._dispatch_coap(response)
+        if response is None:
+            return
+        responses = response if isinstance(response, (list, tuple)) else (response,)
+        for item in responses:
+            session._dispatch_coap(item)
 
     session._send_dgram = send
     return session, requests
 
 
-def _response(request, payload=b"ok", *, options=()):
+def _response(request, payload=b"ok", *, code=0x45, options=()):
     _mtype, _code, mid, token, _options, _payload = request
-    return build_coap(TYPE_ACK, 0x45, mid, token, options, payload)
+    return build_coap(TYPE_ACK, code, mid, token, options, payload)
+
+
+def _block1_response(request, *, block=None, code=None, payload=b""):
+    request_block = next(value for number, value in request[4] if number == BLOCK1)
+    _num, more, _szx = dtls_session.block_fields(request_block)
+    if block is None:
+        block = request_block
+    if code is None:
+        code = 0x5F if more else 0x44
+    return _response(
+        request,
+        payload,
+        code=code,
+        options=((BLOCK1, block),),
+    )
 
 
 def test_get_keeps_query_and_extra_options_on_every_block():
@@ -123,6 +146,201 @@ def test_post_encodes_repeated_queries_and_ordered_extra_options():
     ]
     assert _VERSION_OPTION in options
     assert _ROUTING_OPTION in options
+
+
+@pytest.mark.parametrize(
+    ("body_size", "chunk_sizes"),
+    (
+        (1024, [1024]),
+        (1025, [1024, 1]),
+        (2048, [1024, 1024]),
+        (2049, [1024, 1024, 1]),
+    ),
+)
+def test_post_uses_block1_only_above_one_ocf_block(body_size, chunk_sizes):
+    body = bytes(range(256)) * (body_size // 256) + bytes(range(body_size % 256))
+
+    def respond(request, _number):
+        if any(number == BLOCK1 for number, _value in request[4]):
+            return _block1_response(request)
+        return _response(request, b"final", code=0x44)
+
+    session, requests = _session(respond)
+    expected_payload = b"final" if body_size <= 1024 else b""
+    assert session.post(["resource"], body) == (0x44, expected_payload)
+
+    assert [len(request[5]) for request in requests] == chunk_sizes
+    assert b"".join(request[5] for request in requests) == body
+    if body_size <= 1024:
+        assert not any(number == BLOCK1 for number, _value in requests[0][4])
+        assert not any(number == SIZE1 for number, _value in requests[0][4])
+        return
+    assert len({request[3] for request in requests}) == 1
+    assert len({request[2] for request in requests}) == len(requests)
+    first_size = next(value for number, value in requests[0][4] if number == SIZE1)
+    assert int.from_bytes(first_size, "big") == body_size
+    assert all(
+        not any(number == SIZE1 for number, _value in request[4])
+        for request in requests[1:]
+    )
+
+
+def test_block1_keeps_queries_and_extensions_on_every_request():
+    session, requests = _session(lambda request, _number: _block1_response(request))
+    body = b"x" * 2050
+
+    assert session.post(
+        ["oic", "sec", "cred"],
+        body,
+        query=("if=oic.if.b",),
+        extra_options=(_VERSION_OPTION, _ROUTING_OPTION),
+    ) == (0x44, b"")
+
+    assert len(requests) == 3
+    for request in requests:
+        assert (URI_QUERY, b"if=oic.if.b") in request[4]
+        assert _VERSION_OPTION in request[4]
+        assert _ROUTING_OPTION in request[4]
+
+
+def test_block1_honours_a_smaller_server_block_size():
+    body = b"x" * 1600
+
+    def respond(request, request_number):
+        request_block = next(value for number, value in request[4] if number == BLOCK1)
+        if request_number == 0:
+            return _block1_response(request, block=block_value(1, 1, 5))
+        return _block1_response(request, block=request_block)
+
+    session, requests = _session(respond)
+    assert session.post(["oic", "sec", "cred"], body) == (0x44, b"")
+
+    assert [len(request[5]) for request in requests] == [1024, 512, 64]
+    assert [
+        next(value for number, value in request[4] if number == BLOCK1)
+        for request in requests
+    ] == [
+        block_value(0, 1, 6),
+        block_value(2, 1, 5),
+        block_value(3, 0, 5),
+    ]
+
+
+def test_block1_ignores_a_late_acknowledgement_for_the_previous_chunk():
+    first_response = None
+
+    def respond(request, request_number):
+        nonlocal first_response
+        response = _block1_response(request)
+        if request_number == 0:
+            first_response = response
+            return response
+        if request_number == 1:
+            return [first_response, response]
+        return response
+
+    session, requests = _session(respond)
+    assert session.post(["resource"], b"x" * 2049) == (0x44, b"")
+    assert len(requests) == 3
+
+
+def test_block1_retransmits_the_identical_request(monkeypatch):
+    monkeypatch.setattr(dtls_session, "_BLOCK_ACK_TIMEOUT", 0.01)
+
+    def respond(request, request_number):
+        if request_number == 0:
+            return None
+        return _block1_response(request)
+
+    session, requests = _session(respond)
+    assert session.post(["resource"], b"x" * 1025, timeout=1.0) == (0x44, b"")
+
+    assert requests[0] == requests[1]
+    assert requests[0][2] == requests[1][2]
+    assert requests[0][3] == requests[1][3]
+
+
+@pytest.mark.parametrize(
+    ("response", "error_type"),
+    (
+        (lambda request: _response(request, code=0x44), BlockwiseError),
+        (lambda request: _response(request, code=0x5F), BlockwiseError),
+        (
+            lambda request: _block1_response(
+                request, block=block_value(0, 0, 6), code=0x5F
+            ),
+            BlockwiseError,
+        ),
+        (
+            lambda request: _block1_response(
+                request, block=block_value(0, 1, 7), code=0x5F
+            ),
+            SessionTimeoutError,
+        ),
+    ),
+)
+def test_block1_rejects_non_atomic_intermediate_success(response, error_type):
+    session, _requests = _session(lambda request, _number: response(request))
+
+    with pytest.raises(error_type):
+        session.post(["resource"], b"x" * 1025, timeout=0.05)
+
+
+def test_block1_returns_an_intermediate_error_without_sending_more():
+    session, requests = _session(
+        lambda request, _number: _response(request, b"rejected", code=0x80)
+    )
+
+    assert session.post(["resource"], b"x" * 1025) == (0x80, b"rejected")
+    assert len(requests) == 1
+
+
+def test_block1_rejects_continue_as_the_final_response():
+    def respond(request, _number):
+        block = next(value for number, value in request[4] if number == BLOCK1)
+        _num, more, _szx = dtls_session.block_fields(block)
+        return _block1_response(request, code=0x5F if not more else None)
+
+    session, _requests = _session(respond)
+    with pytest.raises(BlockwiseError):
+        session.post(["resource"], b"x" * 1025)
+
+
+def test_block1_refuses_oversized_bodies_before_send():
+    session, requests = _session(lambda request, _number: _block1_response(request))
+
+    with pytest.raises(ValueError, match="524288"):
+        session.post(["resource"], b"x" * (512 * 1024 + 1))
+
+    assert requests == []
+
+
+def test_block1_request_cap_fails_closed_before_the_next_send(monkeypatch):
+    monkeypatch.setattr(dtls_session, "_MAX_BLOCK1_REQUESTS", 1)
+    session, requests = _session(lambda request, _number: _block1_response(request))
+
+    with pytest.raises(BlockwiseError):
+        session.post(["resource"], b"x" * 1025)
+
+    assert len(requests) == 1
+
+
+def test_block1_timeout_and_reader_death_retire_pending_tokens(monkeypatch):
+    monkeypatch.setattr(dtls_session, "_BLOCK_ACK_TIMEOUT", 0.01)
+    session, requests = _session(lambda _request, _number: None)
+    with pytest.raises(SessionTimeoutError):
+        session.post(["resource"], b"x" * 1025, timeout=0.02)
+    assert requests
+    assert session._pending == {}
+
+    def stop_reader(_request, _number):
+        session._reader_thread = object()
+        session._reader_running.clear()
+
+    session, _requests = _session(stop_reader)
+    with pytest.raises(SessionClosedError):
+        session.post(["resource"], b"x" * 1025, timeout=1.0)
+    assert session._pending == {}
 
 
 def test_delete_encodes_queries_and_extensions_without_a_payload():

@@ -69,6 +69,13 @@ repeatable.
 `delete()` uses the same path, query, extension-option, timeout, and response
 contract without sending a request payload.
 
+POST bodies through 1024 bytes retain the single-request behavior. Larger
+bodies use token-stable Block1 requests under one monotonic timeout, include
+Size1 on the first request, honor a server-requested smaller block size, and
+return only the final response. Upload bodies are limited to 512 KiB and 1024
+block requests; incomplete or contradictory success acknowledgements fail as
+`BlockwiseError`.
+
 `connect()` uses a 12-second monotonic DTLS handshake deadline by default. A
 caller that needs a shorter bounded attempt can pass a positive finite value
 without changing later reader timeouts. OpenSSL's DTLS timer schedules flight
