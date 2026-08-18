@@ -30,6 +30,7 @@ TYPE_RST = 3
 # CoAP method codes
 METHOD_GET  = 0x01
 METHOD_POST = 0x02
+METHOD_DELETE = 0x04
 
 # CoAP content-format value for application/cbor
 CF_CBOR = b'\x3c'

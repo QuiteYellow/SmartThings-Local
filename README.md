@@ -66,6 +66,9 @@ anything is sent. Additional options remain arbitrary bytes, must already be
 ordered by option number, and may repeat a number when the option is
 repeatable.
 
+`delete()` uses the same path, query, extension-option, timeout, and response
+contract without sending a request payload.
+
 `connect()` uses a 12-second monotonic DTLS handshake deadline by default. A
 caller that needs a shorter bounded attempt can pass a positive finite value
 without changing later reader timeouts. OpenSSL's DTLS timer schedules flight

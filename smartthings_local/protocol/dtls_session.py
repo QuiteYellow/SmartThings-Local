@@ -45,7 +45,7 @@ from .coap import (
     URI_PATH, URI_QUERY, OBSERVE, ETAG, CONTENT_FORMAT, ACCEPT,
     BLOCK2, BLOCK1, SIZE2, SIZE1,
     TYPE_CON, TYPE_NON, TYPE_ACK, TYPE_RST,
-    METHOD_GET, METHOD_POST, CF_CBOR,
+    METHOD_GET, METHOD_POST, METHOD_DELETE, CF_CBOR,
     OBSERVE_REGISTER, OBSERVE_DEREGISTER, BLOCK_SZX,
     encode_options, parse_coap, build_coap, block_value, block_fields,
     fmt_code,
@@ -1115,6 +1115,41 @@ class DtlsCoapSession:
         opts.extend(extra_options)
         datagram = build_coap(TYPE_CON, METHOD_POST, mid, tok, opts,
                               body_cbor)
+        ev = threading.Event()
+        container = {}
+        with self._state_lock:
+            self._pending[tok] = (ev, container)
+        try:
+            self.pace()
+            self._check_live()
+            self._send_dgram(datagram)
+            if not ev.wait(timeout):
+                raise SessionTimeoutError()
+            if 'err' in container:
+                raise container['err']
+            return container['code'], container['payload']
+        finally:
+            with self._state_lock:
+                self._pending.pop(tok, None)
+
+    def delete(
+            self, path_segs, timeout=8.0, *, query=(), extra_options=()):
+        """Single-frame DELETE. Returns (code, payload_bytes)."""
+        self._check_live()
+        path_segs = _validated_text_options(
+            path_segs, name='path_segs', allow_empty=False)
+        query = _validated_text_options(
+            query, name='query', allow_empty=False)
+        extra_options = _validated_extra_options(extra_options)
+        tok = self._next_tok()
+        mid = self._next_mid()
+        opts = [(URI_PATH, s.encode()) for s in path_segs]
+        for q in query:
+            opts.append((URI_QUERY, q.encode()))
+        opts.append((ACCEPT, CF_CBOR))
+        opts.extend(extra_options)
+        datagram = build_coap(
+            TYPE_CON, METHOD_DELETE, mid, tok, opts)
         ev = threading.Event()
         container = {}
         with self._state_lock:

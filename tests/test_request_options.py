@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from smartthings_local.errors import SessionTimeoutError
 from smartthings_local.protocol.coap import (
     ACCEPT,
     BLOCK1,
     BLOCK2,
     CONTENT_FORMAT,
+    METHOD_DELETE,
     METHOD_GET,
     METHOD_POST,
     OBSERVE,
@@ -121,6 +123,54 @@ def test_post_encodes_repeated_queries_and_ordered_extra_options():
     ]
     assert _VERSION_OPTION in options
     assert _ROUTING_OPTION in options
+
+
+def test_delete_encodes_queries_and_extensions_without_a_payload():
+    session, requests = _session(lambda request, _number: _response(request))
+
+    assert session.delete(
+        ["oic", "sec", "cred"],
+        query=("subjectuuid=peer",),
+        extra_options=(_ROUTING_OPTION,),
+    ) == (0x45, b"ok")
+
+    assert len(requests) == 1
+    _mtype, code, _mid, _token, options, payload = requests[0]
+    assert code == METHOD_DELETE
+    assert payload == b""
+    assert [value for number, value in options if number == URI_QUERY] == [
+        b"subjectuuid=peer"
+    ]
+    assert not [value for number, value in options if number == CONTENT_FORMAT]
+    assert _ROUTING_OPTION in options
+
+
+def test_delete_is_paced_before_send():
+    session, requests = _session(lambda request, _number: _response(request))
+    order = []
+
+    session.pace = lambda: order.append("pace")
+    original_send = session._send_dgram
+
+    def send(datagram):
+        order.append("send")
+        original_send(datagram)
+
+    session._send_dgram = send
+
+    assert session.delete(["resource"]) == (0x45, b"ok")
+    assert order == ["pace", "send"]
+    assert len(requests) == 1
+
+
+def test_delete_timeout_retires_its_pending_token():
+    session, requests = _session(lambda _request, _number: None)
+
+    with pytest.raises(SessionTimeoutError):
+        session.delete(["resource"], timeout=0)
+
+    assert len(requests) == 1
+    assert session._pending == {}
 
 
 @pytest.mark.parametrize(

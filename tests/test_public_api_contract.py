@@ -139,6 +139,7 @@ def test_dtls_session_keeps_current_consumer_methods():
     expected = {
         "close",
         "connect",
+        "delete",
         "get",
         "join",
         "pace",
@@ -190,6 +191,18 @@ def test_dtls_session_keeps_current_consumer_methods():
     for name in ("query", "extra_options"):
         assert post_parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
         assert post_parameters[name].default == ()
+    _assert_compatible_signature(
+        DtlsCoapSession.delete,
+        [
+            "self",
+            "path_segs",
+            "timeout",
+        ],
+    )
+    delete_parameters = inspect.signature(DtlsCoapSession.delete).parameters
+    for name in ("query", "extra_options"):
+        assert delete_parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        assert delete_parameters[name].default == ()
     _assert_compatible_signature(
         DtlsCoapSession.subscribe,
         ["self", "path_segs"],
