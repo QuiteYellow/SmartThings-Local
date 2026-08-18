@@ -17,7 +17,9 @@ ETAG           =  4
 CONTENT_FORMAT = 12
 ACCEPT         = 17
 BLOCK2         = 23
+BLOCK1         = 27
 SIZE2          = 28
+SIZE1          = 60
 
 # CoAP message types
 TYPE_CON = 0

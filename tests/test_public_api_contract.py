@@ -172,6 +172,11 @@ def test_dtls_session_keeps_current_consumer_methods():
             "timeout",
         ],
     )
+    get_extra_options = inspect.signature(DtlsCoapSession.get).parameters[
+        "extra_options"
+    ]
+    assert get_extra_options.kind is inspect.Parameter.KEYWORD_ONLY
+    assert get_extra_options.default == ()
     _assert_compatible_signature(
         DtlsCoapSession.post,
         [
@@ -181,6 +186,10 @@ def test_dtls_session_keeps_current_consumer_methods():
             "timeout",
         ],
     )
+    post_parameters = inspect.signature(DtlsCoapSession.post).parameters
+    for name in ("query", "extra_options"):
+        assert post_parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        assert post_parameters[name].default == ()
     _assert_compatible_signature(
         DtlsCoapSession.subscribe,
         ["self", "path_segs"],

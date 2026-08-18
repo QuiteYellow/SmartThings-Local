@@ -48,6 +48,24 @@ sess.subscribe(["operational", "state", "vs", "0"],          # OBSERVE
 sess.close()
 ```
 
+`get()` and `post()` accept repeated URI-query strings. They also accept
+ordered `(number, bytes)` options for reviewed OCF extensions while retaining
+ownership of path, query, content-format, Accept, Observe, and blockwise
+options:
+
+```python
+code, body = sess.get(
+    ["oic", "res"],
+    query=("rt=oic.r.doxm",),
+    extra_options=((2049, b"\x08\x00"),),
+)
+```
+
+Path and query text is UTF-8 encoded, and every value is size bounded before
+anything is sent. Additional options remain arbitrary bytes, must already be
+ordered by option number, and may repeat a number when the option is
+repeatable.
+
 `connect()` uses a 12-second monotonic DTLS handshake deadline by default. A
 caller that needs a shorter bounded attempt can pass a positive finite value
 without changing later reader timeouts. OpenSSL's DTLS timer schedules flight
