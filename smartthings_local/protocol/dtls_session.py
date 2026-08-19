@@ -80,6 +80,13 @@ DEBUG_BRIDGE = os.environ.get('DEBUG_BRIDGE') == '1'
 _BLOCK_MAX_ATTEMPTS = 3
 _BLOCK_ACK_TIMEOUT  = 4.0
 
+# Write retransmission (RFC 7252 4.2). Off by default: a device that is
+# already dropping under load turns one lost write into several, and MID
+# dedupe (4.5) is unverified on RT-OCF, which does not reliably emit RST
+# either. Enable per session via write_max_attempts once pacing has been
+# shown insufficient on real hardware (LocalThings#384).
+_WRITE_ACK_TIMEOUT = 2.0
+
 # How often a block wait re-checks that the reader is still alive. Short
 # enough that a mid-transfer reader death fails fast instead of burning
 # the whole per-block timeout, long enough to stay off the CPU.
@@ -218,6 +225,7 @@ class DtlsCoapSession:
                  on_notification=None, mtu=1200,
                  rate_limit_rps: float = _DEFAULT_RATE_LIMIT_RPS,
                  local_port=None, family=socket.AF_UNSPEC,
+                 write_max_attempts: int = 1,
                  auth: AuthenticationProvider | None = None):
         file_supplied = cert_path is not None or key_path is not None
         memory_supplied = cert_pem is not None or key_pem is not None
@@ -251,6 +259,7 @@ class DtlsCoapSession:
         self.on_notification = on_notification  # fn(href, payload_bytes)
         self.mtu = mtu
         self._min_req_interval = 1.0 / rate_limit_rps
+        self._write_max_attempts = max(1, int(write_max_attempts))
         # Optional fixed UDP source port. A client that dies without
         # close_notify leaves an orphaned DTLS association on the device,
         # keyed to the old 5-tuple; reconnecting from a fresh ephemeral
@@ -950,7 +959,7 @@ class DtlsCoapSession:
                 while True:
                     per_wait = min(_BLOCK_ACK_TIMEOUT,
                                    max(0.1, deadline - time.time()))
-                    if not self._wait_for_block(ev, per_wait):
+                    if not self._wait_live(ev, per_wait):
                         break  # attempt timed out
                     if 'err' in container or self._block_num_matches(
                             container, num):
@@ -979,16 +988,16 @@ class DtlsCoapSession:
                     self._pending.pop(tok, None)
         raise SessionTimeoutError()
 
-    def _wait_for_block(self, ev, per_wait):
-        """Wait for one block response, giving up early if the reader
-        dies underneath us.
+    def _wait_live(self, ev, per_wait):
+        """Wait for one response, giving up early if the reader dies
+        underneath us.
 
         Only the reader thread can resolve a token, so once it is gone
         the wait can never succeed. Polling in slices turns what would
-        be a full per-block timeout into an immediate SessionClosedError,
-        which is the same fail-fast contract get() gets from _check_live()
-        at entry — it just has to hold for every block, not only the
-        first."""
+        be a full request timeout into an immediate SessionClosedError,
+        which is the same fail-fast contract get() and post() get from
+        _check_live() at entry — it just has to hold for the whole
+        exchange, not only its first moment."""
         deadline = time.time() + per_wait
         while True:
             slice_s = min(_BLOCK_LIVENESS_POLL_S, deadline - time.time())
@@ -1012,26 +1021,54 @@ class DtlsCoapSession:
 
     def post(self, path_segs, body_cbor, timeout=8.0):
         """Single-frame POST with a CBOR-encoded body. Returns
-        (code, payload_bytes). body_cbor must already be encoded."""
+        (code, payload_bytes). body_cbor must already be encoded.
+
+        Retransmits the CON up to write_max_attempts times within the
+        caller's timeout, reusing the same Message ID: that is what lets
+        a server implementing RFC 7252 4.5 answer a duplicate from its
+        dedupe cache rather than re-running a non-idempotent write. A
+        caller-side retry cannot offer that, since it mints a fresh MID.
+        Defaults to one attempt — see _WRITE_ACK_TIMEOUT."""
         self._check_live()
         tok = self._next_tok()
         mid = self._next_mid()
         opts = [(URI_PATH, s.encode()) for s in path_segs]
         opts.append((CONTENT_FORMAT, CF_CBOR))
         opts.append((ACCEPT, CF_CBOR))
+        # Built once and resent verbatim; a new MID would be a new request.
         datagram = build_coap(TYPE_CON, METHOD_POST, mid, tok, opts,
                               body_cbor)
         ev = threading.Event()
         container = {}
+        deadline = time.time() + timeout
+        attempts = self._write_max_attempts
         with self._state_lock:
             self._pending[tok] = (ev, container)
         try:
-            self._send_dgram(datagram)
-            if not ev.wait(timeout):
-                raise SessionTimeoutError()
-            if 'err' in container:
-                raise container['err']
-            return container['code'], container['payload']
+            for attempt in range(attempts):
+                if attempt:
+                    # Pace only the retransmit: a retry must never be the
+                    # send that pushes a struggling device past its ceiling.
+                    self.pace()
+                    self._check_live()
+                self._send_dgram(datagram)
+                remaining = deadline - time.time()
+                if attempt == attempts - 1:
+                    per_wait = remaining
+                else:
+                    per_wait = min(_WRITE_ACK_TIMEOUT * (2 ** attempt),
+                                   remaining)
+                if self._wait_live(ev, per_wait):
+                    if 'err' in container:
+                        raise container['err']
+                    return container['code'], container['payload']
+                if deadline - time.time() <= 0:
+                    break
+                logger.debug(
+                    "POST %s /%s: attempt %d/%d timeout, retransmitting",
+                    self.host, '/'.join(path_segs), attempt + 1, attempts,
+                )
+            raise SessionTimeoutError()
         finally:
             with self._state_lock:
                 self._pending.pop(tok, None)
@@ -1066,9 +1103,16 @@ class DtlsCoapSession:
         old token gets dropped as 'stale' — acceptable for a 6h-scale
         safety net."""
         self._check_live()
+        # The dereg sweep is paced: unlike the teardown dereg in close(),
+        # which wants out quickly, this one runs against a session that has
+        # to keep working afterwards, and an unpaced OBSERVE burst is what
+        # wedges an appliance until something forces a new session
+        # (LocalThings#396). The subscribe sweep below is left alone —
+        # subscribe() is where that belongs, and QuiteYellow#51 puts it there.
         for tok, href in list(self._observe_tokens.items()):
             segs = [s for s in href.split('/') if s]
             try:
+                self.pace()
                 self._send_observe_dereg(tok, segs)
             except Exception as e:
                 logger.warning("refresh dereg %s: %s", href, e)
