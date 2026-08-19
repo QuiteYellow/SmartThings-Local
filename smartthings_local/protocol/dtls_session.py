@@ -260,10 +260,11 @@ class DtlsCoapSession:
         self.mtu = mtu
         self._min_req_interval = 1.0 / rate_limit_rps
         self._write_max_attempts = max(1, int(write_max_attempts))
-        # MID -> whether the device answered with an empty ACK. Keyed by
-        # MID because that frame carries no token (RFC 7252 5.2.2), and
-        # registered before the send so a stray ACK cannot grow it.
-        self._separate_acks = {}
+        # MID -> {'tok', 'acked'} for in-flight requests. Keyed by MID
+        # because the two frames that answer without one -- the empty ACK
+        # and RST -- carry no token, and registered before the send so a
+        # stray frame for an unknown MID cannot grow it.
+        self._inflight_mids = {}
         # Optional fixed UDP source port. A client that dies without
         # close_notify leaves an orphaned DTLS association on the device,
         # keyed to the old 5-tuple; reconnecting from a fresh ephemeral
@@ -689,11 +690,29 @@ class DtlsCoapSession:
         # the retransmit timer on the client side and wait for the CON.
         # It carries no token, so record it against the MID: without that
         # a retransmitting request has no way to know it should stop, and
-        # resends a request the device has already taken.
+        # resends a request the device has already taken. Only post()
+        # registers a MID today, so this is inert for the block reads --
+        # _exchange_block still retransmits through an empty ACK, and with
+        # a fresh MID each time, which is its own (pre-existing) bug.
         if mt == TYPE_ACK and code == 0 and not payload and not ropts:
             with self._state_lock:
-                if mid in self._separate_acks:
-                    self._separate_acks[mid] = True
+                rec = self._inflight_mids.get(mid)
+                if rec is not None:
+                    rec['acked'] = True
+            return
+
+        # RST rejects the request outright and likewise stops retransmission
+        # (RFC 7252 4.2), and is matched by MID for the same reason. RT-OCF
+        # emits these unreliably, but one that does arrive should surface as
+        # a rejection rather than as the timeout it looks like otherwise.
+        if mt == TYPE_RST:
+            with self._state_lock:
+                rec = self._inflight_mids.get(mid)
+                pending = self._pending.get(rec['tok']) if rec else None
+            if pending is not None:
+                ev, container = pending
+                container['err'] = SessionError()
+                ev.set()
             return
 
         # Pending one-shot? Resolve and return.
@@ -1054,16 +1073,20 @@ class DtlsCoapSession:
         attempts = self._write_max_attempts
         with self._state_lock:
             self._pending[tok] = (ev, container)
-            self._separate_acks[mid] = False
+            self._inflight_mids[mid] = {'tok': tok, 'acked': False}
         try:
             for attempt in range(attempts):
                 if attempt:
                     # Pace only the retransmit: a retry must never be the
                     # send that pushes a struggling device past its ceiling.
                     self.pace()
-                    self._check_live()
+                    # An answer that landed while we paced is good even if
+                    # the reader has since exited; checking liveness first
+                    # would throw away a write the device confirmed.
+                    if not ev.is_set():
+                        self._check_live()
                 with self._state_lock:
-                    acked = self._separate_acks[mid]
+                    acked = self._inflight_mids[mid]['acked']
                 # Two reasons not to resend a write: the answer landed while
                 # we were pacing, or the device acked it separately and owes
                 # us only the response. Either way the datagram arrived.
@@ -1092,7 +1115,7 @@ class DtlsCoapSession:
         finally:
             with self._state_lock:
                 self._pending.pop(tok, None)
-                self._separate_acks.pop(mid, None)
+                self._inflight_mids.pop(mid, None)
 
     def ping(self):
         """RFC 7252 §4.4 CoAP Ping — empty CON, no token, no payload.

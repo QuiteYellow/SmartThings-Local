@@ -16,7 +16,11 @@ import time
 
 import pytest
 
-from smartthings_local.errors import SessionClosedError, SessionTimeoutError
+from smartthings_local.errors import (
+    SessionClosedError,
+    SessionError,
+    SessionTimeoutError,
+)
 from smartthings_local.protocol import dtls_session as ds
 from smartthings_local.protocol.coap import parse_coap
 from smartthings_local.protocol.dtls_session import DtlsCoapSession
@@ -193,7 +197,7 @@ def test_separate_ack_stops_retransmission(monkeypatch):
         give_up = time.monotonic() + 5.0
         while time.monotonic() < give_up:
             with sess._state_lock:
-                registered = mid in sess._separate_acks
+                registered = mid in sess._inflight_mids
             if registered:
                 sess._dispatch_coap(ds.build_coap(ds.TYPE_ACK, 0, mid, b"", []))
                 return
@@ -226,6 +230,60 @@ def test_reader_death_mid_write_fails_fast():
     # Previously this waited out the full timeout and reported it as a
     # device timeout, hiding a dead session behind the write's symptom.
     assert elapsed < 2.0, f"post() waited {elapsed:.2f}s instead of failing fast"
+
+
+def test_rst_surfaces_as_a_rejection_and_stops_retransmission(monkeypatch):
+    """RST rejects the request and stops retransmission (RFC 7252 4.2). It is
+    a bare frame like the empty ACK, so it too can only be matched by MID --
+    otherwise a rejected write is resent for the whole budget and then
+    reported as a timeout, which reads as a device that went quiet."""
+    monkeypatch.setattr(ds, "_WRITE_ACK_TIMEOUT", 0.05)
+    sess = _session(write_max_attempts=10)
+    mid = _mid_of(sess)
+
+    def _rst_once_registered():
+        give_up = time.monotonic() + 5.0
+        while time.monotonic() < give_up:
+            with sess._state_lock:
+                registered = mid in sess._inflight_mids
+            if registered:
+                sess._dispatch_coap(ds.build_coap(ds.TYPE_RST, 0, mid, b"", []))
+                return
+            time.sleep(0.005)
+
+    threading.Thread(target=_rst_once_registered, daemon=True).start()
+
+    with pytest.raises(SessionError):
+        sess.post(["power", "vs", "0"], b"\xa0", timeout=1.0)
+
+    assert len(sess.sent) == 1
+
+
+def test_an_answer_that_beat_a_dying_reader_is_still_returned(monkeypatch):
+    """The retry's pace is a window in which both can happen: the response
+    lands and the reader exits. Checking liveness first throws away a write
+    the device confirmed and reports the session as closed."""
+    monkeypatch.setattr(ds, "_WRITE_ACK_TIMEOUT", 0.05)
+    sess = _session(write_max_attempts=3)
+    sess._reader_thread = threading.Thread(target=lambda: None)
+    sess._reader_running.set()
+    tok = _token_of(sess)
+
+    def _answer_then_die():
+        with sess._state_lock:
+            entry = sess._pending.get(tok)
+        if entry is not None:
+            ev, container = entry
+            container.update(code=0x44, payload=b"")
+            ev.set()
+        sess._reader_running.clear()
+
+    sess.pace = _answer_then_die
+
+    code, _ = sess.post(["power", "vs", "0"], b"\xa0", timeout=2.0)
+
+    assert code == 0x44
+    assert len(sess.sent) == 1
 
 
 def test_refresh_observes_paces_the_dereg_sweep():
