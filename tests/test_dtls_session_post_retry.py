@@ -32,11 +32,20 @@ class _NullAuth:
 def _session(**kwargs):
     """Session with the wire stubbed out: every datagram post() hands to
     _send_dgram is recorded instead of sent, so a test can decide which
-    ones the 'device' answers."""
+    ones the 'device' answers.
+
+    The stub stamps _last_send_ts exactly as the real _send_dgram does --
+    without it pace() reads a zero timestamp, decides the interval elapsed
+    long ago, and never sleeps, which silently voids any test of pacing."""
     sess = DtlsCoapSession("host", 1234, auth=_NullAuth(), **kwargs)
     sess.conn = object()            # satisfies _check_live's conn guard
     sess.sent = []
-    sess._send_dgram = sess.sent.append
+
+    def _record(datagram):
+        sess.sent.append(datagram)
+        sess._last_send_ts = time.monotonic()
+
+    sess._send_dgram = _record
     return sess
 
 
@@ -70,6 +79,11 @@ def _answer(sess, tok, *, code=0x44, payload=b"", delay=0.0):
 def _token_of(sess):
     """The token post() will mint next, so a test can answer it."""
     return (sess._tok_counter + 1).to_bytes(4, "big")
+
+
+def _mid_of(sess):
+    """The MID post() will mint next — what an empty ACK is matched on."""
+    return (sess._mid + 1) & 0xFFFF
 
 
 def test_default_sends_exactly_once():
@@ -126,6 +140,72 @@ def test_attempts_stop_at_the_callers_deadline(monkeypatch):
 
     # Retransmission lives inside the caller's timeout, never on top of it.
     assert elapsed < 1.0, f"post() overran its 0.4s deadline by {elapsed:.2f}s"
+
+
+def test_a_retry_is_skipped_when_its_pace_would_outrun_the_deadline(monkeypatch):
+    """pace() sleeps up to a whole rate-limit interval, so a retry decided on
+    "is there any budget left" returns well past the caller's timeout — 1s on
+    a 0.5s call at 1 rps."""
+    monkeypatch.setattr(ds, "_WRITE_ACK_TIMEOUT", 0.1)
+    sess = _session(write_max_attempts=5, rate_limit_rps=1.0)
+
+    start = time.monotonic()
+    with pytest.raises(SessionTimeoutError):
+        sess.post(["power", "vs", "0"], b"\xa0", timeout=0.5)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.5, f"post() overran its 0.5s deadline by {elapsed:.2f}s"
+    assert len(sess.sent) == 1
+
+
+def test_a_reply_during_the_pace_window_is_not_resent(monkeypatch):
+    """The retry's pace is a window the answer can land in. Resending then
+    puts a second copy of a non-idempotent write on the wire for nothing."""
+    monkeypatch.setattr(ds, "_WRITE_ACK_TIMEOUT", 0.05)
+    sess = _session(write_max_attempts=3)
+    tok = _token_of(sess)
+
+    def _answer_while_pacing():
+        with sess._state_lock:
+            entry = sess._pending.get(tok)
+        if entry is not None:
+            ev, container = entry
+            container.update(code=0x44, payload=b"")
+            ev.set()
+
+    sess.pace = _answer_while_pacing
+
+    code, _ = sess.post(["power", "vs", "0"], b"\xa0", timeout=2.0)
+
+    assert code == 0x44
+    assert len(sess.sent) == 1
+
+
+def test_separate_ack_stops_retransmission(monkeypatch):
+    """An empty ACK means "response coming on its own CON" (RFC 7252 5.2.2)
+    and stops the retransmit timer. It carries no token, so the session has
+    to match it on MID or it looks like nothing arrived at all."""
+    monkeypatch.setattr(ds, "_WRITE_ACK_TIMEOUT", 0.05)
+    sess = _session(write_max_attempts=10)
+    mid = _mid_of(sess)
+
+    def _ack_once_registered():
+        give_up = time.monotonic() + 5.0
+        while time.monotonic() < give_up:
+            with sess._state_lock:
+                registered = mid in sess._separate_acks
+            if registered:
+                sess._dispatch_coap(ds.build_coap(ds.TYPE_ACK, 0, mid, b"", []))
+                return
+            time.sleep(0.005)
+
+    threading.Thread(target=_ack_once_registered, daemon=True).start()
+
+    with pytest.raises(SessionTimeoutError):
+        sess.post(["power", "vs", "0"], b"\xa0", timeout=0.5)
+
+    # Without MID matching this retransmits for the whole 0.5s budget.
+    assert len(sess.sent) == 1
 
 
 def test_reader_death_mid_write_fails_fast():

@@ -260,6 +260,10 @@ class DtlsCoapSession:
         self.mtu = mtu
         self._min_req_interval = 1.0 / rate_limit_rps
         self._write_max_attempts = max(1, int(write_max_attempts))
+        # MID -> whether the device answered with an empty ACK. Keyed by
+        # MID because that frame carries no token (RFC 7252 5.2.2), and
+        # registered before the send so a stray ACK cannot grow it.
+        self._separate_acks = {}
         # Optional fixed UDP source port. A client that dies without
         # close_notify leaves an orphaned DTLS association on the device,
         # keyed to the old 5-tuple; reconnecting from a fresh ephemeral
@@ -683,7 +687,13 @@ class DtlsCoapSession:
         # Empty ACK with no options & no payload = "separate response
         # coming" — used by Samsung's RT-OCF for the larger reads. Stop
         # the retransmit timer on the client side and wait for the CON.
+        # It carries no token, so record it against the MID: without that
+        # a retransmitting request has no way to know it should stop, and
+        # resends a request the device has already taken.
         if mt == TYPE_ACK and code == 0 and not payload and not ropts:
+            with self._state_lock:
+                if mid in self._separate_acks:
+                    self._separate_acks[mid] = True
             return
 
         # Pending one-shot? Resolve and return.
@@ -1044,6 +1054,7 @@ class DtlsCoapSession:
         attempts = self._write_max_attempts
         with self._state_lock:
             self._pending[tok] = (ev, container)
+            self._separate_acks[mid] = False
         try:
             for attempt in range(attempts):
                 if attempt:
@@ -1051,18 +1062,27 @@ class DtlsCoapSession:
                     # send that pushes a struggling device past its ceiling.
                     self.pace()
                     self._check_live()
-                self._send_dgram(datagram)
+                with self._state_lock:
+                    acked = self._separate_acks[mid]
+                # Two reasons not to resend a write: the answer landed while
+                # we were pacing, or the device acked it separately and owes
+                # us only the response. Either way the datagram arrived.
+                if not ev.is_set() and not acked:
+                    self._send_dgram(datagram)
                 remaining = deadline - time.time()
-                if attempt == attempts - 1:
+                if acked or attempt == attempts - 1:
                     per_wait = remaining
                 else:
                     per_wait = min(_WRITE_ACK_TIMEOUT * (2 ** attempt),
                                    remaining)
-                if self._wait_live(ev, per_wait):
+                if ev.is_set() or self._wait_live(ev, per_wait):
                     if 'err' in container:
                         raise container['err']
                     return container['code'], container['payload']
-                if deadline - time.time() <= 0:
+                # Retry only if the next attempt's pace still fits inside the
+                # caller's deadline: pace() sleeps up to a whole interval, so
+                # asking merely for "any budget left" returns late.
+                if acked or deadline - time.time() <= self._min_req_interval:
                     break
                 logger.debug(
                     "POST %s /%s: attempt %d/%d timeout, retransmitting",
@@ -1072,6 +1092,7 @@ class DtlsCoapSession:
         finally:
             with self._state_lock:
                 self._pending.pop(tok, None)
+                self._separate_acks.pop(mid, None)
 
     def ping(self):
         """RFC 7252 §4.4 CoAP Ping — empty CON, no token, no payload.
