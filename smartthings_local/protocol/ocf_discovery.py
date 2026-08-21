@@ -1,10 +1,12 @@
 """Bounded discovery of OCF-advertised secure UDP ports.
 
-Samsung appliances normally receive public CoAP discovery on UDP 5683, but
-some firmware sends the response from a different source port. This module
-therefore uses unconnected UDP sockets, validates the resolved target address
-and CoAP token, then pins the first valid response endpoint for the remainder
-of each bounded Block2 transfer.
+This known-host API requires the target's public CoAP request port to already
+be known. UDP 5683 is a convenience default, not a port-discovery mechanism;
+callers must locate and explicitly pass a different public port when the
+target does not listen there. A response may still originate from another
+source port, so this module uses unconnected UDP sockets, validates the
+resolved target address and CoAP token, then pins the first valid response
+endpoint for the remainder of each bounded Block2 transfer.
 
 Discovery first reads the unfiltered ``/oic/res`` directory and accepts only
 secure ``eps`` entries bound to that response source. If the representation
@@ -586,6 +588,11 @@ def discover_ocf_secure_ports(
         host, *, discovery_port=_DISCOVERY_PORT, timeout=3.0, retries=1,
         family=socket.AF_UNSPEC):
     """Discover secure ports advertised by a target's public OCF directory.
+
+    ``discovery_port`` is the target's already-known public CoAP request port.
+    Its 5683 default is only a convenience; this function does not scan or use
+    multicast to locate a different public port before sending the request.
+    Callers must locate any such port separately and pass it explicitly.
 
     Name resolution happens synchronously first. ``timeout`` then bounds both
     explicit directory lookups and every Block2 continuation. An advertisement

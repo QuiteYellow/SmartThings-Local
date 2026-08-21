@@ -321,14 +321,21 @@ candidates = advertisement.ports or fallback_ports
 probe = probe_dtls_ports(appliance_host, candidates)
 ```
 
+`discovery_port` is the target's already-known public CoAP request port. Its
+5683 default is only a convenience: this function does not scan or use
+multicast to locate a different public port. If the appliance does not listen
+on 5683, locate that public port separately and pass it explicitly as
+`discovery_port=...`.
+
 `discover_ocf_secure_ports()` first reads the public `/oic/res` directory and
 uses only `coaps://` endpoints whose literal host matches the correlated
 response source. If that first lookup yields no correlated response or no
 usable secure endpoint, the same overall deadline also bounds a filtered
 `/oic/res?rt=oic.r.doxm` fallback for Samsung's legacy secure-port policy. It
-accepts Samsung's dynamic plaintext response source port while still requiring
-the resolved target address and CoAP token, and assembles Block2 responses
-within fixed time, block-count, and payload limits.
+accepts a different dynamic response source port after the request reaches the
+known public port, while still requiring the resolved target address and CoAP
+token, and assembles Block2 responses within fixed time, block-count, and
+payload limits.
 
 Directory discovery and the DTLS probe have separate jobs: discovery can learn
 a device-advertised port outside the caller's fixed fallback set, while
