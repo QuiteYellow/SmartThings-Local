@@ -308,6 +308,42 @@ python -m smartthings_local.protocol.dtls_probe "$APPLIANCE_IP" 5684 49153 49154
 
 `live` means a DTLS server answered its first flight; `dead` means silent or not DTLS. Once you have the client cert (Part 2), add the explicit `--diagnostic` flag to run the stateful diagnostic drive, which reports `completed` (cert accepted) or `rejected` with the server's fatal alert. Diagnostic mode can allocate appliance-side DTLS state and is never used by discovery or reconnect. An `unsupported_certificate` / `unknown_ca` alert means the endpoint is reachable but this certificate profile was rejected. It is not a reason to disable verification or keep retrying. The same bounded stateless API gates the bridge's reconnect loop and, when `OCF_PORT` is unset, probes both standard 5684 and ports 49152–49160.
 
+Consumers can discover ports outside that fallback range through the public,
+read-only OCF resource directory before probing them:
+
+```python
+from smartthings_local.protocol.dtls_probe import probe_dtls_ports
+from smartthings_local.protocol.ocf_discovery import discover_ocf_secure_ports
+
+fallback_ports = (5684, *range(49152, 49161))
+advertisement = discover_ocf_secure_ports(appliance_host)
+candidates = advertisement.ports or fallback_ports
+probe = probe_dtls_ports(appliance_host, candidates)
+```
+
+`discovery_port` is the target's already-known public CoAP request port. Its
+5683 default is only a convenience: this function does not scan or use
+multicast to locate a different public port. If the appliance does not listen
+on 5683, locate that public port separately and pass it explicitly as
+`discovery_port=...`.
+
+`discover_ocf_secure_ports()` first reads the public `/oic/res` directory and
+uses only `coaps://` endpoints whose literal host matches the correlated
+response source. If that first lookup yields no correlated response or no
+usable secure endpoint, the same overall deadline also bounds a filtered
+`/oic/res?rt=oic.r.doxm` fallback for Samsung's legacy secure-port policy. It
+accepts a different dynamic response source port after the request reaches the
+known public port, while still requiring the resolved target address and CoAP
+token, and assembles Block2 responses within fixed time, block-count, and
+payload limits.
+
+Directory discovery and the DTLS probe have separate jobs: discovery can learn
+a device-advertised port outside the caller's fixed fallback set, while
+`probe_dtls_ports()` only checks the candidates it receives for a stateless
+DTLS first-flight response. Neither step authenticates the appliance. An
+advertised port therefore remains only a candidate: require a successful
+stateless DTLS probe before attempting authentication.
+
 ### Tested combinations
 
 | Appliance class | Model family | Confirmed |
@@ -636,6 +672,7 @@ smartthings_local/                   The installable library — `pip install sm
     dtls_probe.py                    Stateless DTLS liveness + opt-in stateful diagnostic
     dtls_handshake.py                Shared memory-BIO handshake driver, bounded by a monotonic deadline (used by session + probe)
     owner_psk.py                     Pure manufacturer-certificate OwnerPSK derivation
+    ocf_discovery.py                 Bounded public OCF secure-port discovery
     ocf_root_ca.pem                  Samsung OCF root CA, bundled for handshake verification
   ocf/                               OCF resource + state layer (reusable)
     __init__.py
