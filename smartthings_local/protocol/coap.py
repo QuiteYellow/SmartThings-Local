@@ -17,7 +17,9 @@ ETAG           =  4
 CONTENT_FORMAT = 12
 ACCEPT         = 17
 BLOCK2         = 23
+BLOCK1         = 27
 SIZE2          = 28
+SIZE1          = 60
 
 # CoAP message types
 TYPE_CON = 0
@@ -28,6 +30,7 @@ TYPE_RST = 3
 # CoAP method codes
 METHOD_GET  = 0x01
 METHOD_POST = 0x02
+METHOD_DELETE = 0x04
 
 # CoAP content-format value for application/cbor
 CF_CBOR = b'\x3c'
