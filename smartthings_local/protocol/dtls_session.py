@@ -42,9 +42,10 @@ from ..errors import (
     SessionTimeoutError,
 )
 from .coap import (
-    URI_PATH, URI_QUERY, OBSERVE, ETAG, CONTENT_FORMAT, ACCEPT, BLOCK2, SIZE2,
+    URI_PATH, URI_QUERY, OBSERVE, ETAG, CONTENT_FORMAT, ACCEPT,
+    BLOCK2, BLOCK1, SIZE2, SIZE1,
     TYPE_CON, TYPE_NON, TYPE_ACK, TYPE_RST,
-    METHOD_GET, METHOD_POST, CF_CBOR,
+    METHOD_GET, METHOD_POST, METHOD_DELETE, CF_CBOR,
     OBSERVE_REGISTER, OBSERVE_DEREGISTER, BLOCK_SZX,
     encode_options, parse_coap, build_coap, block_value, block_fields,
     fmt_code,
@@ -79,6 +80,8 @@ DEBUG_BRIDGE = os.environ.get('DEBUG_BRIDGE') == '1'
 # overall deadline). Matches RFC 7252 CON retransmit behaviour.
 _BLOCK_MAX_ATTEMPTS = 3
 _BLOCK_ACK_TIMEOUT  = 4.0
+_MAX_BLOCK1_BODY_BYTES = 512 * 1024
+_MAX_BLOCK1_REQUESTS = 1024
 
 # How often a block wait re-checks that the reader is still alive. Short
 # enough that a mid-transfer reader death fails fast instead of burning
@@ -136,6 +139,75 @@ def _validate_handshake_timeout(timeout, default):
     if not math.isfinite(value) or value <= 0:
         raise ValueError('timeout must be a positive finite number or None')
     return value
+
+
+_MAX_REQUEST_OPTION_BYTES = 1024
+_MAX_REQUEST_OPTION_COUNT = 32
+_MAX_REQUEST_OPTION_NUMBER = 65535
+_MANAGED_REQUEST_OPTIONS = frozenset((
+    URI_PATH, URI_QUERY, OBSERVE, CONTENT_FORMAT, ACCEPT,
+    BLOCK2, BLOCK1, SIZE2, SIZE1,
+))
+
+
+def _validated_text_options(values, *, name, allow_empty):
+    """Return bounded UTF-8 option values without echoing caller data."""
+    if isinstance(values, (str, bytes, bytearray, memoryview)):
+        raise TypeError(f'{name} must be an iterable of strings')
+    try:
+        iterator = iter(values)
+    except TypeError:
+        raise TypeError(f'{name} must be an iterable of strings') from None
+    result = []
+    for value in iterator:
+        if len(result) >= _MAX_REQUEST_OPTION_COUNT:
+            raise ValueError(f'{name} must contain at most 32 values')
+        if not isinstance(value, str):
+            raise TypeError(f'{name} values must be strings')
+        try:
+            encoded = value.encode('utf-8')
+        except UnicodeEncodeError:
+            raise ValueError(f'{name} values must be valid UTF-8') from None
+        if (not allow_empty and not encoded) or \
+                len(encoded) > _MAX_REQUEST_OPTION_BYTES:
+            raise ValueError(f'{name} values must be non-empty and bounded')
+        result.append(value)
+    return tuple(result)
+
+
+def _validated_extra_options(extra_options):
+    """Return bounded, ordered options not owned by the request methods."""
+    if isinstance(extra_options, (str, bytes, bytearray, memoryview)):
+        raise TypeError('extra_options must contain (number, bytes) tuples')
+    try:
+        iterator = iter(extra_options)
+    except TypeError:
+        raise TypeError(
+            'extra_options must contain (number, bytes) tuples') from None
+    result = []
+    previous = -1
+    for item in iterator:
+        if len(result) >= _MAX_REQUEST_OPTION_COUNT:
+            raise ValueError('extra_options must contain at most 32 values')
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise TypeError(
+                'extra_options must contain (number, bytes) tuples')
+        number, value = item
+        if isinstance(number, bool) or not isinstance(number, int):
+            raise TypeError('extra option numbers must be integers')
+        if not 1 <= number <= _MAX_REQUEST_OPTION_NUMBER:
+            raise ValueError('extra option numbers must be bounded')
+        if number < previous:
+            raise ValueError('extra options must be ordered by number')
+        if number in _MANAGED_REQUEST_OPTIONS:
+            raise ValueError('extra option is managed by the CoAP transport')
+        if not isinstance(value, bytes):
+            raise TypeError('extra option values must be bytes')
+        if len(value) > _MAX_REQUEST_OPTION_BYTES:
+            raise ValueError('extra option values must be bounded')
+        result.append((number, value))
+        previous = number
+    return tuple(result)
 
 
 class ConnectCancellation:
@@ -682,6 +754,30 @@ class DtlsCoapSession:
             rec = self._pending.get(tok)
         if rec is not None:
             ev, container = rec
+            expected_block1_start = container.get('expected_block1_start')
+            if code >> 5 == 2 and expected_block1_start is not None:
+                block_values = [
+                    value for number, value in ropts if number == BLOCK1]
+                if len(block_values) > 1:
+                    return
+                if block_values:
+                    block = block_values[0]
+                    if len(block) > 3:
+                        return
+                    response_num, _response_more, response_szx = \
+                        block_fields(block)
+                    if response_szx > BLOCK_SZX:
+                        return
+                    response_size = 1 << (response_szx + 4)
+                    response_start = response_num * response_size
+                    response_end = response_start + response_size
+                    expected_end = container['expected_block1_end']
+                    expected_more = container['expected_block1_more']
+                    if (expected_more and response_end != expected_end) or \
+                            (not expected_more and not (
+                                response_start <= expected_block1_start <
+                                response_end and expected_end <= response_end)):
+                        return
             container['code']    = code
             container['mtype']   = mt
             container['mid']     = mid
@@ -824,7 +920,7 @@ class DtlsCoapSession:
 
     # ---- request primitives ------------------------------------------
 
-    def get(self, path_segs, query=(), timeout=10.0):
+    def get(self, path_segs, query=(), timeout=10.0, *, extra_options=()):
         """Token-stable Block2 GET. Returns (code, payload_bytes).
 
         Reuses one CoAP token across every block of a multi-block
@@ -832,11 +928,17 @@ class DtlsCoapSession:
         token, and dropping a fresh token on block 1+ silently drops
         the request."""
         self._check_live()
+        path_segs = _validated_text_options(
+            path_segs, name='path_segs', allow_empty=False)
+        query = _validated_text_options(
+            query, name='query', allow_empty=False)
+        extra_options = _validated_extra_options(extra_options)
         code, blob, _blocks, _tok = self._blockwise_get(
-            path_segs, query, timeout)
+            path_segs, query, timeout, extra_options=extra_options)
         return code, blob
 
-    def _blockwise_get(self, path_segs, query=(), timeout=10.0):
+    def _blockwise_get(
+            self, path_segs, query=(), timeout=10.0, *, extra_options=()):
         """Shared token-stable Block2 reassembly (RFC 7959 §2.4).
 
         Returns (code, payload, block_count, token). The last two are
@@ -855,19 +957,22 @@ class DtlsCoapSession:
         when the server supplies them. None of the tested appliances
         emit option 4, so on those this is inert."""
         try:
-            return self._blockwise_get_once(path_segs, query, timeout)
+            return self._blockwise_get_once(
+                path_segs, query, timeout, extra_options)
         except _EtagChanged:
             logger.debug("GET %s /%s: ETag changed mid-transfer, restarting",
                          self.host, '/'.join(path_segs))
         try:
-            return self._blockwise_get_once(path_segs, query, timeout)
+            return self._blockwise_get_once(
+                path_segs, query, timeout, extra_options)
         except _EtagChanged:
             logger.debug(
                 "GET %s /%s: representation kept changing mid-transfer",
                 self.host, '/'.join(path_segs))
             raise BlockwiseError() from None
 
-    def _blockwise_get_once(self, path_segs, query, timeout):
+    def _blockwise_get_once(
+            self, path_segs, query, timeout, extra_options):
         """One attempt at a full Block2 transfer. Raises _EtagChanged if
         the server's representation changed while we were reassembling."""
         tok = self._next_tok()
@@ -882,7 +987,7 @@ class DtlsCoapSession:
             self.pace()
             self._check_live()
             container = self._exchange_block(
-                tok, path_segs, query, num, szx, deadline)
+                tok, path_segs, query, num, szx, deadline, extra_options)
             if 'err' in container:
                 raise container['err']
             blocks += 1
@@ -924,7 +1029,9 @@ class DtlsCoapSession:
                 raise BlockwiseError()
         return last_code, blob, blocks, tok
 
-    def _exchange_block(self, tok, path_segs, query, num, szx, deadline):
+    def _exchange_block(
+            self, tok, path_segs, query, num, szx, deadline,
+            extra_options):
         """Send one block request under `tok` and return its response
         container, retransmitting up to _BLOCK_MAX_ATTEMPTS times.
 
@@ -945,6 +1052,7 @@ class DtlsCoapSession:
                 opts.append((ACCEPT, CF_CBOR))
                 if num > 0:
                     opts.append((BLOCK2, block_value(num, 0, szx)))
+                opts.extend(extra_options)
                 self._send_dgram(
                     build_coap(TYPE_CON, METHOD_GET, mid, tok, opts))
                 while True:
@@ -1010,17 +1118,190 @@ class DtlsCoapSession:
             return num == 0
         return block_fields(b2[0])[0] == num
 
-    def post(self, path_segs, body_cbor, timeout=8.0):
+    def post(
+            self, path_segs, body_cbor, timeout=8.0, *, query=(),
+            extra_options=()):
         """Single-frame POST with a CBOR-encoded body. Returns
         (code, payload_bytes). body_cbor must already be encoded."""
         self._check_live()
+        path_segs = _validated_text_options(
+            path_segs, name='path_segs', allow_empty=False)
+        query = _validated_text_options(
+            query, name='query', allow_empty=False)
+        extra_options = _validated_extra_options(extra_options)
+        if not isinstance(body_cbor, bytes):
+            raise TypeError('body_cbor must be bytes')
+        if len(body_cbor) > _MAX_BLOCK1_BODY_BYTES:
+            raise ValueError('body_cbor must contain at most 524288 bytes')
+        block_size = 1 << (BLOCK_SZX + 4)
+        opts = [(URI_PATH, s.encode()) for s in path_segs]
+        for q in query:
+            opts.append((URI_QUERY, q.encode()))
+        opts.append((CONTENT_FORMAT, CF_CBOR))
+        opts.append((ACCEPT, CF_CBOR))
+        if len(body_cbor) > block_size:
+            return self._post_blockwise(
+                path_segs,
+                body_cbor,
+                opts,
+                extra_options,
+                timeout=timeout,
+            )
+        tok = self._next_tok()
+        mid = self._next_mid()
+        opts.extend(extra_options)
+        datagram = build_coap(TYPE_CON, METHOD_POST, mid, tok, opts,
+                              body_cbor)
+        ev = threading.Event()
+        container = {}
+        with self._state_lock:
+            self._pending[tok] = (ev, container)
+        try:
+            self.pace()
+            self._check_live()
+            self._send_dgram(datagram)
+            if not ev.wait(timeout):
+                raise SessionTimeoutError()
+            if 'err' in container:
+                raise container['err']
+            return container['code'], container['payload']
+        finally:
+            with self._state_lock:
+                self._pending.pop(tok, None)
+
+    def _post_blockwise(
+            self, path_segs, body_cbor, base_options, extra_options, *,
+            timeout):
+        """Upload one bounded body with token-stable Block1 framing."""
+        tok = self._next_tok()
+        deadline = time.monotonic() + timeout
+        offset = 0
+        szx = BLOCK_SZX
+        request_count = 0
+
+        while offset < len(body_cbor):
+            self._check_live()
+            block_size = 1 << (szx + 4)
+            if offset % block_size:
+                raise BlockwiseError()
+            num = offset // block_size
+            chunk = body_cbor[offset:offset + block_size]
+            end_offset = offset + len(chunk)
+            more = int(end_offset < len(body_cbor))
+            request_count += 1
+            if request_count > _MAX_BLOCK1_REQUESTS:
+                raise BlockwiseError()
+
+            opts = list(base_options)
+            opts.append((BLOCK1, block_value(num, more, szx)))
+            if offset == 0:
+                size_width = max(
+                    1, (len(body_cbor).bit_length() + 7) // 8)
+                opts.append((
+                    SIZE1,
+                    len(body_cbor).to_bytes(size_width, 'big'),
+                ))
+            opts.extend(extra_options)
+            mid = self._next_mid()
+            request = build_coap(
+                TYPE_CON, METHOD_POST, mid, tok, opts, chunk)
+
+            container = {}
+            for attempt in range(_BLOCK_MAX_ATTEMPTS):
+                self._check_live()
+                if deadline - time.monotonic() <= 0:
+                    raise SessionTimeoutError()
+                ev = threading.Event()
+                container = {
+                    'expected_block1_start': offset,
+                    'expected_block1_end': end_offset,
+                    'expected_block1_more': more,
+                }
+                with self._state_lock:
+                    self._pending[tok] = (ev, container)
+                try:
+                    self.pace()
+                    self._check_live()
+                    if deadline - time.monotonic() <= 0:
+                        raise SessionTimeoutError()
+                    self._send_dgram(request)
+                    per_wait = min(
+                        _BLOCK_ACK_TIMEOUT,
+                        max(0.1, deadline - time.monotonic()),
+                    )
+                    if self._wait_for_block(ev, per_wait):
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or \
+                            attempt == _BLOCK_MAX_ATTEMPTS - 1:
+                        raise SessionTimeoutError()
+                finally:
+                    with self._state_lock:
+                        self._pending.pop(tok, None)
+
+            if 'err' in container:
+                raise container['err']
+            code = container['code']
+            payload = container['payload']
+            response_blocks = [
+                value for number, value in container['options']
+                if number == BLOCK1]
+
+            if more:
+                if code != 0x5F:
+                    if code >> 5 == 2:
+                        raise BlockwiseError()
+                    return code, payload
+                if len(response_blocks) > 1:
+                    raise BlockwiseError()
+                if not response_blocks or len(response_blocks[0]) > 3:
+                    raise BlockwiseError()
+                _response_num, response_more, response_szx = \
+                    block_fields(response_blocks[0])
+                if not response_more or response_szx > szx:
+                    raise BlockwiseError()
+                szx = response_szx
+                if offset % (1 << (szx + 4)):
+                    raise BlockwiseError()
+                offset = end_offset
+                continue
+
+            if code >> 5 != 2:
+                return code, payload
+            if code == 0x5F:
+                raise BlockwiseError()
+            if len(response_blocks) > 1:
+                raise BlockwiseError()
+            if response_blocks:
+                block = response_blocks[0]
+                if len(block) > 3:
+                    raise BlockwiseError()
+                _response_num, response_more, response_szx = \
+                    block_fields(block)
+                if response_more or response_szx > szx:
+                    raise BlockwiseError()
+            return code, payload
+
+        raise BlockwiseError()
+
+    def delete(
+            self, path_segs, timeout=8.0, *, query=(), extra_options=()):
+        """Single-frame DELETE. Returns (code, payload_bytes)."""
+        self._check_live()
+        path_segs = _validated_text_options(
+            path_segs, name='path_segs', allow_empty=False)
+        query = _validated_text_options(
+            query, name='query', allow_empty=False)
+        extra_options = _validated_extra_options(extra_options)
         tok = self._next_tok()
         mid = self._next_mid()
         opts = [(URI_PATH, s.encode()) for s in path_segs]
-        opts.append((CONTENT_FORMAT, CF_CBOR))
+        for q in query:
+            opts.append((URI_QUERY, q.encode()))
         opts.append((ACCEPT, CF_CBOR))
-        datagram = build_coap(TYPE_CON, METHOD_POST, mid, tok, opts,
-                              body_cbor)
+        opts.extend(extra_options)
+        datagram = build_coap(
+            TYPE_CON, METHOD_DELETE, mid, tok, opts)
         ev = threading.Event()
         container = {}
         with self._state_lock:

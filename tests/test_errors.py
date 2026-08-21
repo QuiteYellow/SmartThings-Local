@@ -156,6 +156,7 @@ def test_handshake_error_is_classified_without_backend_text(monkeypatch):
     (
         lambda session: session.get(['resource']),
         lambda session: session.post(['resource'], b'payload'),
+        lambda session: session.delete(['resource']),
         lambda session: session.ping(),
         lambda session: session.refresh_observes([]),
         lambda session: session.subscribe(['resource']),
