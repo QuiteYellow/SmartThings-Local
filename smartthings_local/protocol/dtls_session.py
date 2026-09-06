@@ -164,6 +164,35 @@ class _EtagChanged(Exception):
     transfer, so the blocks in hand are from two different versions."""
 
 
+@dataclass(frozen=True, slots=True)
+class ObserveDelivery:
+    """One representation delivered on an Observe relation.
+
+    ``registration`` separates the server's answer to the register CON
+    from a change the server chose to send. RFC 7641 §3.2 makes the
+    first response on the token the answer to the registration, and a
+    consumer that treats it as a push reports a device as pushing when
+    it has only replied to being asked. The session is the only layer
+    that can tell them apart, since the token, the Message ID and the
+    Observe option are all resolved here and none of them reach a
+    caller.
+
+    ``query`` completes the relation identity: the same href can carry
+    several query-qualified relations, each registering separately.
+
+    ``sequence`` is the Observe option value (§3.4), or ``None`` on the
+    optionless responses some Samsung firmware sends. ``legacy`` marks a
+    relation promoted to that optionless path.
+    """
+
+    href: str
+    payload: bytes
+    query: tuple[str, ...] = ()
+    registration: bool = False
+    sequence: int | None = None
+    legacy: bool = False
+
+
 @dataclass(slots=True)
 class _MidExchange:
     """One pending request, indexed independently by token and MID."""
@@ -414,7 +443,8 @@ class DtlsCoapSession:
                  auth: AuthenticationProvider | None = None,
                  on_legacy_notification=None,
                  on_observe_pending=None,
-                 on_observe_error=None):
+                 on_observe_error=None,
+                 on_observe_delivery=None):
         file_supplied = cert_path is not None or key_path is not None
         memory_supplied = cert_pem is not None or key_pem is not None
         if auth is not None and (file_supplied or memory_supplied):
@@ -448,6 +478,11 @@ class DtlsCoapSession:
         self.on_legacy_notification = on_legacy_notification
         self.on_observe_pending = on_observe_pending
         self.on_observe_error = on_observe_error
+        # fn(ObserveDelivery). Takes precedence over on_notification and
+        # on_legacy_notification, which carry only (href, payload) and so
+        # cannot express which delivery answered the register CON, nor
+        # which query-qualified relation it belongs to.
+        self.on_observe_delivery = on_observe_delivery
         self.mtu = mtu
         self._min_req_interval = 1.0 / rate_limit_rps
         self._write_max_attempts = max(1, int(write_max_attempts))
@@ -1039,6 +1074,24 @@ class DtlsCoapSession:
             self._legacy_observe_mids.clear()
             self._observe_sequences.clear()
 
+    def _observe_sequence_for(self, href, query):
+        """The Observe value last recorded for one relation, if any.
+
+        A refetched representation is delivered after its triggering
+        notification has already been ordered, so the sequence to report
+        is the one that ordering recorded. Optionless relations have
+        none.
+        """
+        with self._state_lock:
+            for tok, observed_href in self._observe_tokens.items():
+                if observed_href != href or \
+                        self._observe_queries.get(tok, ()) != query:
+                    continue
+                recorded = self._observe_sequences.get(tok)
+                if recorded is not None:
+                    return recorded[0]
+        return None
+
     def _observe_relation_active(self, href, query, legacy):
         """Return whether one relation still owns this callback identity."""
         with self._state_lock:
@@ -1316,6 +1369,8 @@ class DtlsCoapSession:
                 value for number, value in ropts if number == OBSERVE
             ]
             legacy = False
+            registration = False
+            sequence = None
             if observe_values:
                 if len(observe_values) != 1 or len(observe_values[0]) > 3:
                     logger.debug("observe %s: malformed Observe option", href)
@@ -1327,6 +1382,12 @@ class DtlsCoapSession:
                     if not self._observe_sequence_is_fresh(
                             previous, sequence, received_at):
                         return
+                    # Nothing recorded for this token yet, so this is the
+                    # first response it has carried: the answer to the
+                    # register CON. Retiring a token on unsubscribe or
+                    # refresh clears the entry, so a re-registration is
+                    # recognised as one without any caller bookkeeping.
+                    registration = previous is None
                     self._observe_sequences[tok] = (sequence, received_at)
                     self._observe_plain_response_mids.pop(tok, None)
                     self._legacy_observe_tokens.discard(tok)
@@ -1352,6 +1413,11 @@ class DtlsCoapSession:
                         self._legacy_observe_mids[tok] = mid
                         legacy = True
                 if pending:
+                    # The optionless equivalent of the branch above: the
+                    # first plain 2.05 on this token answers the register
+                    # CON, even though the relation stays probationary
+                    # until a later different-MID packet promotes it.
+                    registration = True
                     logger.debug(
                         "observe %s: probationary 2.05 without Observe option",
                         href,
@@ -1377,7 +1443,13 @@ class DtlsCoapSession:
             # block past the first) goes to the refetch worker instead.
             if blockwise_refetch:
                 self._queue_refetch(
-                    href, tuple(observe_query), legacy=legacy)
+                    href, tuple(observe_query), legacy=legacy,
+                    registration=registration)
+                return
+            if self._deliver_observation(
+                    href, payload, tuple(observe_query),
+                    registration=registration, sequence=sequence,
+                    legacy=legacy):
                 return
             cb = (
                 self.on_legacy_notification
@@ -1405,7 +1477,28 @@ class DtlsCoapSession:
         without also turning on every per-block retransmit line."""
         (logger.info if DEBUG_BRIDGE else logger.debug)(msg, *args)
 
-    def _queue_refetch(self, href, query=(), *, legacy=False):
+    def _deliver_observation(self, href, payload, query, *,
+                             registration, sequence, legacy):
+        """Hand one observation to the rich callback, if one is set.
+
+        Returns True when it took the delivery, so the two call sites
+        fall through to the (href, payload) callbacks only when no
+        consumer asked for the full relation context.
+        """
+        cb = self.on_observe_delivery
+        if cb is None:
+            return False
+        try:
+            cb(ObserveDelivery(
+                href=href, payload=payload, query=tuple(query),
+                registration=registration, sequence=sequence,
+                legacy=legacy))
+        except Exception as e:
+            logger.warning("observe delivery callback %s: %s", href, e)
+        return True
+
+    def _queue_refetch(self, href, query=(), *, legacy=False,
+                       registration=False):
         """Queue a blockwise notification for re-reading.
 
         Called from the reader thread, so it must not block: _dispatch_coap
@@ -1422,7 +1515,10 @@ class DtlsCoapSession:
                     href, len(self._refetch_pending))
                 return
             self._refetch_seq += 1
-            self._refetch_pending[key] = self._refetch_seq
+            # Latest wins, and a real change superseding the registration
+            # answer means what finally gets delivered is that change.
+            self._refetch_pending[key] = (self._refetch_seq,
+                                          bool(registration))
             self._refetch_cond.notify()
         self._start_refetch_worker()
 
@@ -1452,9 +1548,10 @@ class DtlsCoapSession:
                     self._refetch_cond.wait(1.0)
                 if not self._refetch_pending:
                     return
-                key, seq = next(iter(self._refetch_pending.items()))
+                key, (seq, registration) = next(
+                    iter(self._refetch_pending.items()))
                 del self._refetch_pending[key]
-            self._refetch_one(key, seq)
+            self._refetch_one(key, seq, registration)
 
     def _refetch_alive(self):
         """False once the session is closing or the reader has died. A
@@ -1464,7 +1561,7 @@ class DtlsCoapSession:
             return False
         return self._reader_thread is None or self._reader_running.is_set()
 
-    def _refetch_one(self, key, seq):
+    def _refetch_one(self, key, seq, registration=False):
         """Re-read one href from block 0 and deliver it if it is still
         the freshest thing we know about that resource."""
         href, query, legacy = key
@@ -1488,7 +1585,7 @@ class DtlsCoapSession:
         with self._refetch_cond:
             # A newer notification landed while we were reading. That one
             # has its own refetch queued, so this result is already stale.
-            if self._refetch_pending.get(key, 0) > seq:
+            if self._refetch_pending.get(key, (0, False))[0] > seq:
                 self._log_refetch(
                     "refetch %s tok=%s blocks=%d bytes=%d superseded",
                     href, tok.hex(), blocks, len(payload))
@@ -1497,6 +1594,11 @@ class DtlsCoapSession:
             return
         self._log_refetch("refetch %s tok=%s blocks=%d bytes=%d ok",
                           href, tok.hex(), blocks, len(payload))
+        if self._deliver_observation(
+                href, payload, query, registration=registration,
+                sequence=self._observe_sequence_for(href, query),
+                legacy=legacy):
+            return
         cb = (
             self.on_legacy_notification
             if legacy and self.on_legacy_notification is not None

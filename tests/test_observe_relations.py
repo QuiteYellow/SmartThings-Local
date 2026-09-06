@@ -184,6 +184,7 @@ def test_probationary_blockwise_initial_queues_refetch_without_partial_delivery(
         "/mode/vs/0",
         ("if=oic.if.a",),
         legacy=False,
+        registration=True,
     )
 
 
