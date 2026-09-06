@@ -164,6 +164,33 @@ class _EtagChanged(Exception):
     transfer, so the blocks in hand are from two different versions."""
 
 
+def _openssl_error_reasons(error):
+    """The reason strings OpenSSL recorded, and nothing else.
+
+    A handshake that dies at the TLS layer raises ``SSL.Error``, and the
+    only thing that says why is the alert inside it. That detail cannot
+    go into the raised ``SessionError``: the errors module deliberately
+    refuses arbitrary detail, because backend errors elsewhere can carry
+    remote endpoints, local paths or credential metadata. So it goes to
+    the local log instead, narrowed to the reason strings.
+
+    Those are protocol vocabulary -- ``tlsv1 alert unknown ca``,
+    ``sslv3 alert handshake failure``, ``Unexpected EOF`` -- and name
+    the failure without naming the peer.
+    """
+    reasons = []
+    first = error.args[0] if error.args else None
+    if isinstance(first, (list, tuple)):
+        for entry in first:
+            if isinstance(entry, (list, tuple)) and entry:
+                reasons.append(str(entry[-1]))
+            elif isinstance(entry, str):
+                reasons.append(entry)
+    else:
+        reasons.extend(arg for arg in error.args if isinstance(arg, str))
+    return ', '.join(r for r in reasons if r) or type(error).__name__
+
+
 @dataclass(frozen=True, slots=True)
 class ObserveDelivery:
     """One representation delivered on an Observe relation.
@@ -733,8 +760,12 @@ class DtlsCoapSession:
                 )
             except _HandshakeCancelled:
                 cancelled = True
-            except SSL.Error:
+            except SSL.Error as e:
                 backend_failed = True
+                # The alert is the whole diagnosis and the raised error
+                # is redacted by contract, so record it here or lose it.
+                logger.warning("dtls handshake failed at the TLS layer: %s",
+                               _openssl_error_reasons(e))
             except OSError:
                 io_failed = True
         finally:
