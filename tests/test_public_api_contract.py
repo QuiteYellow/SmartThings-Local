@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
+import re
+from pathlib import Path
 
 from smartthings_local.ocf.observe_refresh import ObserveRefreshTask
 from smartthings_local.ocf.state_cache import StateCache
@@ -29,6 +32,140 @@ from smartthings_local.protocol.ocf_multicast import (
 from smartthings_local.protocol.owner_psk import derive_mfg_certificate_owner_psk
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Explicit imports exercised by LocalThings, the reference bridge, and the
+# downstream Home Assistant integration. Keep the module boundaries visible;
+# this is intentionally not a root-level re-export list.
+SUPPORTED_DOWNSTREAM_IMPORTS = {
+    "smartthings_local.errors": (
+        "AuthenticationError",
+        "AuthorizationError",
+        "BlockwiseError",
+        "EndpointError",
+        "HandshakePeerCleanupError",
+        "MalformedMessageError",
+        "ObserveError",
+        "ProbeError",
+        "SessionClosedError",
+        "SessionError",
+        "SessionIdentifierError",
+        "SessionResetError",
+        "SessionTimeoutError",
+        "SmartThingsLocalError",
+    ),
+    "smartthings_local.protocol.auth": (
+        "AuthenticationProvider",
+        "CertificateAuth",
+        "PskAuth",
+        "SamsungServerProfile",
+        "SamsungServerRole",
+        "ServerCertificateAuth",
+    ),
+    "smartthings_local.protocol.dtls_session": (
+        "ConnectCancellation",
+        "DtlsCoapSession",
+    ),
+    "smartthings_local.protocol.dtls_probe": (
+        "ALERT",
+        "AMBIGUOUS",
+        "COMPLETED",
+        "DEAD",
+        "DtlsLivenessResult",
+        "DtlsPortProbeResult",
+        "HELLO_VERIFY_REQUEST",
+        "LIVE",
+        "REJECTED",
+        "SELECTED",
+        "SERVER_HELLO",
+        "UNREACHABLE",
+        "probe_dtls_port",
+        "probe_dtls_ports",
+    ),
+    "smartthings_local.protocol.endpoint": (
+        "HostFilteredUdpSocket",
+        "ResolvedUdpEndpoint",
+        "open_connected_udp_socket",
+        "open_host_filtered_udp_socket",
+        "resolve_udp_endpoint",
+        "resolve_udp_endpoints",
+    ),
+    "smartthings_local.protocol.ocf_discovery": (
+        "OcfSecurePortDiscoveryResult",
+        "PlaintextOcfResourceResult",
+        "discover_ocf_secure_ports",
+        "read_plaintext_ocf_resource",
+    ),
+    "smartthings_local.protocol.ocf_multicast": (
+        "OcfResponderPortDiscoveryResult",
+        "discover_ocf_responder_ports",
+    ),
+    "smartthings_local.protocol.coap": (
+        "ACCEPT",
+        "BLOCK1",
+        "BLOCK2",
+        "CF_CBOR",
+        "CONTENT_FORMAT",
+        "METHOD_DELETE",
+        "METHOD_GET",
+        "METHOD_POST",
+        "TYPE_ACK",
+        "TYPE_CON",
+        "TYPE_NON",
+        "URI_PATH",
+        "URI_QUERY",
+        "Block2Accumulator",
+        "CoapMessage",
+        "CoapResponseClassification",
+        "block_fields",
+        "block_value",
+        "build_coap",
+        "build_empty_ack",
+        "build_get_request",
+        "classify_coap_response",
+        "decode_uint_option",
+        "fmt_code",
+        "option_values",
+        "parse_coap",
+        "parse_coap_message",
+        "split_dtls",
+    ),
+    "smartthings_local.protocol.coap_tcp": (
+        "CoapTcpCodecError",
+        "CoapTcpMessage",
+        "CoapTcpStreamDecoder",
+        "build_coap_tcp_csm",
+        "build_coap_tcp_delete",
+        "build_coap_tcp_get",
+        "build_coap_tcp_message",
+        "build_coap_tcp_post",
+        "encode_uint_option",
+        "parse_coap_tcp_message",
+    ),
+    "smartthings_local.protocol.ble_ocf": (
+        "AdaptiveBleOcfReassembler",
+        "BleOcfCodecError",
+        "BleOcfHeader",
+        "BleOcfInterleavedFrameError",
+        "BleOcfReassembler",
+        "ReassembledBleOcfPdu",
+        "decode_header",
+        "encode_header",
+        "fragment_pdu",
+    ),
+    "smartthings_local.protocol.owner_psk": (
+        "CONFIRMED_MFG_CERTIFICATE_OXM_LABEL",
+        "MFG_CERTIFICATE_KEY_BLOCK_LENGTHS",
+        "STANDARD_MFG_CERTIFICATE_OXM_LABEL",
+        "derive_mfg_certificate_owner_psk",
+    ),
+    "smartthings_local.ocf.state_cache": ("StateCache",),
+    "smartthings_local.ocf.poll_scheduler": ("PollScheduler", "PollTier"),
+    "smartthings_local.ocf.keepalive": ("KeepaliveTask",),
+    "smartthings_local.ocf.observe_refresh": ("ObserveRefreshTask",),
+}
+
+
 def _assert_compatible_signature(callable_object, expected: list[str]) -> None:
     """Require the existing call surface while allowing safe extensions."""
     parameters = list(inspect.signature(callable_object).parameters.values())
@@ -42,6 +179,32 @@ def _assert_compatible_signature(callable_object, expected: list[str]) -> None:
             )
             or parameter.default is not inspect.Parameter.empty
         )
+
+
+def test_supported_downstream_import_contract_resolves_explicitly():
+    for module_name, names in SUPPORTED_DOWNSTREAM_IMPORTS.items():
+        module = importlib.import_module(module_name)
+        for name in names:
+            assert getattr(module, name) is not None, f"{module_name}.{name}"
+
+
+def test_root_packages_do_not_duplicate_the_explicit_module_facade():
+    package = importlib.import_module("smartthings_local")
+    protocol = importlib.import_module("smartthings_local.protocol")
+
+    assert not hasattr(package, "DtlsCoapSession")
+    assert not hasattr(package, "CertificateAuth")
+    assert not hasattr(protocol, "DtlsCoapSession")
+    assert not hasattr(protocol, "CertificateAuth")
+
+
+def test_readme_python_examples_are_syntax_checked():
+    readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    examples = re.findall(r"```python\n(.*?)```", readme, flags=re.DOTALL)
+
+    assert len(examples) >= 10
+    for index, example in enumerate(examples, start=1):
+        compile(example, f"README.md python example {index}", "exec")
 
 
 def test_dtls_session_constructor_keeps_file_memory_and_local_port_inputs():

@@ -32,7 +32,8 @@ from smartthings_local.protocol.dtls_probe import (
     probe_dtls_port,
     probe_dtls_ports,
 )
-from smartthings_local.protocol.dtls_session import DtlsCoapSession, fmt_code
+from smartthings_local.protocol.coap import fmt_code
+from smartthings_local.protocol.dtls_session import DtlsCoapSession
 
 from .config import ApplianceConfig, SharedConfig
 from .descriptor import ApplianceDescriptor, bridge_diagnostic_discovery

@@ -445,6 +445,53 @@ The helper performs deterministic key derivation only: it does not access a
 session, discover credentials, choose an ownership method, write security
 resources, run OTM, or persist the result.
 
+### Supported library imports
+
+The public API is organized by responsibility rather than re-exported through
+one large root namespace. Explicit imports from these modules are intentional
+and covered by the downstream compatibility contract:
+
+| Module | Supported responsibility |
+| --- | --- |
+| `smartthings_local.errors` | Classified, redacted library failures |
+| `smartthings_local.protocol.auth` | Certificate, server-certificate, and PSK providers and Samsung server profiles |
+| `smartthings_local.protocol.dtls_session` | Sustained CoAP-DTLS sessions and connect cancellation |
+| `smartthings_local.protocol.dtls_probe` | Stateless DTLS liveness results and single/multi-port probes |
+| `smartthings_local.protocol.endpoint` | Resolved IPv4/IPv6 UDP endpoints and connected/host-filtered socket setup |
+| `smartthings_local.protocol.ocf_discovery` | Bounded plaintext OCF reads and advertised secure-port discovery |
+| `smartthings_local.protocol.ocf_multicast` | Known-host OCF responder-port discovery |
+| `smartthings_local.protocol.coap` | Datagram CoAP constants, builders, parsers, response classification, and Block2 accumulation |
+| `smartthings_local.protocol.coap_tcp` | Pure reliable-transport CoAP framing and stream decoding |
+| `smartthings_local.protocol.ble_ocf` | Pure IoTivity BLE fragmentation and reassembly |
+| `smartthings_local.protocol.owner_psk` | Pure manufacturer-certificate OwnerPSK derivation |
+| `smartthings_local.ocf.state_cache` | Resource-state cache used by library consumers |
+| `smartthings_local.ocf.poll_scheduler` | Tiered polling scheduler |
+| `smartthings_local.ocf.keepalive` | Session keepalive task |
+| `smartthings_local.ocf.observe_refresh` | Periodic Observe refresh task |
+
+Use explicit imports from the owning module, as the examples in this README
+do. `smartthings_local` and `smartthings_local.protocol` deliberately do not
+duplicate these names: a root facade would hide which lifecycle or wire layer
+an application depends on and would create collisions across the datagram,
+TCP, and BLE codecs. Names beginning with `_`, implementation modules not
+listed above, and the `mqtt_demo` application are not part of this contract.
+
+The current `0.1.x` line keeps the existing `DtlsCoapSession` constructor and
+method signatures additive. The `cert_path` / `key_path` and `cert_pem` /
+`key_pem` constructor pairs remain supported without warnings; new code should
+prefer an immutable `CertificateAuth` or `PskAuth` provider so authentication
+requirements stay explicit. Additive keyword-only options and new classified
+error subclasses may appear in compatible releases. Existing broad catches
+remain valid because each classified error preserves its documented built-in
+base class.
+
+The session lifecycle is caller-owned: finish `connect()` before
+`start_reader()`, keep one reader per session, and use
+`quiesce_for_close()`/`close()` or `abort()` for terminal shutdown. Notification
+callbacks run on the session's reader path and should hand work off rather than
+block it. OCF cache, polling, keepalive, and Observe helpers do not acquire
+credentials, choose ownership policy, or create Home Assistant entities.
+
 ### Classified errors
 
 Runtime transport failures use the public types in
