@@ -20,6 +20,7 @@ from smartthings_local.protocol.auth import (
 from smartthings_local.protocol.dtls_session import (
     ConnectCancellation,
     DtlsCoapSession,
+    ObserveDelivery,
 )
 from smartthings_local.protocol.ocf_discovery import (
     OcfSecurePortDiscoveryResult,
@@ -65,6 +66,7 @@ SUPPORTED_DOWNSTREAM_IMPORTS = {
     "smartthings_local.protocol.dtls_session": (
         "ConnectCancellation",
         "DtlsCoapSession",
+        "ObserveDelivery",
     ),
     "smartthings_local.protocol.dtls_probe": (
         "ALERT",
@@ -230,10 +232,23 @@ def test_dtls_session_constructor_keeps_file_memory_and_local_port_inputs():
         "on_legacy_notification",
         "on_observe_pending",
         "on_observe_error",
+        "on_observe_delivery",
     ):
         parameter = inspect.signature(DtlsCoapSession).parameters[callback]
         assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
         assert parameter.default is None
+
+
+def test_observe_delivery_carries_the_full_relation_context():
+    """Consumers key on (href, query) and act on `registration`, so both
+    have to stay on the record even as fields are added."""
+    delivery = ObserveDelivery(href="/power/vs/0", payload=b"on")
+    assert delivery.query == ()
+    assert delivery.registration is False
+    assert delivery.sequence is None
+    assert delivery.legacy is False
+    assert {"href", "payload", "query", "registration", "sequence",
+            "legacy"} <= set(ObserveDelivery.__dataclass_fields__)
 
 
 def test_known_host_multicast_discovery_has_a_bounded_explicit_interface_api():

@@ -197,23 +197,35 @@ class PushBridge:
                 self._last_observe_change_ts = self.last_change_ts
         self.maybe_publish_state()
 
-    def _on_notification(self, href, payload_bytes):
-        """Reader-thread callback for OBSERVE notifications. Large
-        resources (oven /mode/vs/0 ~9KB) arrive truncated with Block2.M=1
-        and we use cbor-decode failure as the partial signal."""
+    def _on_observe_delivery(self, delivery) -> None:
+        """Reader-thread callback for everything arriving on an OBSERVE
+        relation.
+
+        The session answers the question the bridge cannot: whether this
+        representation is the device's reply to our register CON or a
+        change it chose to send (#41). Only the latter is push.
+        """
+        self._on_notification(
+            delivery.href, delivery.payload,
+            source=('observe-register' if delivery.registration
+                    else 'observe'))
+
+    def _on_notification(self, href, payload_bytes, source='observe'):
+        """Large resources (oven /mode/vs/0 ~9KB) arrive truncated with
+        Block2.M=1 and we use cbor-decode failure as the partial signal."""
         if not payload_bytes:
-            self._schedule_fetchback(href)
+            self._schedule_fetchback(href, source=source)
             return
         try:
             rep = cbor2.loads(payload_bytes)
         except Exception:
-            self._schedule_fetchback(href)
+            self._schedule_fetchback(href, source=source)
             return
         if not isinstance(rep, dict):
             return
         if DEBUG_BRIDGE:
             self._debug_log_rep(href, rep)
-        self.cache.apply_rep(href, rep, source='observe')
+        self.cache.apply_rep(href, rep, source=source)
 
     def _debug_log_rep(self, href, rep):
         if href == '/mode/vs/0' and isinstance(rep, dict):
@@ -223,18 +235,20 @@ class PushBridge:
         elif href in ('/operational/state/vs/0', '/oven/vs/0', '/power/vs/0'):
             self.log.info("REP %s = %r", href, rep)
 
-    def _schedule_fetchback(self, href, delay_s: float = 0.0):
+    def _schedule_fetchback(self, href, delay_s: float = 0.0,
+                            source: str = 'observe'):
         with self._fetch_lock:
             gen = self._fetch_gen.get(href, 0) + 1
             self._fetch_gen[href] = gen
         threading.Thread(
             target=self._fetch_back,
-            args=(href, delay_s, gen),
+            args=(href, delay_s, gen, source),
             daemon=True,
             name=f'fetch{href}',
         ).start()
 
-    def _fetch_back(self, href, delay_s: float, gen: int):
+    def _fetch_back(self, href, delay_s: float, gen: int,
+                    source: str = 'observe'):
         if delay_s > 0 and self.stop.wait(delay_s):
             return
         with self._fetch_lock:
@@ -261,7 +275,7 @@ class PushBridge:
             self.log.warning("fetchback %s cbor: %s", href, e)
             return
         if isinstance(rep, dict):
-            self.cache.apply_rep(href, rep, source='observe')
+            self.cache.apply_rep(href, rep, source=source)
 
     def _retag_logger_with_serial(self):
         if self._serial is not None:
@@ -347,7 +361,7 @@ class PushBridge:
             self.app.ip, port,
             cert_path=self.shared.CERT_PATH,
             key_path=self.shared.KEY_PATH,
-            on_notification=self._on_notification,
+            on_observe_delivery=self._on_observe_delivery,
             local_port=DTLS_LOCAL_PORT_BASE + self.app.index,
             write_max_attempts=self.shared.WRITE_MAX_ATTEMPTS,
         )

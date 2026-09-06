@@ -87,6 +87,25 @@ Optional `on_observe_pending`, `on_legacy_notification`, and `on_observe_error`
 constructor callbacks let consumers keep that compatibility path distinct from
 confirmed RFC notifications and ordinary polling.
 
+`on_observe_delivery` replaces `on_notification` for consumers that need the
+whole relation context rather than `(href, payload)`. It receives one
+`ObserveDelivery`, whose `registration` field separates the server's answer to
+the register CON from a change the server chose to send, and whose `query`
+completes the relation identity when one href carries several query-qualified
+relations. `sequence` is the Observe option value, or `None` on the optionless
+responses some firmware sends. Setting it suppresses `on_notification` and
+`on_legacy_notification`, so representations are delivered once:
+
+```python
+def on_delivery(delivery):
+    if delivery.registration:
+        seed(delivery.href, delivery.payload)   # answered because we asked
+    else:
+        record_push(delivery.href, delivery.payload)
+
+sess = DtlsCoapSession(..., on_observe_delivery=on_delivery)
+```
+
 Periodic renewal can target only the relations that need it; unrelated
 observations remain active. Existing query variants are preserved unless the
 caller supplies an explicit replacement:
@@ -740,7 +759,9 @@ There are two parallel paths between the appliance and the app over the local Co
 
 In normal operation both happen at once: an OBSERVE notification arrives first, the cache absorbs it, and the next-poll timer for that resource is reset. In an air-gapped LAN the app keeps working. Only the worst-case freshness changes (from ~100 ms with push to ≤1 s on hot-tier resources via polling). Reads, writes, and HA entities behave identically.
 
-Which path is doing the work is visible in Home Assistant. The bridge publishes per-appliance diagnostic entities including **Push Active** (on while OBSERVE is firing), **Last Update Source** (`observe` / `poll` / `sweep` / `optimistic`), **Last OBSERVE Age**, **Poll Max RTT**, **Slow Polls (window)**, **Poll Errors (window)**, and **Stalest Resource Age**, all under each device's Diagnostic section.
+Which path is doing the work is visible in Home Assistant. The bridge publishes per-appliance diagnostic entities including **Push Active** (on while OBSERVE is firing), **Last Update Source** (`observe` / `observe-register` / `poll` / `sweep` / `optimistic`), **Last OBSERVE Age**, **Poll Max RTT**, **Slow Polls (window)**, **Poll Errors (window)**, and **Stalest Resource Age**, all under each device's Diagnostic section.
+
+**Push Active** counts only what the appliance sent of its own accord. A device answers every OBSERVE register CON with the current representation, and that answer reaches the notification callback exactly as a spontaneous notification does. The bridge reads `ObserveDelivery.registration` to tell them apart and records the answer as `observe-register`, so an appliance with no route to Samsung's cloud reads offline instead of going online for the window after every connect.
 
 ---
 
