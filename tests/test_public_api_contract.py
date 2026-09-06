@@ -221,6 +221,11 @@ def test_dtls_session_keeps_current_consumer_methods():
     ]
     assert connect_cancel.kind is inspect.Parameter.KEYWORD_ONLY
     assert connect_cancel.default is None
+    connect_cleanup = inspect.signature(DtlsCoapSession.connect).parameters[
+        "cleanup_hvr_peer"
+    ]
+    assert connect_cleanup.kind is inspect.Parameter.KEYWORD_ONLY
+    assert connect_cleanup.default is False
     assert callable(ConnectCancellation().set)
     _assert_compatible_signature(
         DtlsCoapSession.quiesce_for_close,

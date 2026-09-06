@@ -383,6 +383,31 @@ def test_connect_services_openssl_retransmit_timer(monkeypatch):
     assert connection.bio_writes == [b"synthetic server flight"]
 
 
+def test_handshake_driver_reports_each_successfully_sent_record(monkeypatch):
+    clock = _Clock()
+    first = b"\x16\xfe\xfd" + b"\x00" * 8 + b"\x00\x01a"
+    second = b"\x16\xfe\xfd" + b"\x00" * 7 + b"\x01\x00\x01b"
+    connection, sock, _endpoint, _open_calls = _install_handshake(
+        monkeypatch,
+        clock,
+        outcomes=("want-read", "success"),
+        outputs=(first + second,),
+        inbound=(b"synthetic server flight",),
+    )
+    sent_records = []
+
+    completed = dtls_session._drive_dtls_handshake(
+        connection,
+        sock,
+        deadline=clock.now + 1.0,
+        on_record_sent=sent_records.append,
+    )
+
+    assert completed is True
+    assert sock.sent == [first, second]
+    assert sent_records == [first, second]
+
+
 @pytest.mark.parametrize("success_delay", (0.1, 0.2))
 def test_handshake_success_at_or_after_deadline_is_retained(
     monkeypatch,

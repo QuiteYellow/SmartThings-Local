@@ -5,6 +5,7 @@ __all__ = [
     'AuthorizationError',
     'BlockwiseError',
     'EndpointError',
+    'HandshakePeerCleanupError',
     'MalformedMessageError',
     'ObserveError',
     'ProbeError',
@@ -75,6 +76,16 @@ class SessionTimeoutError(SmartThingsLocalError, TimeoutError):
 
     code = 'timeout'
     message = 'session operation timed out'
+
+
+class HandshakePeerCleanupError(SessionTimeoutError):
+    """A cleanup alert was sent for an HVR-only half-open DTLS peer.
+
+    The caller may apply its device-specific settle delay and retry policy.
+    """
+
+    code = 'handshake_peer_cleanup'
+    message = 'handshake peer cleanup was sent'
 
 
 class SessionClosedError(SessionError):

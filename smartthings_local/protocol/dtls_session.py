@@ -42,6 +42,7 @@ from ..errors import (
     AuthenticationError,
     BlockwiseError,
     EndpointError,
+    HandshakePeerCleanupError,
     MalformedMessageError,
     SessionClosedError,
     SessionError,
@@ -54,6 +55,8 @@ from . import coap as _coap
 from .auth import (
     AuthenticationProvider,
     CertificateAuth,
+    SamsungServerProfile,
+    ServerCertificateAuth,
 )
 from .coap import (
     ACCEPT,
@@ -88,6 +91,7 @@ from .coap import (
 )
 from .dtls_handshake import (
     _HANDSHAKE_POLL_S,
+    _HvrPeerCleanupTranscript,
     _drive_dtls_handshake,
     _HandshakeCancelled,
 )
@@ -565,6 +569,7 @@ class DtlsCoapSession:
         *,
         timeout: float | None = None,
         cancel: ConnectCancellation | None = None,
+        cleanup_hvr_peer: bool = False,
     ):
         """Perform a cancellable DTLS handshake using a monotonic deadline.
 
@@ -574,12 +579,34 @@ class DtlsCoapSession:
         Once OpenSSL reports completion, that completed session is retained
         even if the call returns just after the deadline. A
         ``ConnectCancellation`` wakes the network wait immediately and does not
-        alter an already established session.
+        alter an already established session. ``cleanup_hvr_peer`` is an
+        opt-in recovery signal for a Samsung-profiled handshake that times out
+        after only the DTLS cookie exchange. It requires a fixed local port,
+        emits at most one standards-based alert, and leaves retry policy to the
+        caller.
         """
         handshake_timeout = _validate_handshake_timeout(
             timeout, self.HANDSHAKE_TIMEOUT_S)
         if cancel is not None and not isinstance(cancel, ConnectCancellation):
             raise TypeError("cancel must be a ConnectCancellation or None")
+        if type(cleanup_hvr_peer) is not bool:
+            raise TypeError("cleanup_hvr_peer must be a bool")
+        if cleanup_hvr_peer and (
+            type(self.auth) not in (CertificateAuth, ServerCertificateAuth)
+            or type(getattr(self.auth, "_server_profile", None))
+            is not SamsungServerProfile
+        ):
+            raise ValueError(
+                "HVR peer cleanup requires a Samsung server profile"
+            )
+        if cleanup_hvr_peer and (
+            isinstance(self.local_port, bool)
+            or not isinstance(self.local_port, int)
+            or not 1 <= self.local_port <= 65535
+        ):
+            raise ValueError(
+                "HVR peer cleanup requires a fixed non-zero local port"
+            )
         if self._lifecycle_cancel.is_set() or \
                 (cancel is not None and cancel.is_set()):
             raise SessionClosedError()
@@ -644,6 +671,9 @@ class DtlsCoapSession:
         cancelled = False
         interrupted = False
         completed = False
+        cleanup_transcript = (
+            _HvrPeerCleanupTranscript() if cleanup_hvr_peer else None
+        )
         try:
             try:
                 completed = _drive_dtls_handshake(
@@ -653,6 +683,16 @@ class DtlsCoapSession:
                     wake_socket=(
                         wake_subscription[0]
                         if wake_subscription is not None
+                        else None
+                    ),
+                    on_datagram=(
+                        cleanup_transcript.record_received
+                        if cleanup_transcript is not None
+                        else None
+                    ),
+                    on_record_sent=(
+                        cleanup_transcript.record_sent
+                        if cleanup_transcript is not None
                         else None
                     ),
                 )
@@ -681,7 +721,23 @@ class DtlsCoapSession:
             sock.close()
             raise EndpointError() from OSError('UDP handshake I/O failed')
         if not completed:
+            cleanup_sent = False
+            if cleanup_transcript is not None:
+                cleanup_alert = cleanup_transcript.cleanup_alert()
+                if cleanup_alert is not None:
+                    try:
+                        # The handshake deadline has expired. Keep this single
+                        # advisory datagram non-blocking so cleanup cannot
+                        # extend the caller's timeout budget.
+                        sock.settimeout(0.0)
+                        cleanup_sent = (
+                            sock.send(cleanup_alert) == len(cleanup_alert)
+                        )
+                    except Exception:
+                        pass
             sock.close()
+            if cleanup_sent:
+                raise HandshakePeerCleanupError()
             raise SessionTimeoutError()
 
         try:

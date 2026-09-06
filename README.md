@@ -142,6 +142,31 @@ Setting the signal stops subscribed connection attempts and closes their
 temporary UDP sockets. It does not alter an already established session.
 Interrupted attempts raise `SessionClosedError`.
 
+Some Samsung OCF-PKI firmware can retain a half-open DTLS peer when a
+handshake stops immediately after the cookie exchange. A caller using a
+`SamsungServerProfile` and a fixed non-zero local UDP port can opt in to the
+narrow cleanup path:
+
+```python
+from smartthings_local.errors import HandshakePeerCleanupError
+
+try:
+    sess.connect(timeout=8.0, cleanup_hvr_peer=True)
+except HandshakePeerCleanupError:
+    # Apply the device-specific settle delay, then retry under caller policy.
+    schedule_connection_retry()
+```
+
+Cleanup is sent only after the bounded transcript contains at least two
+complete epoch-zero ClientHello messages and every received record is a
+complete epoch-zero HelloVerifyRequest. A malformed, fragmented, mixed, or
+oversized transcript remains an ordinary `SessionTimeoutError`. On the exact
+HVR-only shape, the session sends one epoch-zero fatal `handshake_failure`
+alert, closes the temporary socket, and raises `HandshakePeerCleanupError`.
+The package never sleeps or retries automatically, so the caller retains the
+overall recovery budget and can use the settle interval validated for its
+device. Cancellation and backend failures never trigger the alert.
+
 Hosts that stop network work before their blocking executor drains can use the
 session's two-phase shutdown. `quiesce_for_close()` is terminal: it interrupts
 an in-progress handshake, wakes pending requests and notification refetches,
@@ -441,6 +466,7 @@ callers can keep catching the built-in types used by earlier releases:
 | `AuthenticationError` | `authentication` | `ConnectionError` |
 | `AuthorizationError` | `authorization` | `PermissionError` |
 | `SessionTimeoutError` | `timeout` | `TimeoutError` |
+| `HandshakePeerCleanupError` | `handshake_peer_cleanup` | `TimeoutError` |
 | `SessionClosedError` | `session_closed` | `ConnectionError` |
 | `MalformedMessageError` | `malformed_message` | `ValueError` |
 | `BlockwiseError` | `blockwise` | `ConnectionError` |
