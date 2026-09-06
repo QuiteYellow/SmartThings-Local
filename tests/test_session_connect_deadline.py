@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import socket
+from uuid import UUID
 
 import pytest
 from OpenSSL import SSL
 
-from smartthings_local.errors import SessionTimeoutError
+from smartthings_local.errors import AuthenticationError, SessionTimeoutError
 from smartthings_local.protocol import dtls_session
 from smartthings_local.protocol.dtls_session import DtlsCoapSession
 from smartthings_local.protocol.endpoint import ResolvedUdpEndpoint
@@ -32,6 +33,17 @@ class _Auth:
     def configure_context(self, _context):
         if self.clock is not None:
             self.clock.advance(self.configure_delay)
+
+
+class _IdentityAuth(_Auth):
+    def __init__(self, identity):
+        super().__init__()
+        self.identity = identity
+
+    def _authenticated_server_identity(self, _connection):
+        if isinstance(self.identity, Exception):
+            raise self.identity
+        return self.identity
 
 
 class _Connection:
@@ -300,7 +312,56 @@ def test_successful_handshake_preserves_connected_session_state(monkeypatch):
     assert session.sock is sock
     assert session.endpoint is endpoint
     assert session.dest == endpoint.sockaddr
+    assert session.server_certificate_identity is None
     assert not sock.closed
+
+
+def test_successful_profiled_handshake_publishes_server_identity(monkeypatch):
+    clock = _Clock()
+    identity = UUID(bytes=b"\xab" * 16)
+    connection, sock, endpoint, _open_calls = _install_handshake(
+        monkeypatch,
+        clock,
+        outcomes=("want-read", "success"),
+        inbound=(b"synthetic server flight",),
+    )
+    session = _session(_IdentityAuth(identity))
+
+    session.connect(timeout=1.0)
+
+    assert session.server_certificate_identity == identity
+    assert session.conn is connection
+    assert session.sock is sock
+    assert session.endpoint is endpoint
+    assert not sock.closed
+
+
+@pytest.mark.parametrize(
+    "identity",
+    (ValueError("missing identity"), "not-a-uuid", UUID(int=0)),
+)
+def test_profiled_handshake_fails_closed_without_valid_server_identity(
+    monkeypatch,
+    identity,
+):
+    clock = _Clock()
+    _connection, sock, _endpoint, _open_calls = _install_handshake(
+        monkeypatch,
+        clock,
+        outcomes=("want-read", "success"),
+        inbound=(b"synthetic server flight",),
+    )
+    session = _session(_IdentityAuth(identity))
+
+    with pytest.raises(AuthenticationError) as captured:
+        session.connect(timeout=1.0)
+
+    assert captured.value.code == "authentication"
+    assert str(identity) not in str(captured.value)
+    assert session.server_certificate_identity is None
+    assert session.conn is None
+    assert session.sock is None
+    assert sock.closed
 
 
 def test_connect_services_openssl_retransmit_timer(monkeypatch):

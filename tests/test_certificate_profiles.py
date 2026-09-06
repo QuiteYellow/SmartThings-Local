@@ -453,6 +453,56 @@ def test_profile_accepts_only_canonical_nonzero_identity():
             SamsungServerProfile.bound_device(invalid)
 
 
+def test_discovery_profile_verifies_role_before_exposing_identity():
+    first_chain = _make_generated_chain(_IDENTITY)
+    second_chain = _make_generated_chain(_OTHER_IDENTITY)
+    zero_chain = _make_generated_chain(UUID(int=0))
+    wrong_role = _make_generated_chain(
+        _IDENTITY,
+        organizational_unit="OCF VD Device",
+    )
+    profile = SamsungServerProfile.discover_device()
+
+    assert repr(profile) == "SamsungServerProfile()"
+    assert profile._verify_peer(None, first_chain.leaf, 0, 0, True) is True
+    assert profile._verify_peer(None, second_chain.leaf, 0, 0, True) is True
+    assert profile._verify_peer(None, zero_chain.leaf, 0, 0, True) is False
+    assert profile._verify_peer(None, wrong_role.leaf, 0, 0, True) is False
+
+    for invalid in ("OCF HA Device", None, object()):
+        with pytest.raises(TypeError, match="SamsungServerRole"):
+            SamsungServerProfile.discover_device(role=invalid)
+
+
+def test_discovery_profile_is_reusable_and_does_not_retain_peer_identity():
+    first_chain = _make_generated_chain(_IDENTITY)
+    second_chain = _make_generated_chain(_OTHER_IDENTITY)
+    profile = SamsungServerProfile.discover_device()
+    provider = ServerCertificateAuth(server_profile=profile)
+
+    first = provider._authenticated_server_identity(
+        SimpleNamespace(get_peer_certificate=lambda: first_chain.leaf)
+    )
+    second = provider._authenticated_server_identity(
+        SimpleNamespace(get_peer_certificate=lambda: second_chain.leaf)
+    )
+
+    assert first == _IDENTITY
+    assert second == _OTHER_IDENTITY
+    assert not hasattr(profile, "certificate_identity")
+    assert str(_IDENTITY) not in repr(profile)
+    assert str(_OTHER_IDENTITY) not in repr(profile)
+
+    certificate_provider = CertificateAuth.from_memory(
+        first_chain.certificate_pem,
+        first_chain.private_key_pem,
+        server_profile=profile,
+    )
+    assert certificate_provider._authenticated_server_identity(
+        SimpleNamespace(get_peer_certificate=lambda: second_chain.leaf)
+    ) == _OTHER_IDENTITY
+
+
 def test_profile_roles_are_explicit_and_fail_closed():
     home_chain = _make_generated_chain(_IDENTITY)
     video_chain = _make_generated_chain(
@@ -894,6 +944,7 @@ def test_default_and_profile_verification_are_selected_per_provider(
 
 def test_profile_identity_verification_rejects_malformed_subjects(caplog):
     profile = SamsungServerProfile.bound_device(_IDENTITY)
+    discovery_profile = SamsungServerProfile.discover_device()
     wrong_role = _make_generated_chain(
         _IDENTITY,
         organizational_unit="Unexpected Device",
@@ -935,6 +986,10 @@ def test_profile_identity_verification_rejects_malformed_subjects(caplog):
     with caplog.at_level(logging.WARNING, logger=auth_module.__name__):
         assert profile._verify_peer(None, object(), 0, 0, True) is False
         assert (
+            discovery_profile._verify_peer(None, object(), 0, 0, True)
+            is False
+        )
+        assert (
             profile._verify_peer(
                 None,
                 invalid_encoding,
@@ -945,6 +1000,7 @@ def test_profile_identity_verification_rejects_malformed_subjects(caplog):
             is False
         )
     assert caplog.messages == [
+        "Unable to parse Samsung server certificate subject",
         "Unable to parse Samsung server certificate subject",
         "Unable to parse Samsung server certificate subject",
     ]

@@ -125,6 +125,20 @@ def test_samsung_server_profile_is_public_and_explicitly_bound():
     assert parameters["additional_ca_pem"].kind is inspect.Parameter.KEYWORD_ONLY
     assert parameters["additional_ca_pem"].default is None
 
+    discovery_parameters = inspect.signature(
+        SamsungServerProfile.discover_device
+    ).parameters
+    assert list(discovery_parameters) == ["role", "additional_ca_pem"]
+    assert all(
+        parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        for parameter in discovery_parameters.values()
+    )
+    assert (
+        discovery_parameters["role"].default
+        is SamsungServerRole.HOME_APPLIANCE
+    )
+    assert discovery_parameters["additional_ca_pem"].default is None
+
 
 def test_server_certificate_auth_is_a_public_authentication_provider():
     profile = SamsungServerProfile.bound_device(
@@ -139,6 +153,7 @@ def test_server_certificate_auth_is_a_public_authentication_provider():
     assert session.key_path is None
     assert session.cert_pem is None
     assert session.key_pem is None
+    assert session.server_certificate_identity is None
     parameters = inspect.signature(ServerCertificateAuth).parameters
     assert list(parameters) == ["server_profile"]
     assert parameters["server_profile"].kind is inspect.Parameter.KEYWORD_ONLY

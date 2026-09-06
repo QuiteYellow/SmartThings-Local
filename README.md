@@ -338,8 +338,32 @@ sess = DtlsCoapSession("192.0.2.100", 5684, auth=auth)
 `ServerCertificateAuth` is for a server-authenticated channel that does not
 send a client certificate, such as the initial DTLS carrier used by
 manufacturer-certificate OTM. It still verifies the CA chain, exact selected
-subject role, and pinned certificate UUID. It does not learn an identity from
-the first endpoint it reaches and cannot be combined with client credentials.
+subject role, and pinned certificate UUID. It cannot be combined with client
+credentials.
+
+An explicit first-use workflow may need to authenticate the Samsung hardware
+certificate before its subject UUID is known. Use the discovery profile only
+for that bounded step:
+
+```python
+server_profile = SamsungServerProfile.discover_device(
+    additional_ca_pem=additional_samsung_ca_pem,
+)
+auth = ServerCertificateAuth(server_profile=server_profile)
+sess = DtlsCoapSession("192.0.2.100", 5684, auth=auth)
+sess.connect()
+certificate_uuid = sess.server_certificate_identity
+```
+
+The discovery profile still verifies the CA chain and the complete selected
+Samsung subject role before `connect()` exposes the non-zero certificate UUID.
+It does not trust an arbitrary first certificate, and neither the immutable
+profile nor its provider retains the learned identity. The caller must bind
+that UUID to independently authenticated device evidence, such as `/oic/d`
+read over the same authenticated session, before persisting it. Subsequent
+connections should use `bound_device()` with that verified binding. The
+certificate UUID and the OCF device UUID are separate identities and must not
+be assumed equal.
 
 This API deliberately does not discover, mint, authorize, provision, rotate,
 or persist credentials, and it performs no ownership transfer or OCF security

@@ -93,6 +93,19 @@ class SamsungServerProfile:
         role: SamsungServerRole = SamsungServerRole.HOME_APPLIANCE,
         additional_ca_pem: str | None = None,
     ) -> None:
+        parsed_identity = self._parse_expected_identity(
+            expected_certificate_identity
+        )
+        self._initialize(
+            expected_certificate_identity=parsed_identity,
+            role=role,
+            additional_ca_pem=additional_ca_pem,
+        )
+
+    @staticmethod
+    def _parse_expected_identity(
+        expected_certificate_identity: UUID | str,
+    ) -> UUID:
         if type(expected_certificate_identity) is UUID:
             parsed_identity = expected_certificate_identity
         elif type(expected_certificate_identity) is str:
@@ -117,6 +130,15 @@ class SamsungServerProfile:
                 "expected_certificate_identity must be a canonical "
                 "non-zero UUID"
             )
+        return parsed_identity
+
+    def _initialize(
+        self,
+        *,
+        expected_certificate_identity: UUID | None,
+        role: SamsungServerRole,
+        additional_ca_pem: str | None,
+    ) -> None:
         if type(role) is not SamsungServerRole:
             raise TypeError("role must be a SamsungServerRole")
 
@@ -176,7 +198,7 @@ class SamsungServerProfile:
         object.__setattr__(
             self,
             "_expected_certificate_identity",
-            parsed_identity,
+            expected_certificate_identity,
         )
         object.__setattr__(self, "_role", role)
         object.__setattr__(self, "_additional_ca_certificates", certificates)
@@ -201,6 +223,27 @@ class SamsungServerProfile:
             role=role,
             additional_ca_pem=additional_ca_pem,
         )
+
+    @classmethod
+    def discover_device(
+        cls,
+        *,
+        role: SamsungServerRole = SamsungServerRole.HOME_APPLIANCE,
+        additional_ca_pem: str | None = None,
+    ) -> SamsungServerProfile:
+        """Verify a Samsung hardware leaf before learning its certificate UUID.
+
+        This profile is intended only for an explicit first-use workflow. The
+        caller must bind the returned session identity to independently
+        authenticated device evidence before persisting it.
+        """
+        profile = object.__new__(cls)
+        profile._initialize(
+            expected_certificate_identity=None,
+            role=role,
+            additional_ca_pem=additional_ca_pem,
+        )
+        return profile
 
     def __repr__(self) -> str:
         """Return a representation without device or trust-chain details."""
@@ -273,6 +316,14 @@ class SamsungServerProfile:
             return False
         if depth > 0:
             return True
+        identity = self._certificate_identity(certificate)
+        return identity is not None and (
+            self._expected_certificate_identity is None
+            or identity == self._expected_certificate_identity
+        )
+
+    def _certificate_identity(self, certificate) -> UUID | None:
+        """Extract a UUID only from the selected Samsung subject role."""
         try:
             with warnings.catch_warnings():
                 # pyOpenSSL deprecates this API in favor of cryptography, but
@@ -291,7 +342,7 @@ class SamsungServerProfile:
             crypto.Error,
         ):
             logger.warning("Unable to parse Samsung server certificate subject")
-            return False
+            return None
 
         common_names = [value for name, value in components if name == "CN"]
         organizational_units = [
@@ -308,13 +359,12 @@ class SamsungServerProfile:
             or organizations != ["Samsung Electronics"]
             or countries != ["KR"]
         ):
-            return False
+            return None
         match = _SAMSUNG_SERVER_CN_RE.fullmatch(common_names[0])
-        return (
-            match is not None
-            and UUID(match.group("device_identity"))
-            == self._expected_certificate_identity
-        )
+        if match is None:
+            return None
+        identity = UUID(match.group("device_identity"))
+        return identity if identity.int != 0 else None
 
 
 def _configure_certificate_server(
@@ -361,6 +411,13 @@ class ServerCertificateAuth:
     def configure_context(self, context: SSL.Context) -> None:
         """Verify the selected server profile without loading client material."""
         _configure_certificate_server(context, self._server_profile)
+
+    def _authenticated_server_identity(self, connection) -> UUID | None:
+        certificate = connection.get_peer_certificate()
+        identity = self._server_profile._certificate_identity(certificate)
+        if identity is None:
+            raise ValueError("verified server identity was unavailable")
+        return identity
 
 
 class CertificateAuth:
@@ -485,6 +542,15 @@ class CertificateAuth:
             context.use_certificate_chain_file(self._certificate_path)
             context.use_privatekey_file(self._private_key_path)
             context.check_privatekey()
+
+    def _authenticated_server_identity(self, connection) -> UUID | None:
+        if self._server_profile is None:
+            return None
+        certificate = connection.get_peer_certificate()
+        identity = self._server_profile._certificate_identity(certificate)
+        if identity is None:
+            raise ValueError("verified server identity was unavailable")
+        return identity
 
 
 class PskAuth:

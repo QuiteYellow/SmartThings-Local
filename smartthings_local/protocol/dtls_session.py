@@ -34,10 +34,12 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from uuid import UUID
 
 from OpenSSL import SSL
 
 from ..errors import (
+    AuthenticationError,
     BlockwiseError,
     EndpointError,
     MalformedMessageError,
@@ -462,6 +464,10 @@ class DtlsCoapSession:
         self.conn = None
         self.dest = None
         self.endpoint = None
+        # Populated only when a SamsungServerProfile verified the peer. The
+        # UUID comes from the authenticated hardware-certificate subject; it
+        # is not necessarily the OCF device UUID returned by /oic/d.
+        self.server_certificate_identity = None
 
         # Terminal session shutdown has its own wake signal so
         # quiesce_for_close() can interrupt connect() even when the caller did
@@ -678,6 +684,30 @@ class DtlsCoapSession:
             sock.close()
             raise SessionTimeoutError()
 
+        try:
+            identity_reader = getattr(
+                self.auth,
+                "_authenticated_server_identity",
+                None,
+            )
+            if identity_reader is not None:
+                server_certificate_identity = identity_reader(conn)
+                if server_certificate_identity is not None and (
+                    type(server_certificate_identity) is not UUID
+                    or server_certificate_identity.int == 0
+                ):
+                    raise ValueError(
+                        "verified server identity was unavailable"
+                    )
+            else:
+                server_certificate_identity = None
+        except Exception:
+            self._send_close_notify(conn, sock)
+            sock.close()
+            raise AuthenticationError() from ConnectionError(
+                "verified server identity was unavailable"
+            )
+
         with self._lifecycle_lock:
             if self._lifecycle_cancel.is_set():
                 sock.close()
@@ -686,6 +716,7 @@ class DtlsCoapSession:
             self.conn = conn
             self.dest = dest
             self.endpoint = endpoint
+            self.server_certificate_identity = server_certificate_identity
             self._stop.clear()
 
     def start_reader(self):
