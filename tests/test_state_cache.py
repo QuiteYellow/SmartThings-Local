@@ -17,6 +17,24 @@ def test_index_device_tree_skips_device_level_entry_at_index_zero():
     assert '/device/0' not in indexed
 
 
+def test_index_device_tree_keeps_resource_entry_at_index_zero():
+    tree = [
+        {
+            'href': '/information/vs/0',
+            'rep': {'x.com.samsung.da.modelNum': 'synthetic-model'},
+        },
+        {'rt': ['x.com.samsung.devcol']},
+        {'href': '/configuration/vs/0', 'rep': {'configured': True}},
+    ]
+
+    assert StateCache.index_device_tree(tree) == {
+        '/information/vs/0': {
+            'x.com.samsung.da.modelNum': 'synthetic-model',
+        },
+        '/configuration/vs/0': {'configured': True},
+    }
+
+
 def test_index_device_tree_stub_entry_becomes_empty_dict():
     tree = [
         {'href': '/device/0', 'rep': {}},
