@@ -1,23 +1,25 @@
 #!/bin/bash
 # Sync source + .env to the remote and rebuild the container.
 #
-# Two host paths are used:
-#   REMOTE_DIR  — compose project (source code, .env, docker-compose.yml)
-#                 Convention: /mnt/user/compose/samsung-bridge/
-#   APPDATA_DIR — bind-mount source for /config inside the container
-#                 (client cert + key live here).
-#                 Convention: /mnt/user/appdata/samsung-bridge/
+# Two host paths are used, both read from .env:
+#   REMOTE_DIR — compose project (source code, .env, docker-compose.yml)
+#                Convention: /mnt/user/compose/smartthings-local/
+#   SMARTTHINGS_LOCAL_APPDATA_DIR — bind-mount source for /config inside
+#                the container (client cert + key live here).
+#                Convention: /mnt/user/appdata/smartthings-local/
+#                Prefixed because docker-compose.yml interpolates it and
+#                Compose prefers a shell-exported variable over .env.
 #
-# The remote must already have the certs in $APPDATA_DIR. Run once
-# before the first deploy:
+# The remote must already have the certs there. Run once before the
+# first deploy:
 #
-#   source .env
-#   ssh "$SSH_HOST" mkdir -p "$APPDATA_DIR"
+#   set -a; source .env; set +a
+#   ssh "$SSH_HOST" mkdir -p "$SMARTTHINGS_LOCAL_APPDATA_DIR"
 #   scp certs/client_fullchain.pem certs/client.key \
-#       "$SSH_HOST:$APPDATA_DIR/"
+#       "$SSH_HOST:$SMARTTHINGS_LOCAL_APPDATA_DIR/"
 #
 # Subsequent deploys (this script) ship source code + .env only; the
-# certs in $APPDATA_DIR are preserved.
+# certs already there are preserved.
 set -e
 
 # This script lives in mqtt_demo/ but the build context is the repo
@@ -40,11 +42,11 @@ get_env() {
 }
 SSH_HOST=$(get_env SSH_HOST)
 REMOTE_DIR=$(get_env REMOTE_DIR)
-APPDATA_DIR=$(get_env APPDATA_DIR)
+APPDATA_DIR=$(get_env SMARTTHINGS_LOCAL_APPDATA_DIR)
 
 : "${SSH_HOST:?SSH_HOST not set in .env}"
 : "${REMOTE_DIR:?REMOTE_DIR not set in .env}"
-: "${APPDATA_DIR:?APPDATA_DIR not set in .env}"
+: "${APPDATA_DIR:?SMARTTHINGS_LOCAL_APPDATA_DIR not set in .env}"
 
 echo "Deploying to ${SSH_HOST}:${REMOTE_DIR}…"
 ssh "${SSH_HOST}" mkdir -p "${REMOTE_DIR}" "${APPDATA_DIR}"

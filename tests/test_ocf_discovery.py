@@ -157,6 +157,35 @@ def test_primary_distinguishes_absence_from_untrusted_secure_eps():
         ) == (discovery._PORTS_UNTRUSTED, ())
 
 
+@pytest.mark.parametrize('port', (0, -1, 65536, True, 1.0, '61002', None))
+def test_an_unusable_policy_port_reads_as_absence_and_is_never_dialled(port):
+    # Zero is the case the hardware actually produces: RT-OCF binds the
+    # DTLS socket with port 0 and learns the assignment through
+    # getsockname, so a directory serialised before that bind advertises
+    # `sec: true, port: 0`. A live plaintext read on the reference dryer
+    # here has returned exactly that while a later read of the same
+    # device gave a real port. Treating it as a port would send the
+    # handshake at port 0; absence is what lets the caller see
+    # `no_secure_ports` and retry later. `True` is in the list because
+    # bool is a subclass of int and would otherwise pass for port 1.
+    payload = _payload(_doxm_link(port))
+
+    for extractor in (discovery._primary_secure_ports_from_payload,
+                      discovery._fallback_secure_ports_from_payload):
+        assert extractor(payload, socket.AF_INET, _ipv4_key()) == (
+            discovery._PORTS_ABSENT, ())
+
+
+def test_a_usable_port_alongside_an_unusable_one_is_still_found():
+    # The reduced directory carries several sec-flagged links. One
+    # unusable port must not discard the rest of the response.
+    payload = _payload(_doxm_link(0), _doxm_link(61002))
+
+    assert discovery._fallback_secure_ports_from_payload(
+        payload, socket.AF_INET, _ipv4_key()) == (
+            discovery._PORTS_FOUND, (61002,))
+
+
 def test_ipv6_eps_binding_inherits_or_exactly_matches_response_scope():
     source_key = (
         socket.inet_pton(socket.AF_INET6, '2001:db8::20'),
