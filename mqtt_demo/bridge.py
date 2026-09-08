@@ -35,8 +35,13 @@ from smartthings_local.protocol.dtls_probe import (
 from smartthings_local.protocol.coap import fmt_code
 from smartthings_local.protocol.dtls_session import DtlsCoapSession
 
+from .clock_sync import ClockSyncTask
 from .config import ApplianceConfig, SharedConfig
-from .descriptor import ApplianceDescriptor, bridge_diagnostic_discovery
+from .descriptor import (
+    ApplianceDescriptor,
+    bridge_diagnostic_discovery,
+    clock_sync_discovery,
+)
 from .logger import bridge_logger
 
 DEBUG_BRIDGE = os.environ.get('DEBUG_BRIDGE') == '1'
@@ -63,6 +68,12 @@ UNREACHABLE_RECONNECT_S = 120.0
 # recovers, since nothing triggers a fresh subscribe on the existing
 # session.
 OBSERVE_REFRESH_INTERVAL_S = 6 * 3600.0
+
+# MQTT command suffix for an on-demand clock sync. Handled by the bridge
+# rather than a descriptor command handler: the clock resource is
+# write-only, so it must skip the optimistic cache merge every other
+# command gets (see handle_command).
+CMD_SYNC_CLOCK = 'cmd/sync_clock'
 
 # Base for the fixed DTLS source port; each appliance binds base+index so
 # every reconnect uses the same 5-tuple. If the bridge dies without
@@ -116,6 +127,14 @@ class PushBridge:
         self.scheduler: PollScheduler | None = None
         self.keepalive: KeepaliveTask | None = None
         self.observe_refresh: ObserveRefreshTask | None = None
+        self.clock_sync: ClockSyncTask | None = None
+
+        # Clock sync survives reconnects: the task is session-scoped but
+        # the schedule is not, so a bridge that reconnects often still
+        # writes the clock on the configured interval.
+        self.clock_sync_enabled = (descriptor.clock_sync is not None
+                                   and shared.CLOCK_SYNC_INTERVAL_H > 0)
+        self._last_clock_sync_ts: float | None = None
 
         self.cache = StateCache(descriptor)
         self.cache.set_on_change(self._on_cache_change)
@@ -178,6 +197,10 @@ class PushBridge:
             + bridge_diagnostic_discovery(
                 app.topic_prefix, shared.HA_DISCOVERY_PREFIX, app.device_name,
                 model=descriptor.name.title()))
+        if self.clock_sync_enabled:
+            self.discovery_payloads += clock_sync_discovery(
+                app.topic_prefix, shared.HA_DISCOVERY_PREFIX, app.device_name,
+                model=descriptor.name.title(), cmd_suffix=CMD_SYNC_CLOCK)
 
     def request_stop(self) -> None:
         """Stop the bridge and wake workers belonging to its current session."""
@@ -444,9 +467,12 @@ class PushBridge:
             interval_s=OBSERVE_REFRESH_INTERVAL_S,
             logger=self.log,
         )
+        clock_sync = self._build_clock_sync(sess)
+
         self.scheduler = scheduler
         self.keepalive = keepalive
         self.observe_refresh = observe_refresh
+        self.clock_sync = clock_sync
 
         # These workers belong to this DTLS session, not to the bridge
         # process. A reconnect must retire them before the replacement
@@ -469,7 +495,11 @@ class PushBridge:
         ref_t = threading.Thread(
             target=observe_refresh.run_forever, args=(session_stop,),
             daemon=True, name=f'{self.app.klass}-obsref')
-        workers = (sched_t, ka_t, ref_t)
+        workers = [sched_t, ka_t, ref_t]
+        if clock_sync is not None:
+            workers.append(threading.Thread(
+                target=clock_sync.run_forever, args=(session_stop,),
+                daemon=True, name=f'{self.app.klass}-clock'))
         started_workers = []
 
         try:
@@ -493,9 +523,34 @@ class PushBridge:
             self.scheduler = None
             self.keepalive = None
             self.observe_refresh = None
+            self.clock_sync = None
             with self._session_stop_lock:
                 if self._session_stop is session_stop:
                     self._session_stop = None
+
+    def _build_clock_sync(self, sess) -> ClockSyncTask | None:
+        """Clock-sync task for this session, or None.
+
+        Called after the seed so the capability check reads the links
+        the appliance actually reported: a device in the class that does
+        not carry the clock resource never gets written to."""
+        if not self.clock_sync_enabled:
+            return None
+        spec = self.descriptor.clock_sync
+        if spec.requires_href not in self.cache.links:
+            self.log.info("clock sync off: %s absent from this device",
+                          spec.requires_href)
+            return None
+        return ClockSyncTask(
+            sess, spec.path_segs, spec.field,
+            interval_s=self.shared.CLOCK_SYNC_INTERVAL_H * 3600.0,
+            logger=self.log,
+            last_sync_ts=self._last_clock_sync_ts,
+            on_sync=self._note_clock_sync,
+        )
+
+    def _note_clock_sync(self, ts: float) -> None:
+        self._last_clock_sync_ts = ts
 
     def _seed_from_device0(self, sess):
         code, pl = sess.get(self.descriptor.seed_path, timeout=15.0)
@@ -688,6 +743,9 @@ class PushBridge:
         if not topic.startswith(self.cmd_topic_prefix):
             return
         suffix = topic[len(self.cmd_topic_prefix) - len('cmd/'):]
+        if suffix == CMD_SYNC_CLOCK:
+            self._handle_sync_clock()
+            return
         handler = self.cmd_handlers.get(suffix)
         if handler is None:
             self.log.warning("unknown command topic: %s", topic)
@@ -724,6 +782,18 @@ class PushBridge:
             # The PollScheduler will reconcile on its next tier tick
             # after the write_in_progress settle window expires.
             self.cache.apply_optimistic(href, body)
+
+    def _handle_sync_clock(self) -> None:
+        """On-demand clock write from the HA button.
+
+        Deliberately outside the descriptor command path: the clock
+        field is write-only, so it must not reach the optimistic cache
+        merge handle_command applies to normal writes."""
+        task = self.clock_sync
+        if task is None:
+            self.log.warning("sync_clock: clock sync not active")
+            return
+        task.sync_now(reason='mqtt')
 
     def publish_health(self):
         now = time.time()

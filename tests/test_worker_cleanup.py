@@ -129,6 +129,7 @@ def _bridge():
         observe_paths=(),
         poll_tiers=[],
         is_active=lambda _state: False,
+        clock_sync=None,
     )
     bridge.shared = SimpleNamespace(PING_INTERVAL_S=3600.0)
     bridge.app = SimpleNamespace(klass="test")
@@ -140,6 +141,8 @@ def _bridge():
     bridge.scheduler = None
     bridge.keepalive = None
     bridge.observe_refresh = None
+    bridge.clock_sync = None
+    bridge.clock_sync_enabled = False
     bridge._seed_from_device0 = lambda _session: None
     bridge._retag_logger_with_serial = lambda: None
     bridge.maybe_publish_state = lambda **kwargs: None

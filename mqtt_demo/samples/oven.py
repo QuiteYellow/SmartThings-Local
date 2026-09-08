@@ -25,6 +25,7 @@ import time
 
 from ..descriptor import (
     ApplianceDescriptor,
+    ClockSync,
     avail_base,
     avail_with_cycle,
     avail_with_remote_and_cycle,
@@ -845,6 +846,20 @@ OVEN_POLL_TIERS = [
 ]
 
 
+# The oven's own wall clock. `x.com.samsung.da.currentTime` on
+# `/configuration/vs/0` came from LocalThings #404 / #428, verified
+# there on a TP1X range; both the periodic write and the button answer
+# 2.04 on this oven too (TP1X_DA-KS-OVEN-0107X, 2026-09-08). The field is
+# write-only: a GET of the resource still comes back empty, so the
+# front panel is the only read-back. Panel set to 19:47 by hand, synced
+# at 17:48, panel followed -- the write lands, it is not just accepted.
+OVEN_CLOCK_SYNC = ClockSync(
+    path_segs=['configuration', 'vs', '0'],
+    field='x.com.samsung.da.currentTime',
+    requires_href='/configuration/vs/0',
+)
+
+
 def _is_active(links: dict) -> bool:
     rep = links.get('/operational/state/vs/0') or {}
     sam_state = rep.get('x.com.samsung.da.state')
@@ -867,4 +882,5 @@ OVEN = ApplianceDescriptor(
     log_state_change=log_state_change,
     poll_tiers=OVEN_POLL_TIERS,
     is_active=_is_active,
+    clock_sync=OVEN_CLOCK_SYNC,
 )

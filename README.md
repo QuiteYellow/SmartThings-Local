@@ -988,6 +988,7 @@ Notes specific to this firmware family:
 | `CERT_PATH` / `KEY_PATH` | Override cert lookup (auto-detects `/config/` then `./certs/`) |
 | `HEALTH_INTERVAL_S` | Seconds between `<prefix>/bridge/health` publishes (default 60) |
 | `PING_INTERVAL_S` | CoAP empty-CON ping cadence; three consecutive failures publish `availability=offline` (default 25). Tier polling cadences are descriptor-declared, not env-tunable. |
+| `CLOCK_SYNC_INTERVAL_H` | Hours between appliance clock writes, for descriptors that declare one (default 24; `0` disables the sync and its button) |
 | `SSH_HOST` / `REMOTE_DIR` / `APPDATA_DIR` | Used by `deploy.sh` only |
 
 ### MQTT topics — outgoing (bridge → broker)
@@ -1024,6 +1025,17 @@ Oven:
 | `cmd/setpoint` | Integer °C (30–270, step 5) | RMW of `/temperatures/vs/0 .items[0].desired`; requires RC |
 | `cmd/mode` | Mode name (e.g. `Convection`, `LargeGrill`) | POST `/mode/vs/0 {modes: [<name>]}`; requires RC |
 | `cmd/stop` | (button press) | POST `/operational/state/vs/0 {state: Ready}` |
+| `cmd/sync_clock` | (button press) | POST `/configuration/vs/0 {x.com.samsung.da.currentTime: <host local time>}` |
+
+#### Clock sync
+
+An appliance kept off the internet has no way to correct its own clock, so the display drifts. Where a descriptor declares a `ClockSync` spec (today the oven), the bridge writes the host's local wall clock to `/configuration/vs/0` as `x.com.samsung.da.currentTime` every `CLOCK_SYNC_INTERVAL_H` hours, and exposes a Sync clock button for an immediate write. Set `CLOCK_SYNC_INTERVAL_H=0` to switch off both.
+
+The field is write-only: a GET of that resource returns the metadata without it, so the value never enters the state cache and no sensor reports it. Timestamps land in the container's `TZ`.
+
+The write came from LocalThings [#404](https://github.com/mbillow/localthings/issues/404) / [#428](https://github.com/mbillow/localthings/pull/428), verified there on a TP1X range and originally documented on [the SmartThings forum](https://community.smartthings.com/t/samsung-oven-range-and-cooktop-sync-time-api/251391). Both the periodic write and the button answer 2.04 on the oven this repo's sample descriptor targets. Other appliance classes are untested — a rejection shows up as a 4.xx in the bridge log, and nothing else is written to the resource.
+
+One limit is worth knowing whatever the appliance. A timestamp far outside its certificate validity window can break certificate verification and leave it unresponsive, so the bridge refuses to write a host clock reading outside `PLAUSIBLE_FROM`/`PLAUSIBLE_UNTIL` in `mqtt_demo/clock_sync.py`. A host that boots without NTP skips the sync rather than writing 1970.
 
 ### Entity counts (approximate, per appliance)
 
@@ -1035,7 +1047,7 @@ Oven:
 | `light` | — | 1 (lamp) |
 | `number` | — | 1 (setpoint slider) |
 | `select` | 1 (course) | 1 (mode) |
-| `button` | 3 (start/pause/stop) | 1 (stop) |
+| `button` | 3 (start/pause/stop) | 2 (stop, sync clock) |
 
 Gated control entities use HA's `availability_mode: all` against `<prefix>/availability` AND `<prefix>/remote_available`. Flip Remote Control on the appliance's front panel and those entities un-grey in HA.
 
@@ -1067,6 +1079,7 @@ mqtt_demo/                           MQTT bridge demo (consumes smartthings_loca
   logger.py                          Tagged logger helpers
   bridge.py                          Bridge — one DTLS session per appliance, descriptor-driven
   descriptor.py                      ApplianceDescriptor dataclass + HA discovery helpers
+  clock_sync.py                      Periodic appliance clock write (write-only resource, host-clock gated)
   samples/
     __init__.py                      Sample DESCRIPTORS registry (frozen reference implementations)
     dryer.py                         Dryer descriptor (paths, flatten, discovery, commands)
