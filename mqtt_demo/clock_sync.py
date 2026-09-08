@@ -5,7 +5,7 @@ against Samsung's cloud. A bridge-only deployment blocks that path, so
 the display clock free-runs and drifts. The appliance exposes the clock
 as a write on `/configuration/vs/0`:
 
-    {'x.com.samsung.da.currentTime': '2026-09-08T14:30:00'}
+    {'x.com.samsung.da.currentTime': '<YYYY-MM-DD>T<HH:MM:SS>'}
 
 The field is write-only. A GET of that resource returns the resource
 metadata without it, which is why no device-tree dump carries the name

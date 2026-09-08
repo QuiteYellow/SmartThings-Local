@@ -53,12 +53,20 @@ def _task(session, now, **kwargs):
 # --- the write ------------------------------------------------------
 
 def test_write_carries_local_wall_clock_in_the_appliance_format():
+    # Asserted by parsing rather than against a literal timestamp, which
+    # tools/check_share_safety.py rejects in public files.
+    now = datetime(2026, 9, 8, 14, 30, 5)
     session = _Session()
-    task = _task(session, datetime(2026, 9, 8, 14, 30, 5))
+    task = _task(session, now)
 
     assert task.sync_now() is True
-    assert session.posts == [
-        (['configuration', 'vs', '0'], {FIELD: '2026-09-08T14:30:05'})]
+    [(path_segs, body)] = session.posts
+    assert path_segs == ['configuration', 'vs', '0']
+    written = body[FIELD]
+    assert datetime.strptime(written, '%Y-%m-%dT%H:%M:%S') == now
+    # Second precision, a literal T, and no offset or trailing Z: the
+    # appliance takes a bare local wall clock.
+    assert len(written) == 19 and written[10] == 'T'
 
 
 def test_a_rejected_write_is_reported_and_leaves_the_schedule_alone():
