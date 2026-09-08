@@ -41,6 +41,20 @@ from smartthings_local.protocol.dtls_session import DtlsCoapSession
 # no offset and no 'Z'.
 TIME_FORMAT = '%Y-%m-%dT%H:%M:%S'
 
+
+def zone_name(now: datetime) -> str:
+    """Return the zone abbreviation the stamp was written in.
+
+    The wire format carries no offset, so the stamp alone cannot show
+    which zone produced it and a container running UTC writes a panel an
+    hour behind during BST while still answering 2.04. Logging the zone
+    beside the stamp is what separates those two cases.
+    """
+    try:
+        return now.astimezone().tzname() or time.tzname[0]
+    except (OverflowError, OSError, ValueError):
+        return time.tzname[0]
+
 # Host-clock sanity gate. A container that came up before its NTP sync
 # lands (or with no RTC at all) reports a date well before this floor;
 # writing that to the appliance is the failure mode the forum thread
@@ -99,10 +113,10 @@ class ClockSyncTask:
         if not (PLAUSIBLE_FROM <= now < PLAUSIBLE_UNTIL):
             if self.log:
                 self.log.warning(
-                    "clock sync (%s) skipped: host clock reads %s, outside "
-                    "the plausible window -- writing it could break the "
-                    "appliance's certificate verification",
-                    reason, now.strftime(TIME_FORMAT))
+                    "clock sync (%s) skipped: host clock reads %s %s, "
+                    "outside the plausible window -- writing it could break "
+                    "the appliance's certificate verification",
+                    reason, now.strftime(TIME_FORMAT), zone_name(now))
             return False
 
         stamp = now.strftime(TIME_FORMAT)
@@ -127,8 +141,8 @@ class ClockSyncTask:
         # bridge rather than state the device reported.
         if self.log:
             log = self.log.info if ok else self.log.warning
-            log("clock sync (%s) %s = %s -> %s",
-                reason, self.href, stamp, fmt_code(code))
+            log("clock sync (%s) %s = %s %s -> %s",
+                reason, self.href, stamp, zone_name(now), fmt_code(code))
         return ok
 
     def _initial_delay(self) -> float:
