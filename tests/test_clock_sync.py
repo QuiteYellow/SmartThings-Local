@@ -22,6 +22,7 @@ from mqtt_demo.clock_sync import (
     INITIAL_DELAY_S,
     PLAUSIBLE_FROM,
     ClockSyncTask,
+    zone_name,
 )
 from mqtt_demo.config import SharedConfig
 from mqtt_demo.descriptor import ClockSync
@@ -79,6 +80,74 @@ def test_a_rejected_write_is_reported_and_leaves_the_schedule_alone():
     assert task.sync_now() is False
     assert task.sync_count == 0
     assert task.last_sync_ts is None
+
+
+# --- the zone the stamp was written in -------------------------------
+
+class _Log:
+    """Captures each formatted line, whichever level it came in at."""
+
+    def __init__(self):
+        self.lines = []
+
+    def _record(self, msg, *args):
+        self.lines.append(msg % args)
+
+    info = warning = _record
+
+
+@pytest.fixture
+def host_zone(monkeypatch):
+    """Put the host in a named zone for the duration of one test."""
+    def _set(name):
+        monkeypatch.setenv('TZ', name)
+        time.tzset()
+    yield _set
+    monkeypatch.undo()
+    time.tzset()
+
+
+@pytest.mark.parametrize('zone, expected', [
+    ('UTC', 'UTC'),
+    ('Europe/London', 'BST'),
+])
+def test_the_log_line_names_the_zone_the_stamp_came_from(
+        host_zone, zone, expected):
+    # The wire format carries no offset, so a container left on UTC
+    # writes a panel an hour behind during BST and still answers 2.04.
+    # The stamp alone cannot tell those apart; the zone beside it can.
+    host_zone(zone)
+    session = _Session()
+    log = _Log()
+    task = _task(session, datetime(2026, 9, 8, 14, 30, 5), logger=log)
+
+    assert task.sync_now() is True
+    assert len(log.lines) == 1
+    assert f'14:30:05 {expected} ->' in log.lines[0]
+
+
+def test_a_skipped_write_names_the_zone_too(host_zone):
+    # Same reasoning on the gate: a host reading outside the window is
+    # worth knowing the zone of, since a zone fault is one way to get
+    # there.
+    host_zone('Europe/London')
+    session = _Session()
+    log = _Log()
+    task = _task(session, datetime(2000, 1, 1, 0, 0, 0), logger=log)
+
+    assert task.sync_now() is False
+    assert session.posts == []
+    assert 'GMT' in log.lines[0]
+
+
+def test_the_zone_falls_back_rather_than_raising():
+    # zone_name sits on a log path. A platform that cannot resolve the
+    # local zone must not take the sync down with it.
+    class _NoZone:
+        def astimezone(self):
+            raise OSError('no local zone')
+
+    assert zone_name(_NoZone()) == time.tzname[0]
 
 
 # --- host-clock gate ------------------------------------------------
