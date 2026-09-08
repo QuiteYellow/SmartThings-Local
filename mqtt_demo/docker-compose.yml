@@ -10,10 +10,15 @@ services:
     # broker on 1883). No ports to expose.
 
     volumes:
-      # Holds the client cert + key. APPDATA_DIR comes from .env;
-      # on Unraid this is typically /mnt/user/appdata/smartthings-local/.
-      # Bare-metal dev falls back to ./certs alongside this compose file.
-      - ${APPDATA_DIR:-./certs}:/config:ro
+      # Holds the client cert + key. SMARTTHINGS_LOCAL_APPDATA_DIR comes
+      # from .env; on Unraid this is typically
+      # /mnt/user/appdata/smartthings-local/. Bare-metal dev falls back
+      # to ./certs alongside this compose file. The name is prefixed
+      # because Compose prefers a shell-exported variable over .env, so a
+      # bare APPDATA_DIR left in the shell by a sibling project would
+      # mount that project's directory here until the container is
+      # recreated.
+      - ${SMARTTHINGS_LOCAL_APPDATA_DIR:-./certs}:/config:ro
 
     # All runtime config is in .env. env_file passes every variable
     # straight into the container, so adding a new appliance is a
