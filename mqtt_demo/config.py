@@ -59,6 +59,7 @@ class SharedConfig:
     HEALTH_INTERVAL_S: int
     PING_INTERVAL_S: int
     WRITE_MAX_ATTEMPTS: int
+    CLOCK_SYNC_INTERVAL_H: float
 
     @classmethod
     def from_env(cls) -> 'SharedConfig':
@@ -74,6 +75,11 @@ class SharedConfig:
             HEALTH_INTERVAL_S=int(os.getenv('HEALTH_INTERVAL_S', '60')),
             PING_INTERVAL_S=int(os.getenv('PING_INTERVAL_S', '25')),
             WRITE_MAX_ATTEMPTS=int(os.getenv('WRITE_MAX_ATTEMPTS', '1')),
+            # Hours between appliance clock writes; 0 disables the sync
+            # and its button. Only appliance classes whose descriptor
+            # declares a clock_sync spec are affected.
+            CLOCK_SYNC_INTERVAL_H=float(
+                os.getenv('CLOCK_SYNC_INTERVAL_H', '24')),
         )
 
 

@@ -11,6 +11,10 @@ class (dryer, oven, …) provides a descriptor that supplies:
   * build_discovery(…)  — list of (HA-discovery topic, payload)
   * command_handlers()  — MQTT command-suffix → (path_segs, body_dict)
 
+An optional `clock_sync` spec declares the resource that sets the
+appliance's own wall clock, which the bridge then keeps in step with the
+host (mqtt_demo/clock_sync.py).
+
 Optional hooks let an appliance hold transient state across pushes:
 
   * on_observation(state, href, rep)   — capture anchors, e.g. for
@@ -28,6 +32,23 @@ from typing import Callable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from smartthings_local.ocf.poll_scheduler import PollTier
+
+
+@dataclass(frozen=True)
+class ClockSync:
+    """Where an appliance class takes a wall-clock write.
+
+    Samsung appliances correct their own clock against the cloud, so an
+    appliance the bridge keeps off the internet drifts. `path_segs` +
+    `field` name the write-only resource that sets it; see
+    mqtt_demo/clock_sync.py for the wire format and the host-clock
+    safety gate. `requires_href` is checked against the seeded link dict
+    before the bridge schedules anything, so a device in the class that
+    does not carry the resource is left alone."""
+
+    path_segs: list[str]
+    field: str
+    requires_href: str
 
 
 @dataclass
@@ -81,6 +102,11 @@ class ApplianceDescriptor:
     # local-tools/probe_poll_rate_combined.py (dryer ~14 req/s, oven
     # ~8 req/s) inform the defaults each descriptor sets.
     poll_tiers: list['PollTier'] = field(default_factory=list)
+
+    # Set when the appliance class exposes a writable clock. The bridge
+    # then runs a periodic sync (CLOCK_SYNC_INTERVAL_H) and offers a
+    # `cmd/sync_clock` button; unset leaves both out entirely.
+    clock_sync: Optional['ClockSync'] = None
 
     # Predicate the PollScheduler calls each tick to decide whether to
     # use a tier's active_interval_s. Gets a shallow snapshot of the
@@ -226,3 +252,30 @@ def bridge_diagnostic_discovery(topic_prefix: str,
                "{{ value_json.last_observe_age_s if value_json.last_observe_age_s is not none else 'never' }}",
                icon='mdi:radar'),
     ]
+
+
+def clock_sync_discovery(topic_prefix: str,
+                         ha_discovery_prefix: str,
+                         device_name: str,
+                         model: str,
+                         cmd_suffix: str = 'cmd/sync_clock') -> list[tuple[str, bytes]]:
+    """HA-discovery payload for the Sync clock button.
+
+    Config-category, no state topic: the appliance never reads the clock
+    field back, so there is nothing to show. Appended by the bridge when
+    the descriptor declares a clock_sync spec and the interval knob
+    leaves the feature on."""
+    cfg = {
+        'name':            'Sync clock',
+        'unique_id':       f"{topic_prefix}_sync_clock",
+        'object_id':       f"{topic_prefix}_sync_clock",
+        'command_topic':   f"{topic_prefix}/{cmd_suffix}",
+        'payload_press':   'Sync',
+        'icon':            'mdi:clock-check-outline',
+        'availability':    avail_base(f"{topic_prefix}/availability"),
+        'device':          device_block(topic_prefix, device_name, model),
+        'entity_category': 'config',
+    }
+    topic = (f"{ha_discovery_prefix}/button/"
+             f"{topic_prefix}/sync_clock/config")
+    return [(topic, encode(cfg))]
