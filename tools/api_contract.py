@@ -140,3 +140,52 @@ SUPPORTED_DOWNSTREAM_IMPORTS = {
     "smartthings_local.ocf.keepalive": ("KeepaliveTask",),
     "smartthings_local.ocf.observe_refresh": ("ObserveRefreshTask",),
 }
+
+
+# Reading order for `docs/api.md`. Grouped by layer because the module list
+# alone gives a reader no way in: fifteen flat names do not say which one a
+# session comes from and which one is a codec. Every module in
+# SUPPORTED_DOWNSTREAM_IMPORTS must appear in exactly one layer, which
+# tests/test_public_api_contract.py enforces, so adding a module cannot
+# silently drop it from the page.
+API_LAYERS = (
+    (
+        "Errors",
+        ("smartthings_local.errors",),
+    ),
+    (
+        "Authentication",
+        ("smartthings_local.protocol.auth",),
+    ),
+    (
+        "Sessions",
+        ("smartthings_local.protocol.dtls_session",),
+    ),
+    (
+        "Discovery and probing",
+        (
+            "smartthings_local.protocol.dtls_probe",
+            "smartthings_local.protocol.ocf_discovery",
+            "smartthings_local.protocol.ocf_multicast",
+            "smartthings_local.protocol.endpoint",
+        ),
+    ),
+    (
+        "Wire formats",
+        (
+            "smartthings_local.protocol.coap",
+            "smartthings_local.protocol.coap_tcp",
+            "smartthings_local.protocol.ble_ocf",
+            "smartthings_local.protocol.owner_psk",
+        ),
+    ),
+    (
+        "Reference-bridge helpers",
+        (
+            "smartthings_local.ocf.state_cache",
+            "smartthings_local.ocf.poll_scheduler",
+            "smartthings_local.ocf.keepalive",
+            "smartthings_local.ocf.observe_refresh",
+        ),
+    ),
+)

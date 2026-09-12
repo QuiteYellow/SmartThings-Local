@@ -146,6 +146,11 @@ def discover_ocf_responder_ports(
 ) -> OcfResponderPortDiscoveryResult:
     """Find plaintext OCF response ports for one known IPv4 host.
 
+    These ports carry plain CoAP. A DTLS handshake needs the *secure* port,
+    which the appliance advertises separately and which
+    :func:`smartthings_local.protocol.ocf_discovery.discover_ocf_secure_ports`
+    reads. Dialling a port from this result with DTLS times out.
+
     Each round sends modern OCF and legacy IoTivity NON requests to the
     link-local multicast group. Only a 2.05 response with a request token and
     the exact target source address contributes a candidate. One monotonic

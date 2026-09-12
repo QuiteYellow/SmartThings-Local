@@ -35,7 +35,7 @@ from smartthings_local.protocol.ocf_multicast import (
 )
 from smartthings_local.protocol.owner_psk import derive_mfg_certificate_owner_psk
 from tools import generate_api_docs
-from tools.api_contract import SUPPORTED_DOWNSTREAM_IMPORTS
+from tools.api_contract import API_LAYERS, SUPPORTED_DOWNSTREAM_IMPORTS
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -439,8 +439,36 @@ def test_published_api_reference_matches_the_code():
 
 
 def test_every_declared_name_reaches_the_published_reference():
+    # A callable gets its own heading; a constant is a row in its module's
+    # table. Either way the name has to be findable on the page.
     reference = generate_api_docs.DOC_PATH.read_text()
     for module_name, names in SUPPORTED_DOWNSTREAM_IMPORTS.items():
-        assert f"## `{module_name}`" in reference, module_name
+        assert f"### `{module_name}`" in reference, module_name
         for name in names:
-            assert f"#### `{name}" in reference, f"{module_name}.{name}"
+            heading = f"#### `{name}`" in reference
+            table_row = f"| `{name}` |" in reference
+            assert heading or table_row, f"{module_name}.{name}"
+
+
+def test_every_supported_module_is_laid_out_exactly_once():
+    # The page groups modules by layer. A module added to the contract and
+    # forgotten here would be documented nowhere, so the omission fails
+    # rather than shipping a page with a hole in it.
+    laid_out = [module for _, modules in API_LAYERS for module in modules]
+
+    assert sorted(laid_out) == sorted(SUPPORTED_DOWNSTREAM_IMPORTS)
+    assert len(laid_out) == len(set(laid_out))
+
+
+def test_contents_links_resolve_to_a_heading_on_the_page():
+    reference = generate_api_docs.DOC_PATH.read_text()
+    anchors = re.findall(r"\]\(#([a-z0-9_-]+)\)", reference)
+    headings = {
+        generate_api_docs._slug(line)
+        for line in reference.splitlines()
+        if line.startswith("#")
+    }
+
+    assert anchors, "the page should carry a table of contents"
+    for anchor in anchors:
+        assert anchor in headings, anchor
