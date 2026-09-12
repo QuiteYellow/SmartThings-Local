@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from OpenSSL import SSL
 
 from ..errors import ProbeError
-from .auth import _DTLS_CIPHERS, _OCF_ROOT_CA, _load_pem_chain
+from .auth import PskAuth, _DTLS_CIPHERS, _OCF_ROOT_CA, _load_pem_chain
 from .coap import split_dtls
 from .dtls_handshake import _drive_dtls_handshake
 from .endpoint import open_host_filtered_udp_socket
@@ -56,6 +56,9 @@ _HS_NAMES = {
     1: 'ClientHello',
     2: 'ServerHello',
     3: 'HelloVerifyRequest',
+    # RFC 5077. Sent in the clear ahead of the server's ChangeCipherSpec, so
+    # a completed handshake legitimately reports it.
+    4: 'NewSessionTicket',
     11: 'Certificate',
     12: 'ServerKeyExchange',
     13: 'CertificateRequest',
@@ -89,6 +92,9 @@ _ALERT_NAMES = {
     86: 'inappropriate_fallback',
     90: 'user_canceled',
     112: 'unrecognized_name',
+    # RFC 4279 §2. The alert a PSK carrier fails with, so an `auth=PskAuth`
+    # diagnosis names it instead of reporting a bare number.
+    115: 'unknown_psk_identity',
     116: 'certificate_required',
 }
 
@@ -559,8 +565,53 @@ def probe(host, port, *, cert_pem=None, key_pem=None,
     return result
 
 
+def _accept_any_peer_chain(*_args):
+    """Accept any chain a server sends.
+
+    A probe classifies what arrives; it does not gate on our trust decision.
+    """
+    return True
+
+
+def _validate_diagnostic_auth(auth, cert_pem, key_pem, cert_path, key_path):
+    if auth is None:
+        return
+    if (cert_pem is not None or key_pem is not None
+            or cert_path is not None or key_path is not None):
+        raise ValueError(
+            'pass either auth or cert_pem/key_pem/cert_path/key_path, '
+            'not both')
+    if not callable(getattr(auth, 'configure_context', None)):
+        raise TypeError('auth must be an AuthenticationProvider')
+
+
+def _diagnostic_context(*, auth, cert_pem, key_pem, cert_path, key_path):
+    """Build one diagnostic context that never gates on our trust decision."""
+    ctx = SSL.Context(SSL.DTLS_METHOD)
+    ctx.load_verify_locations(_OCF_ROOT_CA)
+    ctx.set_verify(SSL.VERIFY_PEER, _accept_any_peer_chain)
+    ctx.set_cipher_list(_DTLS_CIPHERS)
+    if auth is not None:
+        auth.configure_context(ctx)
+        # Providers configure a context to *gate* on trust: CertificateAuth
+        # installs OpenSSL's own verdict, and a SamsungServerProfile pins an
+        # identity from inside the verify callback. Either one turns an
+        # appliance's alert into a local verify failure, which is the single
+        # thing a diagnostic must not do, so accept-any is re-asserted last.
+        # A PSK provider's cipher list survives that, because VERIFY_PEER is
+        # never consulted for a ciphersuite carrying no certificate.
+        ctx.set_verify(SSL.VERIFY_PEER, _accept_any_peer_chain)
+    elif cert_pem is not None:
+        _load_pem_chain(ctx, cert_pem, key_pem)
+    elif cert_path is not None:
+        ctx.use_certificate_chain_file(cert_path)
+        ctx.use_privatekey_file(key_path)
+        ctx.check_privatekey()
+    return ctx
+
+
 def diagnose_dtls_handshake(
-        host, port, *, cert_pem=None, key_pem=None,
+        host, port, *, auth=None, cert_pem=None, key_pem=None,
         cert_path=None, key_path=None,
         retries=2, timeout=3.0, mtu=1200,
         family=socket.AF_UNSPEC):
@@ -570,23 +621,32 @@ def diagnose_dtls_handshake(
     into OpenSSL. It can therefore emit a cookie-bearing second ClientHello and
     allocate appliance-side association state. Keep it out of discovery,
     reconnect, and other production liveness paths.
+
+    ``auth`` takes any :mod:`~smartthings_local.protocol.auth` authentication
+    provider, so a PSK carrier can be diagnosed on the same footing as a
+    certificate one. It is mutually exclusive with the
+    ``cert_pem``/``key_pem``/``cert_path``/``key_path`` inputs, which remain
+    supported for certificate credentials.
+
+    A diagnostic never enforces trust, whichever credential reaches it. A
+    provider's own verification, including a ``SamsungServerProfile``'s pinned
+    server identity, is deliberately not honoured here: the result has to
+    report what the appliance did, so an untrusted chain is classified rather
+    than rejected locally. Use :class:`DtlsCoapSession` for a session that
+    does gate on trust.
     """
     _validate_liveness_options(port, retries, timeout, mtu)
     _validate_probe_family(family)
+    _validate_diagnostic_auth(auth, cert_pem, key_pem, cert_path, key_path)
     result = ProbeResult(host, port)
 
-    ctx = SSL.Context(SSL.DTLS_METHOD)
-    ctx.load_verify_locations(_OCF_ROOT_CA)
-    # Accept the chain unconditionally: a probe classifies what the server
-    # sends, it does not gate on our trust decision.
-    ctx.set_verify(SSL.VERIFY_PEER, lambda *a: True)
-    ctx.set_cipher_list(_DTLS_CIPHERS)
-    if cert_pem is not None:
-        _load_pem_chain(ctx, cert_pem, key_pem)
-    elif cert_path is not None:
-        ctx.use_certificate_chain_file(cert_path)
-        ctx.use_privatekey_file(key_path)
-        ctx.check_privatekey()
+    ctx = _diagnostic_context(
+        auth=auth,
+        cert_pem=cert_pem,
+        key_pem=key_pem,
+        cert_path=cert_path,
+        key_path=key_path,
+    )
 
     conn = SSL.Connection(ctx, None)
     conn.set_connect_state()
@@ -606,13 +666,22 @@ def diagnose_dtls_handshake(
     started = time.monotonic()
     deadline = started + timeout
     seen = set()
+    encrypted = False
 
     def record_datagram(datagram):
+        nonlocal encrypted
         if result.rtt_s is None:
             result.rtt_s = time.monotonic() - started
         result.datagrams.append(datagram)
         for content_type, detail in classify_datagram(datagram):
-            if content_type == _CT_HANDSHAKE:
+            if content_type == _CT_CHANGE_CIPHER_SPEC:
+                # Handshake records after this one are encrypted, so their
+                # first byte is ciphertext and not a message type. Reading it
+                # as one invents a message: roughly one ciphertext byte in
+                # 256 collides with a name in _HS_NAMES, which is frequent
+                # enough to have produced a phantom 'Finished' in testing.
+                encrypted = True
+            elif content_type == _CT_HANDSHAKE and not encrypted:
                 if detail not in seen:
                     seen.add(detail)
                     result.handshake_msgs.append(detail)
@@ -653,10 +722,15 @@ def _main(argv):
 
     if len(argv) < 2:
         print('usage: python -m smartthings_local.protocol.dtls_probe '
-              'HOST PORT [PORT...] [--diagnostic --cert FILE --key FILE]')
+              'HOST PORT [PORT...] [--diagnostic]\n'
+              '         [--cert FILE --key FILE]\n'
+              '         [--psk-identity HEX --psk-key HEX]\n'
+              'A PSK passed here is visible to every process on the host; '
+              'use a throwaway value.')
         return 2
     host = argv[0]
     cert_path = key_path = None
+    psk_identity = psk_key = None
     diagnostic = False
     ports = []
     it = iter(argv[1:])
@@ -665,6 +739,10 @@ def _main(argv):
             cert_path = next(it)
         elif a == '--key':
             key_path = next(it)
+        elif a == '--psk-identity':
+            psk_identity = next(it)
+        elif a == '--psk-key':
+            psk_key = next(it)
         elif a == '--diagnostic':
             diagnostic = True
         elif a == '--stateless':
@@ -682,14 +760,37 @@ def _main(argv):
     if (cert_path is None) != (key_path is None):
         print('--cert and --key must be supplied together')
         return 2
-    if not diagnostic and (cert_path is not None or key_path is not None):
-        print('--cert/--key require the explicit --diagnostic mode')
+    if (psk_identity is None) != (psk_key is None):
+        print('--psk-identity and --psk-key must be supplied together')
+        return 2
+    if cert_path is not None and psk_identity is not None:
+        print('pass either --cert/--key or --psk-identity/--psk-key, '
+              'not both')
+        return 2
+    credential_supplied = cert_path is not None or psk_identity is not None
+    if not diagnostic and credential_supplied:
+        print('a credential requires the explicit --diagnostic mode')
         return 2
 
+    auth = None
+    if psk_identity is not None:
+        try:
+            auth = PskAuth(
+                identity=bytes.fromhex(psk_identity),
+                key=bytes.fromhex(psk_key),
+            )
+        except ValueError as exc:
+            print(f'invalid PSK credential: {exc}')
+            return 2
+
+    credential_kwargs = (
+        {'auth': auth}
+        if auth is not None
+        else {'cert_path': cert_path, 'key_path': key_path}
+    )
     target = diagnose_dtls_handshake if diagnostic else probe
     with cf.ThreadPoolExecutor(max_workers=max(1, len(ports))) as ex:
-        futs = {ex.submit(target, host, p, cert_path=cert_path,
-                          key_path=key_path): p
+        futs = {ex.submit(target, host, p, **credential_kwargs): p
                 for p in ports}
         results = [f.result() for f in cf.as_completed(futs)]
 

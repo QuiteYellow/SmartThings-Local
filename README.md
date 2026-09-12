@@ -475,7 +475,7 @@ and covered by the downstream compatibility contract:
 | `smartthings_local.errors` | Classified, redacted library failures |
 | `smartthings_local.protocol.auth` | Certificate, server-certificate, and PSK providers and Samsung server profiles |
 | `smartthings_local.protocol.dtls_session` | Sustained CoAP-DTLS sessions and connect cancellation |
-| `smartthings_local.protocol.dtls_probe` | Stateless DTLS liveness results and single/multi-port probes |
+| `smartthings_local.protocol.dtls_probe` | Stateless DTLS liveness results, single/multi-port probes, and the opt-in provider-aware handshake diagnostic |
 | `smartthings_local.protocol.endpoint` | Resolved IPv4/IPv6 UDP endpoints and connected/host-filtered socket setup |
 | `smartthings_local.protocol.ocf_discovery` | Bounded plaintext OCF reads and advertised secure-port discovery |
 | `smartthings_local.protocol.ocf_multicast` | Known-host OCF responder-port discovery |
@@ -685,6 +685,23 @@ python -m smartthings_local.protocol.dtls_probe "$APPLIANCE_IP" 5684 49153 49154
 ```
 
 `live` means a DTLS server answered its first flight; `dead` means silent or not DTLS. Once you have the client cert (Part 2), add the explicit `--diagnostic` flag to run the stateful diagnostic drive, which reports `completed` (cert accepted) or `rejected` with the server's fatal alert. Diagnostic mode can allocate appliance-side DTLS state and is never used by discovery or reconnect. An `unsupported_certificate` / `unknown_ca` alert means the endpoint is reachable but this certificate profile was rejected. It is not a reason to disable verification or keep retrying. The same bounded stateless API gates the bridge's reconnect loop and, when `OCF_PORT` is unset, probes both standard 5684 and ports 49152–49160.
+
+A device that rejects the certificate profile may still run a PSK endpoint, and `diagnose_dtls_handshake` takes any authentication provider through `auth=` so that carrier can be characterised the same way:
+
+```python
+from smartthings_local.protocol.auth import PskAuth
+from smartthings_local.protocol.dtls_probe import diagnose_dtls_handshake
+
+result = diagnose_dtls_handshake(
+    appliance_host,
+    secure_port,
+    auth=PskAuth(identity=psk_identity, key=psk_key),
+)
+```
+
+`auth=` is mutually exclusive with `cert_pem`/`key_pem`/`cert_path`/`key_path`. A `rejected` outcome carrying `unknown_psk_identity` means the endpoint negotiated ECDHE-PSK and then refused the credential, which distinguishes a PSK device from one with no local DTLS at all. The CLI exposes the same thing as `--diagnostic --psk-identity HEX --psk-key HEX`, and since a command line is readable by every process on the host, pass a throwaway value there rather than a real credential.
+
+A diagnostic never enforces trust, whichever credential it is given. A provider's own verification, including a `SamsungServerProfile`'s pinned server identity, is deliberately not honoured: the result has to report what the appliance did, so an untrusted chain is classified rather than rejected locally. Use `DtlsCoapSession` when the trust decision is the point.
 
 Consumers can discover ports outside that fallback range through the public,
 read-only OCF resource directory before probing them:

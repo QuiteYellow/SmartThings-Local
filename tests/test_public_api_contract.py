@@ -7,6 +7,8 @@ import inspect
 import re
 from pathlib import Path
 
+import pytest
+
 from smartthings_local.ocf.observe_refresh import ObserveRefreshTask
 from smartthings_local.ocf.state_cache import StateCache
 from smartthings_local.protocol.auth import (
@@ -17,6 +19,7 @@ from smartthings_local.protocol.auth import (
     SamsungServerRole,
     ServerCertificateAuth,
 )
+from smartthings_local.protocol.dtls_probe import diagnose_dtls_handshake
 from smartthings_local.protocol.dtls_session import (
     ConnectCancellation,
     DtlsCoapSession,
@@ -275,6 +278,36 @@ def test_known_host_multicast_discovery_has_a_bounded_explicit_interface_api():
     )
     assert result.found is True
     assert result.ports == (43123,)
+
+
+def test_diagnostic_handshake_accepts_any_authentication_provider():
+    parameters = inspect.signature(diagnose_dtls_handshake).parameters
+    assert list(parameters) == [
+        "host",
+        "port",
+        "auth",
+        "cert_pem",
+        "key_pem",
+        "cert_path",
+        "key_path",
+        "retries",
+        "timeout",
+        "mtu",
+        "family",
+    ]
+    for name in ("auth", "cert_pem", "key_pem", "cert_path", "key_path"):
+        assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters[name].default is None
+
+    # A carrier and a raw certificate are alternatives, never a merge.
+    with pytest.raises(ValueError):
+        diagnose_dtls_handshake(
+            "127.0.0.1",
+            5684,
+            auth=PskAuth(identity=bytes(range(1, 17)), key=b"k" * 16),
+            cert_pem="pem",
+            key_pem="key",
+        )
 
 
 def test_certificate_auth_is_a_public_authentication_provider():

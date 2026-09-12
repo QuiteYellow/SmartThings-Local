@@ -450,3 +450,357 @@ def test_cli_bounds_port_fanout(capsys):
 
     assert result == 2
     assert 'at most 32 PORT values' in capsys.readouterr().out
+
+
+# --- auth= providers, against a real loopback DTLS server ----------------
+#
+# `_FakeSock` fakes only the datagram transport, so an OpenSSL server driven
+# through its responder produces genuine server flights: a real certificate
+# chain to verify, and a real `unknown_psk_identity` alert from OpenSSL's own
+# PSK path. That is what makes these tests evidence about the handshake
+# rather than about a hand-built record.
+
+_ECDHE_ECDSA_AES128_GCM_SHA256 = 0xC02B
+_ECDHE_PSK_AES128_CBC_SHA256 = 0xC037
+
+
+def _synthetic_ec_server_credentials():
+    """An ECDSA self-signed server cert unrelated to Samsung's hierarchy."""
+    from datetime import datetime, timedelta, timezone
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    now = datetime.now(timezone.utc)
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name(
+        [x509.NameAttribute(NameOID.COMMON_NAME, 'Synthetic test server')]
+    )
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(hours=1))
+        .sign(key, hashes.SHA256())
+    )
+    return (
+        certificate.public_bytes(serialization.Encoding.PEM).decode(),
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ).decode(),
+    )
+
+
+class _LoopbackDtlsServer:
+    """Drive a real OpenSSL DTLS server from `_FakeSock`'s responder."""
+
+    def __init__(self, context):
+        from OpenSSL import SSL
+
+        self._ssl = SSL
+        self._conn = SSL.Connection(context, None)
+        self._conn.set_accept_state()
+        self._consumed = 0
+
+    def __call__(self, fake):
+        for datagram in fake.sends[self._consumed:]:
+            self._conn.bio_write(datagram)
+        self._consumed = len(fake.sends)
+        try:
+            self._conn.do_handshake()
+        except (self._ssl.WantReadError, self._ssl.Error):
+            # A rejection is emitted into the BIO as an alert record, which
+            # is the flight under test; nothing here should raise onward.
+            pass
+        try:
+            return self._conn.bio_read(65536)
+        except self._ssl.WantReadError:
+            return None
+
+
+def _server_context(*, cipher, cert_pem=None, key_pem=None, psk=False):
+    from OpenSSL import SSL, _util, crypto
+
+    context = SSL.Context(SSL.DTLS_METHOD)
+    context.set_cipher_list(cipher)
+    if cert_pem is not None:
+        # pyOpenSSL's own types: the floor binding in CI rejects a
+        # cryptography certificate here, and the library loads chains the
+        # same way.
+        context.use_certificate(
+            crypto.load_certificate(crypto.FILETYPE_PEM, cert_pem.encode())
+        )
+        context.use_privatekey(
+            crypto.load_privatekey(crypto.FILETYPE_PEM, key_pem.encode())
+        )
+    if psk:
+        ffi = _util.ffi
+
+        @ffi.callback(
+            'unsigned int(*)(SSL *, const char *, unsigned char *, '
+            'unsigned int)'
+        )
+        def server_callback(_ssl, _identity, _key_buffer, _max_key_length):
+            # Every identity is unknown, so OpenSSL raises the RFC 4279
+            # unknown_psk_identity(115) alert itself.
+            return 0
+
+        # Retained on the context object: the callback must outlive this call.
+        context._test_psk_callback = server_callback
+        _util.lib.SSL_CTX_set_psk_server_callback(
+            context._context, server_callback
+        )
+    return context
+
+
+# RFC 5746 §3.3. Advertised alongside the real suites by some OpenSSL
+# builds, and it names no cipher, so it is dropped before comparing.
+_EMPTY_RENEGOTIATION_INFO_SCSV = 0x00FF
+
+
+def _client_hello_cipher_suites(datagram):
+    """Read the offered cipher suites out of a DTLS ClientHello datagram.
+
+    Signalling suite values are excluded, leaving only real ciphers.
+    """
+    fragment = datagram[13:13 + int.from_bytes(datagram[11:13], 'big')]
+    body = fragment[12:]                      # past the handshake header
+    offset = 2 + 32                           # client_version + random
+    offset += 1 + body[offset]                # session_id
+    offset += 1 + body[offset]                # cookie
+    length = int.from_bytes(body[offset:offset + 2], 'big')
+    suites = body[offset + 2:offset + 2 + length]
+    return {
+        int.from_bytes(suites[i:i + 2], 'big')
+        for i in range(0, len(suites), 2)
+    } - {_EMPTY_RENEGOTIATION_INFO_SCSV}
+
+
+def test_diagnostic_psk_provider_reaches_an_unknown_psk_identity_alert(
+        monkeypatch):
+    # The point of auth=: a PSK carrier is diagnosable on the same footing as
+    # a certificate one, and the alert it fails with is named rather than
+    # reported as a bare 115.
+    from smartthings_local.protocol.auth import PskAuth
+
+    server = _LoopbackDtlsServer(
+        _server_context(cipher=b'ECDHE-PSK-AES128-CBC-SHA256:@SECLEVEL=0',
+                        psk=True)
+    )
+    fake = _FakeSock(server)
+    _patch_sock(monkeypatch, fake)
+
+    result = p.diagnose_dtls_handshake(
+        '127.0.0.1',
+        5684,
+        auth=PskAuth(identity=bytes(range(1, 17)), key=b'k' * 16),
+        timeout=2.0,
+    )
+
+    assert result.alert == (2, 'unknown_psk_identity')
+    assert result.outcome == p.REJECTED
+    assert 'ServerHello' in result.handshake_msgs
+
+
+def test_diagnostic_psk_provider_replaces_the_certificate_cipher_list(
+        monkeypatch):
+    # Ordering guarantee: the provider is applied after the probe's own
+    # baseline, so PskAuth's suite replaces ECDHE-ECDSA rather than being
+    # overwritten by it.
+    from smartthings_local.protocol.auth import PskAuth
+
+    fake = _FakeSock(lambda _f: None)
+    _patch_sock(monkeypatch, fake)
+    p.diagnose_dtls_handshake(
+        '127.0.0.1', 5684,
+        auth=PskAuth(identity=bytes(range(1, 17)), key=b'k' * 16),
+        timeout=0.2, retries=0,
+    )
+    psk_suites = _client_hello_cipher_suites(fake.sends[0])
+
+    certificate_fake = _FakeSock(lambda _f: None)
+    _patch_sock(monkeypatch, certificate_fake)
+    p.diagnose_dtls_handshake('127.0.0.1', 5684, timeout=0.2, retries=0)
+    certificate_suites = _client_hello_cipher_suites(
+        certificate_fake.sends[0]
+    )
+
+    assert psk_suites == {_ECDHE_PSK_AES128_CBC_SHA256}
+    assert certificate_suites == {_ECDHE_ECDSA_AES128_GCM_SHA256}
+
+
+def test_diagnostic_certificate_provider_matches_inline_pem_credentials(
+        monkeypatch):
+    # auth=CertificateAuth has to be a pure re-spelling of cert_pem/key_pem,
+    # since an existing caller's behaviour must not shift under the new
+    # parameter.
+    from smartthings_local.protocol.auth import CertificateAuth
+
+    cert_pem, key_pem = _synthetic_ec_server_credentials()
+    outcomes = []
+    for credentials in (
+        {'cert_pem': cert_pem, 'key_pem': key_pem},
+        {'auth': CertificateAuth.from_memory(cert_pem, key_pem)},
+    ):
+        server_cert, server_key = _synthetic_ec_server_credentials()
+        fake = _FakeSock(
+            _LoopbackDtlsServer(
+                _server_context(
+                    cipher=b'ECDHE-ECDSA-AES128-GCM-SHA256:@SECLEVEL=0',
+                    cert_pem=server_cert,
+                    key_pem=server_key,
+                )
+            )
+        )
+        _patch_sock(monkeypatch, fake)
+        result = p.diagnose_dtls_handshake(
+            '127.0.0.1', 5684, timeout=2.0, **credentials
+        )
+        outcomes.append(
+            (result.outcome, tuple(result.handshake_msgs), result.alert)
+        )
+
+    assert outcomes[0] == outcomes[1]
+    assert outcomes[0][0] == p.COMPLETED
+    assert outcomes[0][1] == (
+        'ServerHello',
+        'Certificate',
+        'ServerKeyExchange',
+        'ServerHelloDone',
+        'NewSessionTicket',
+    )
+
+
+def test_diagnostic_never_gates_on_a_pinned_server_identity(monkeypatch):
+    # A SamsungServerProfile pins an identity from inside the verify
+    # callback, which would turn this synthetic server's chain into a local
+    # verify failure. A diagnostic must report what the appliance did, so the
+    # probe re-asserts accept-any last and the handshake still completes.
+    from smartthings_local.protocol.auth import (
+        CertificateAuth,
+        SamsungServerProfile,
+    )
+
+    cert_pem, key_pem = _synthetic_ec_server_credentials()
+    server_cert, server_key = _synthetic_ec_server_credentials()
+    fake = _FakeSock(
+        _LoopbackDtlsServer(
+            _server_context(
+                cipher=b'ECDHE-ECDSA-AES128-GCM-SHA256:@SECLEVEL=0',
+                cert_pem=server_cert,
+                key_pem=server_key,
+            )
+        )
+    )
+    _patch_sock(monkeypatch, fake)
+
+    result = p.diagnose_dtls_handshake(
+        '127.0.0.1',
+        5684,
+        auth=CertificateAuth.from_memory(
+            cert_pem,
+            key_pem,
+            server_profile=SamsungServerProfile(
+                # tools/check_share_safety.py's allowlisted placeholder.
+                expected_certificate_identity=(
+                    '11111111-2222-3333-4444-555555555555'
+                ),
+            ),
+        ),
+        timeout=2.0,
+    )
+
+    assert result.outcome == p.COMPLETED
+    assert result.error is None
+
+
+def test_diagnostic_rejects_auth_beside_certificate_inputs():
+    from smartthings_local.protocol.auth import PskAuth
+
+    auth = PskAuth(identity=bytes(range(1, 17)), key=b'k' * 16)
+    for credentials in (
+        {'cert_pem': 'pem', 'key_pem': 'key'},
+        {'cert_path': '/dev/null', 'key_path': '/dev/null'},
+    ):
+        with pytest.raises(ValueError, match='not both'):
+            p.diagnose_dtls_handshake(
+                '127.0.0.1', 5684, auth=auth, **credentials
+            )
+
+
+def test_diagnostic_rejects_an_object_that_is_not_a_provider():
+    with pytest.raises(TypeError, match='AuthenticationProvider'):
+        p.diagnose_dtls_handshake('127.0.0.1', 5684, auth=object())
+
+
+def test_cli_psk_credential_requires_the_diagnostic_mode(capsys):
+    result = p._main([
+        '127.0.0.1', '5684',
+        '--psk-identity', '000102030405060708090a0b0c0d0e0f',
+        '--psk-key', '00' * 16,
+    ])
+
+    assert result == 2
+    assert 'requires the explicit --diagnostic mode' in capsys.readouterr().out
+
+
+def test_cli_psk_credential_needs_both_halves(capsys):
+    result = p._main([
+        '127.0.0.1', '5684', '--diagnostic',
+        '--psk-identity', '000102030405060708090a0b0c0d0e0f',
+    ])
+
+    assert result == 2
+    assert 'must be supplied together' in capsys.readouterr().out
+
+
+def test_cli_refuses_a_certificate_and_a_psk_together(capsys):
+    result = p._main([
+        '127.0.0.1', '5684', '--diagnostic',
+        '--cert', 'c.pem', '--key', 'k.pem',
+        '--psk-identity', '000102030405060708090a0b0c0d0e0f',
+        '--psk-key', '00' * 16,
+    ])
+
+    assert result == 2
+    assert 'not both' in capsys.readouterr().out
+
+
+def test_cli_reports_an_unusable_psk_credential_without_a_traceback(capsys):
+    # A NUL in the identity is rejected by PskAuth, and the CLI has to render
+    # that as a usage error rather than an exception.
+    result = p._main([
+        '127.0.0.1', '5684', '--diagnostic',
+        '--psk-identity', '0102030405060708000a0b0c0d0e0f10',
+        '--psk-key', '00' * 16,
+    ])
+
+    assert result == 2
+    assert 'invalid PSK credential' in capsys.readouterr().out
+
+
+def test_encrypted_records_do_not_invent_handshake_messages(monkeypatch):
+    # A handshake record after ChangeCipherSpec is encrypted, so its first
+    # byte is ciphertext. Read as a message type it names whatever it
+    # collides with, and roughly one byte in 256 collides with a name in
+    # _HS_NAMES: this fabricated a 'Finished' once in 30 real handshakes
+    # before the suppression went in. 20 is Finished's type value.
+    responses = iter((
+        _hvr(),
+        _rec(p._CT_CHANGE_CIPHER_SPEC, b'\x01')
+        + _rec(p._CT_HANDSHAKE, bytes([20]) + b'ciphertext'),
+    ))
+    fake = _FakeSock(lambda _f: next(responses, None))
+    _patch_sock(monkeypatch, fake)
+
+    result = p.diagnose_dtls_handshake('127.0.0.1', 5684, timeout=0.3)
+
+    assert result.handshake_msgs == ['HelloVerifyRequest']
+    assert 'Finished' not in result.handshake_msgs
