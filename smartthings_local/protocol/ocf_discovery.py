@@ -782,6 +782,11 @@ def discover_ocf_secure_ports(
         family=socket.AF_UNSPEC):
     """Discover secure ports advertised by a target's public OCF directory.
 
+    This is the DTLS port. It is a different value from the plaintext
+    response ports that
+    :func:`smartthings_local.protocol.ocf_multicast.discover_ocf_responder_ports`
+    reports, and the two are easily confused.
+
     ``discovery_port`` is the target's already-known public CoAP request port.
     Its 5683 default is only a convenience; this function does not scan or use
     multicast to locate a different public port before sending the request.
