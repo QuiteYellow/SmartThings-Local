@@ -429,3 +429,120 @@ def test_psk_handshake_rejection_does_not_expose_credentials():
     assert _IDENTITY.decode() not in rendered
     assert _KEY.decode() not in rendered
     udp_socket.close.assert_called_once_with()
+
+
+# --- why the NUL guard exists, characterized against OpenSSL -------------
+
+_PSK_CIPHER = b"ECDHE-PSK-AES128-CBC-SHA256:@SECLEVEL=0"
+_CLIENT_CALLBACK_CDEF = (
+    "unsigned int(*)(SSL *, const char *, char *, unsigned int, "
+    "unsigned char *, unsigned int)"
+)
+_SERVER_CALLBACK_CDEF = (
+    "unsigned int(*)(SSL *, const char *, unsigned char *, unsigned int)"
+)
+
+
+def _psk_identity_on_the_wire(identity):
+    """Return the psk_identity length and bytes a real DTLS client sends.
+
+    Both endpoints are OpenSSL over memory BIOs, relayed by hand so the
+    client's records can be read. The ClientKeyExchange carrying
+    psk_identity precedes ChangeCipherSpec, so it is in the clear.
+    """
+    ffi, lib = auth_module._util.ffi, auth_module._util.lib
+
+    @ffi.callback(_CLIENT_CALLBACK_CDEF)
+    def client_callback(_ssl, _hint, identity_buffer, max_identity_length,
+                        key_buffer, max_key_length):
+        # Byte for byte what PskAuth's own callback does, so this measures
+        # OpenSSL rather than a straw man.
+        if len(identity) + 1 > max_identity_length or len(_KEY) > max_key_length:
+            return 0
+        ffi.memmove(identity_buffer, identity + b"\x00", len(identity) + 1)
+        ffi.memmove(key_buffer, _KEY, len(_KEY))
+        return len(_KEY)
+
+    @ffi.callback(_SERVER_CALLBACK_CDEF)
+    def server_callback(_ssl, _identity, key_buffer, max_key_length):
+        if len(_KEY) > max_key_length:
+            return 0
+        ffi.memmove(key_buffer, _KEY, len(_KEY))
+        return len(_KEY)
+
+    client_context = SSL.Context(SSL.DTLS_METHOD)
+    client_context.set_cipher_list(_PSK_CIPHER)
+    lib.SSL_CTX_set_psk_client_callback(
+        client_context._context, client_callback
+    )
+    server_context = SSL.Context(SSL.DTLS_METHOD)
+    server_context.set_cipher_list(_PSK_CIPHER)
+    lib.SSL_CTX_set_psk_server_callback(
+        server_context._context, server_callback
+    )
+
+    client = SSL.Connection(client_context, None)
+    server = SSL.Connection(server_context, None)
+    client.set_connect_state()
+    server.set_accept_state()
+
+    sent = bytearray()
+    for _ in range(30):
+        for source, destination, record in (
+            (client, server, sent),
+            (server, client, None),
+        ):
+            try:
+                source.do_handshake()
+            except (SSL.WantReadError, SSL.Error):
+                pass
+            try:
+                data = source.bio_read(65536)
+            except SSL.WantReadError:
+                continue
+            if record is not None:
+                record += data
+            destination.bio_write(data)
+
+    stream = bytes(sent)
+    offset = 0
+    while offset + 13 <= len(stream):
+        length = int.from_bytes(stream[offset + 11:offset + 13], "big")
+        fragment = stream[offset + 13:offset + 13 + length]
+        offset += 13 + length
+        if len(fragment) >= 14 and fragment[0] == 16:   # ClientKeyExchange
+            body = fragment[12:]
+            declared = int.from_bytes(body[:2], "big")
+            return declared, body[2:2 + declared]
+    raise AssertionError("no ClientKeyExchange reached the wire")
+
+
+def test_openssl_sends_a_clean_identity_whole():
+    # The control: without a NUL, the full 16 bytes arrive.
+    identity = bytes(range(1, 17))
+
+    declared, wire = _psk_identity_on_the_wire(identity)
+
+    assert declared == 16
+    assert wire == identity
+
+
+def test_a_nul_identity_would_reach_the_wire_truncated():
+    # The reason PskAuth refuses this rather than passing it through.
+    # OpenSSL's DTLS 1.2 PSK client callback returns the identity as a
+    # C string and takes its strlen, so everything from the NUL onward is
+    # dropped and nothing raises. An appliance would be asked to
+    # authenticate an identity it has never held, and answer
+    # unknown_psk_identity, with no local error pointing back here.
+    #
+    # If this test ever fails because the full 16 bytes arrive, OpenSSL has
+    # gained a length-carrying path and the guard below can be revisited.
+    identity = bytes(range(1, 9)) + b"\x00" + bytes(range(10, 17))
+
+    declared, wire = _psk_identity_on_the_wire(identity)
+
+    assert declared == 8
+    assert wire == identity[:8]
+
+    with pytest.raises(ValueError, match="cannot contain a NUL"):
+        PskAuth(identity=identity, key=_KEY)
