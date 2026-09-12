@@ -56,6 +56,9 @@ _HS_NAMES = {
     1: 'ClientHello',
     2: 'ServerHello',
     3: 'HelloVerifyRequest',
+    # RFC 5077. Sent in the clear ahead of the server's ChangeCipherSpec, so
+    # a completed handshake legitimately reports it.
+    4: 'NewSessionTicket',
     11: 'Certificate',
     12: 'ServerKeyExchange',
     13: 'CertificateRequest',
@@ -663,13 +666,22 @@ def diagnose_dtls_handshake(
     started = time.monotonic()
     deadline = started + timeout
     seen = set()
+    encrypted = False
 
     def record_datagram(datagram):
+        nonlocal encrypted
         if result.rtt_s is None:
             result.rtt_s = time.monotonic() - started
         result.datagrams.append(datagram)
         for content_type, detail in classify_datagram(datagram):
-            if content_type == _CT_HANDSHAKE:
+            if content_type == _CT_CHANGE_CIPHER_SPEC:
+                # Handshake records after this one are encrypted, so their
+                # first byte is ciphertext and not a message type. Reading it
+                # as one invents a message: roughly one ciphertext byte in
+                # 256 collides with a name in _HS_NAMES, which is frequent
+                # enough to have produced a phantom 'Finished' in testing.
+                encrypted = True
+            elif content_type == _CT_HANDSHAKE and not encrypted:
                 if detail not in seen:
                     seen.add(detail)
                     result.handshake_msgs.append(detail)

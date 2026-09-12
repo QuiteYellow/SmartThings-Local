@@ -663,21 +663,18 @@ def test_diagnostic_certificate_provider_matches_inline_pem_credentials(
         result = p.diagnose_dtls_handshake(
             '127.0.0.1', 5684, timeout=2.0, **credentials
         )
-        # Records arriving after ChangeCipherSpec are encrypted, and
-        # classify_datagram reads their first ciphertext byte as a message
-        # type, so `handshake_msgs` ends in nondeterministic `hsNN` entries.
-        # Parity is asserted over the named flight, which is the part that
-        # describes the handshake.
-        named_flight = tuple(
-            name for name in result.handshake_msgs
-            if name in set(p._HS_NAMES.values())
+        outcomes.append(
+            (result.outcome, tuple(result.handshake_msgs), result.alert)
         )
-        outcomes.append((result.outcome, named_flight, result.alert))
 
     assert outcomes[0] == outcomes[1]
     assert outcomes[0][0] == p.COMPLETED
-    assert outcomes[0][1][:4] == (
-        'ServerHello', 'Certificate', 'ServerKeyExchange', 'ServerHelloDone',
+    assert outcomes[0][1] == (
+        'ServerHello',
+        'Certificate',
+        'ServerKeyExchange',
+        'ServerHelloDone',
+        'NewSessionTicket',
     )
 
 
@@ -787,3 +784,23 @@ def test_cli_reports_an_unusable_psk_credential_without_a_traceback(capsys):
 
     assert result == 2
     assert 'invalid PSK credential' in capsys.readouterr().out
+
+
+def test_encrypted_records_do_not_invent_handshake_messages(monkeypatch):
+    # A handshake record after ChangeCipherSpec is encrypted, so its first
+    # byte is ciphertext. Read as a message type it names whatever it
+    # collides with, and roughly one byte in 256 collides with a name in
+    # _HS_NAMES: this fabricated a 'Finished' once in 30 real handshakes
+    # before the suppression went in. 20 is Finished's type value.
+    responses = iter((
+        _hvr(),
+        _rec(p._CT_CHANGE_CIPHER_SPEC, b'\x01')
+        + _rec(p._CT_HANDSHAKE, bytes([20]) + b'ciphertext'),
+    ))
+    fake = _FakeSock(lambda _f: next(responses, None))
+    _patch_sock(monkeypatch, fake)
+
+    result = p.diagnose_dtls_handshake('127.0.0.1', 5684, timeout=0.3)
+
+    assert result.handshake_msgs == ['HelloVerifyRequest']
+    assert 'Finished' not in result.handshake_msgs
