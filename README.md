@@ -432,11 +432,18 @@ auth = PskAuth(identity=psk_identity, key=psk_key)
 sess = DtlsCoapSession("192.0.2.100", 49154, auth=auth)
 ```
 
-The identity must be the raw 16-byte OCF UUID and cannot contain a NUL byte;
-the key must be exactly 16 or 32 bytes. `PskAuth` selects only
-`ECDHE-PSK-AES128-CBC-SHA256` and does not acquire, derive, provision, rotate,
-or persist credentials. Ownership transfer and credential discovery are
-outside this package.
+The identity must be the raw 16-byte OCF UUID and the key exactly 16 or 32 bytes. `PskAuth` selects only `ECDHE-PSK-AES128-CBC-SHA256` and does not acquire, derive, provision, rotate, or persist credentials. Ownership transfer and credential discovery are outside this package.
+
+An identity containing a zero byte is rejected, and that limit is OpenSSL's rather than the appliance's. An OCF device takes the identity as bytes with an explicit length, so a zero byte means nothing to it, but OpenSSL's DTLS 1.2 PSK client callback returns the identity as a C string. Measured against OpenSSL 4.0.0, a 16-byte identity with a NUL at byte 8 reaches the wire as 8 bytes and the handshake raises nothing locally, so the appliance answers a truncated identity it has never seen. DTLS 1.2 offers no length-carrying PSK callback to fall back on, which leaves such a credential unusable through this library: roughly 6% of uniformly random 16-byte identities, and about 5% of UUIDv4s, whose version and variant bytes can never be zero.
+
+Code holding a credential can check it, and report why, before building a provider or storing anything:
+
+```python
+try:
+    PskAuth.validate_identity(psk_identity)
+except (TypeError, ValueError) as exc:
+    print(f"unusable PSK identity: {exc}")
+```
 
 Code that has already completed an authenticated manufacturer-certificate
 session can derive IoTivity's 128-bit OwnerPSK from the resulting TLS state:

@@ -89,6 +89,57 @@ def test_psk_auth_rejects_identity_with_nul_byte():
         PskAuth(identity=b"i" * 15 + b"\x00", key=_KEY)
 
 
+def test_nul_rejection_explains_the_truncation_it_prevents():
+    # Measured against OpenSSL 4.0.0: a 16-byte identity with a NUL at byte 8
+    # goes on the wire as 8 bytes and the handshake raises nothing locally, so
+    # the guard is the only thing standing between a caller and a silently
+    # wrong identity. The message has to carry that, because an appliance
+    # answers the truncated value with unknown_psk_identity and nothing else
+    # points back here.
+    with pytest.raises(ValueError) as raised:
+        PskAuth(identity=b"i" * 15 + b"\x00", key=_KEY)
+
+    message = str(raised.value)
+    assert "C string" in message
+    assert "truncates" in message
+    assert "shorter identity" in message
+
+
+def test_validate_identity_checks_a_credential_before_one_is_assembled():
+    # An import flow holds an identity before it has a provider to build, and
+    # needs the reason to show a user, so the check is reachable on its own
+    # and raises what the constructor raises.
+    assert PskAuth.validate_identity(_IDENTITY) is None
+
+    with pytest.raises(ValueError, match="cannot contain a NUL"):
+        PskAuth.validate_identity(b"i" * 15 + b"\x00")
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [b"i" * 15 + b"\x00", b"i" * 15, b"i" * 17, b""],
+)
+def test_validate_identity_rejects_what_the_constructor_rejects(identity):
+    # One code path, so the reason a caller can show a user is the same
+    # reason the constructor would have raised.
+    with pytest.raises(ValueError) as from_check:
+        PskAuth.validate_identity(identity)
+    with pytest.raises(ValueError) as from_constructor:
+        PskAuth(identity=identity, key=_KEY)
+
+    assert str(from_check.value) == str(from_constructor.value)
+
+
+@pytest.mark.parametrize("identity", ["i" * 16, bytearray(_IDENTITY)])
+def test_validate_identity_names_only_the_argument_it_takes(identity):
+    # The constructor checks both credentials together, so its message names
+    # both. This check takes no key and must not mention one.
+    with pytest.raises(TypeError, match="^identity must be bytes$"):
+        PskAuth.validate_identity(identity)
+    with pytest.raises(TypeError, match="identity and key must be bytes"):
+        PskAuth(identity=identity, key=_KEY)
+
+
 @pytest.mark.parametrize("key_length", [0, 15, 17, 31, 33])
 def test_psk_auth_rejects_invalid_key_lengths(key_length):
     with pytest.raises(ValueError, match="16 or 32 bytes"):
