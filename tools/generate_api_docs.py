@@ -15,6 +15,8 @@ that misses the doc fails the suite rather than only a release.
 from __future__ import annotations
 
 import argparse
+import difflib
+import enum
 import importlib
 import inspect
 import sys
@@ -173,12 +175,21 @@ def _render_member(name: str, obj) -> list[str]:
     which turns the anchor into an unusable slug.
     """
     lines = [f"#### `{name}`", ""]
-    signature = _render_signature(name, obj)
-    if signature != name and signature != f"{name}()":
-        lines += ["```python", signature, "```", ""]
+    is_enum = inspect.isclass(obj) and issubclass(obj, enum.Enum)
+    if not is_enum:
+        # An Enum's signature is EnumMeta.__call__, which renders as
+        # `(*values)` on 3.14 and as the whole functional API on 3.11, and
+        # means nothing to a caller either way. Its members are the content.
+        signature = _render_signature(name, obj)
+        if signature != name and signature != f"{name}()":
+            lines += ["```python", signature, "```", ""]
     kind = _kind(obj)
     summary = _summary(obj)
     lines.append(f"*{kind}*" + (f" — {summary}" if summary else ""))
+    if is_enum:
+        lines.append("")
+        for member in obj:
+            lines.append(f"- `{member.name}` = `{member.value!r}`")
     if kind in ("class", "exception"):
         methods = [
             (member_name, member)
@@ -275,6 +286,16 @@ def main(argv: list[str]) -> int:
                 "run python tools/generate_api_docs.py",
                 file=sys.stderr,
             )
+            # Print the difference. Without it a stale page in CI says only
+            # that it is stale, which is a guess-and-push loop when the
+            # cause is an interpreter-specific render.
+            difference = difflib.unified_diff(
+                current.splitlines(keepends=True),
+                rendered.splitlines(keepends=True),
+                fromfile="docs/api.md (committed)",
+                tofile="freshly rendered",
+            )
+            sys.stderr.writelines(difference)
             return 1
         return 0
     DOC_PATH.write_text(rendered)

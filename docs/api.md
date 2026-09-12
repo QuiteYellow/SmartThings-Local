@@ -168,11 +168,10 @@ SamsungServerProfile(*, expected_certificate_identity: uuid.UUID | str, role: Sa
 
 #### `SamsungServerRole`
 
-```python
-SamsungServerRole(*values)
-```
-
 *class* — Known Samsung OCF hardware-certificate subject roles.
+
+- `HOME_APPLIANCE` = `'OCF HA Device'`
+- `VD_DEVICE` = `'OCF VD Device'`
 
 #### `ServerCertificateAuth`
 
