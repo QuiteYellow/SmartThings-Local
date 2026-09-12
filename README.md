@@ -15,9 +15,9 @@ The repo also ships a self-contained **reference bridge demo** (`mqtt_demo/`) th
 
 ## Documentation
 
-- **[`docs/api.md`](docs/api.md)** — the supported API: every name downstream code may import, with its signature. Generated from the code, so it cannot drift.
-- [`docs/ocf-pki-laundry.md`](docs/ocf-pki-laundry.md) — the newer OCF-PKI appliance generation, and why an AC14K_M certificate is refused there.
-- [`docs/ocf-vd-devices.md`](docs/ocf-vd-devices.md) — server-authenticated findings from Samsung VD hardware.
+- **[`docs/api.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/api.md)** — the supported API: every name downstream code may import, with its signature. Generated from the code, so it cannot drift.
+- [`docs/ocf-pki-laundry.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/ocf-pki-laundry.md) — the newer OCF-PKI appliance generation, and why an AC14K_M certificate is refused there.
+- [`docs/ocf-vd-devices.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/ocf-vd-devices.md) — server-authenticated findings from Samsung VD hardware.
 
 ## Quick start (library)
 
@@ -217,7 +217,7 @@ The public API is organized by responsibility rather than re-exported through
 one large root namespace. Explicit imports from these modules are intentional
 and covered by the downstream compatibility contract.
 
-**[`docs/api.md`](docs/api.md) is the full reference**: every supported name, with its signature read off the code. It is generated from `tools/api_contract.py` by `tools/generate_api_docs.py`, and the test suite fails if the page and the code disagree. A public name absent from it is reachable but incidental, and may move. The table below is the map; that page is the inventory.
+**[`docs/api.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/api.md) is the full reference**: every supported name, with its signature read off the code. It is generated from `tools/api_contract.py` by `tools/generate_api_docs.py`, and the test suite fails if the page and the code disagree. A public name absent from it is reachable but incidental, and may move. The table below is the map; that page is the inventory.
 
 | Module | Supported responsibility |
 | --- | --- |
@@ -1185,4 +1185,4 @@ This is an independent, unofficial project. It is **not affiliated with, authori
 
 "Samsung", "SmartThings", and any related names, marks, and logos are trademarks of Samsung Electronics Co., Ltd. They are used in this project **only nominatively** — to identify the hardware and protocols this software interoperates with — and no claim is made to any right in them. Use of these marks does not imply any affiliation with or endorsement by their owner.
 
-The software is provided under the [MIT License](LICENSE) for interoperability with hardware you own, without warranty of any kind.
+The software is provided under the [MIT License](https://github.com/QuiteYellow/SmartThings-Local/blob/main/LICENSE) for interoperability with hardware you own, without warranty of any kind.

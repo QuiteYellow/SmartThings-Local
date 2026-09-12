@@ -472,3 +472,37 @@ def test_contents_links_resolve_to_a_heading_on_the_page():
     assert anchors, "the page should carry a table of contents"
     for anchor in anchors:
         assert anchor in headings, anchor
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_BLOB = "https://github.com/QuiteYellow/SmartThings-Local/blob/main/"
+
+
+def test_readme_links_render_on_pypi_and_on_github():
+    """pyproject sets `readme = "README.md"`, so this file is also the
+    package's PyPI description.
+
+    PyPI renders it standalone with no base URL, so a relative path resolves
+    against pypi.org and 404s. GitHub resolves the same path against the
+    repository, which is why a relative link looks fine in review and is
+    dead on the package page. Links are therefore either absolute or an
+    intra-document anchor.
+    """
+    readme = (_REPO_ROOT / "README.md").read_text()
+    headings = {
+        generate_api_docs._slug(line)
+        for line in readme.splitlines()
+        if line.startswith("#")
+    }
+
+    for target in re.findall(r"\]\(([^)]+)\)", readme):
+        if target.startswith("#"):
+            assert target[1:] in headings, f"README anchor goes nowhere: {target}"
+            continue
+        assert target.startswith(("https://", "http://")), (
+            f"relative README link will not render on PyPI: {target}. "
+            f"Use {_REPO_BLOB}{target}"
+        )
+        if target.startswith(_REPO_BLOB):
+            path = _REPO_ROOT / target[len(_REPO_BLOB):].split("#", 1)[0]
+            assert path.exists(), f"README links to a missing file: {target}"
