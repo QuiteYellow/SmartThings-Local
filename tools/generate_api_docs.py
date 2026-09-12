@@ -89,6 +89,33 @@ def _summary(obj) -> str:
     return first.replace("|", "\\|")
 
 
+def _canonicalize_optional(text: str) -> str:
+    """Write `Optional[X]` as `X | None` on every interpreter.
+
+    `inspect` renders `typing.Optional[X]` as `X | None` from Python 3.14 and
+    as `Optional[X]` before it, which made the committed page depend on the
+    version that generated it. CI caught it across its matrix: twelve lines
+    differed between 3.13 and 3.14. Bracket matching rather than a regex,
+    because the inner type nests, as in `Optional[Callable[[], bool]]`.
+    """
+    text = text.replace("typing.Optional[", "Optional[")
+    marker = "Optional["
+    while (start := text.find(marker)) != -1:
+        depth = 0
+        for index in range(start + len(marker) - 1, len(text)):
+            if text[index] == "[":
+                depth += 1
+            elif text[index] == "]":
+                depth -= 1
+                if depth == 0:
+                    inner = text[start + len(marker):index]
+                    text = f"{text[:start]}{inner} | None{text[index + 1:]}"
+                    break
+        else:
+            return text
+    return text
+
+
 def _render_signature(name: str, obj) -> str:
     try:
         # eval_str resolves the stringized annotations that
@@ -111,7 +138,7 @@ def _render_signature(name: str, obj) -> str:
             signature = signature[: -len(suffix)]
     # A method is read as a name and a call shape, so the receiver is noise.
     signature = signature.replace("(self, ", "(").replace("(self)", "()")
-    return f"{name}{signature}"
+    return f"{name}{_canonicalize_optional(signature)}"
 
 
 def _kind(obj) -> str:
