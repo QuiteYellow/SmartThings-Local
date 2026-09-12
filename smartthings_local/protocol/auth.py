@@ -556,8 +556,9 @@ class CertificateAuth:
 class PskAuth:
     """DTLS authentication using an existing OCF PSK credential.
 
-    The identity must be a raw 16-byte OCF UUID. The key must contain 16 or
-    32 bytes. Credential material is intentionally not exposed as public
+    The identity must be a raw 16-byte OCF UUID that OpenSSL can present, as
+    described on :meth:`validate_identity`. The key must contain 16 or 32
+    bytes. Credential material is intentionally not exposed as public
     attributes and is never included in this provider's representation. A
     configured context must not outlive this provider; ``DtlsCoapSession``
     enforces that lifetime by retaining its provider.
@@ -565,13 +566,40 @@ class PskAuth:
 
     __slots__ = ("_callback",)
 
-    def __init__(self, *, identity: bytes, key: bytes) -> None:
-        if type(identity) is not bytes or type(key) is not bytes:
-            raise TypeError("identity and key must be bytes")
+    @staticmethod
+    def validate_identity(identity: bytes) -> None:
+        """Raise unless ``identity`` is one OpenSSL can put on the wire.
+
+        A caller holding a credential can check it here, and report the
+        reason, before building a provider or storing anything.
+
+        An OCF appliance takes the identity as bytes with an explicit length,
+        so a zero byte is unremarkable to the device. OpenSSL's DTLS 1.2 PSK
+        client callback returns the identity as a C string, which leaves no
+        way to express one: a NUL truncates the identity on the wire, and the
+        handshake then fails against the truncated value with no local error
+        to point at the cause. Roughly 6% of uniformly random 16-byte
+        identities carry a zero byte, and about 5% of UUIDv4s, whose version
+        and variant bytes can never be zero. There is no length-carrying PSK
+        callback for DTLS 1.2 to fall back on, so such a credential cannot be
+        used through this library.
+        """
+        if type(identity) is not bytes:
+            raise TypeError("identity must be bytes")
         if len(identity) != 16:
             raise ValueError("identity must be a raw 16-byte OCF UUID")
         if b"\x00" in identity:
-            raise ValueError("identity cannot contain a NUL byte")
+            raise ValueError(
+                "identity cannot contain a NUL byte: OpenSSL presents a "
+                "DTLS 1.2 PSK identity as a C string, so a NUL truncates it "
+                "and the appliance would be sent a shorter identity than the "
+                "one supplied"
+            )
+
+    def __init__(self, *, identity: bytes, key: bytes) -> None:
+        if type(identity) is not bytes or type(key) is not bytes:
+            raise TypeError("identity and key must be bytes")
+        self.validate_identity(identity)
         if len(key) not in (16, 32):
             raise ValueError("key must be 16 or 32 bytes")
 

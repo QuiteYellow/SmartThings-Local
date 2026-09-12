@@ -383,6 +383,18 @@ def test_psk_auth_is_a_public_authentication_provider():
     )
 
 
+def test_psk_identity_validation_is_reachable_without_a_key():
+    # An import flow validates a stored identity before it has a key to pair
+    # with it, so this is part of the supported surface rather than an
+    # internal guard.
+    parameters = inspect.signature(PskAuth.validate_identity).parameters
+    assert list(parameters) == ["identity"]
+    assert PskAuth.validate_identity(b"i" * 16) is None
+
+    with pytest.raises(ValueError):
+        PskAuth.validate_identity(b"i" * 15 + b"\x00")
+
+
 def test_owner_psk_derivation_keeps_every_security_input_explicit():
     parameters = inspect.signature(
         derive_mfg_certificate_owner_psk
