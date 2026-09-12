@@ -526,18 +526,19 @@ class _LoopbackDtlsServer:
 
 
 def _server_context(*, cipher, cert_pem=None, key_pem=None, psk=False):
-    from cryptography import x509
-    from cryptography.hazmat.primitives import serialization
-    from OpenSSL import SSL, _util
+    from OpenSSL import SSL, _util, crypto
 
     context = SSL.Context(SSL.DTLS_METHOD)
     context.set_cipher_list(cipher)
     if cert_pem is not None:
+        # pyOpenSSL's own types: the floor binding in CI rejects a
+        # cryptography certificate here, and the library loads chains the
+        # same way.
         context.use_certificate(
-            x509.load_pem_x509_certificate(cert_pem.encode())
+            crypto.load_certificate(crypto.FILETYPE_PEM, cert_pem.encode())
         )
         context.use_privatekey(
-            serialization.load_pem_private_key(key_pem.encode(), None)
+            crypto.load_privatekey(crypto.FILETYPE_PEM, key_pem.encode())
         )
     if psk:
         ffi = _util.ffi
@@ -559,8 +560,16 @@ def _server_context(*, cipher, cert_pem=None, key_pem=None, psk=False):
     return context
 
 
+# RFC 5746 §3.3. Advertised alongside the real suites by some OpenSSL
+# builds, and it names no cipher, so it is dropped before comparing.
+_EMPTY_RENEGOTIATION_INFO_SCSV = 0x00FF
+
+
 def _client_hello_cipher_suites(datagram):
-    """Read the cipher-suite list out of a DTLS ClientHello datagram."""
+    """Read the offered cipher suites out of a DTLS ClientHello datagram.
+
+    Signalling suite values are excluded, leaving only real ciphers.
+    """
     fragment = datagram[13:13 + int.from_bytes(datagram[11:13], 'big')]
     body = fragment[12:]                      # past the handshake header
     offset = 2 + 32                           # client_version + random
@@ -571,7 +580,7 @@ def _client_hello_cipher_suites(datagram):
     return {
         int.from_bytes(suites[i:i + 2], 'big')
         for i in range(0, len(suites), 2)
-    }
+    } - {_EMPTY_RENEGOTIATION_INFO_SCSV}
 
 
 def test_diagnostic_psk_provider_reaches_an_unknown_psk_identity_alert(
@@ -702,8 +711,9 @@ def test_diagnostic_never_gates_on_a_pinned_server_identity(monkeypatch):
             cert_pem,
             key_pem,
             server_profile=SamsungServerProfile(
+                # tools/check_share_safety.py's allowlisted placeholder.
                 expected_certificate_identity=(
-                    '00000000-0000-4000-8000-000000000001'
+                    '11111111-2222-3333-4444-555555555555'
                 ),
             ),
         ),
