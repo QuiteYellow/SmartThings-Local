@@ -475,7 +475,9 @@ resources, run OTM, or persist the result.
 
 The public API is organized by responsibility rather than re-exported through
 one large root namespace. Explicit imports from these modules are intentional
-and covered by the downstream compatibility contract:
+and covered by the downstream compatibility contract.
+
+**[`docs/api.md`](docs/api.md) is the full reference**: every supported name, with its signature read off the code. It is generated from `tools/api_contract.py` by `tools/generate_api_docs.py`, and the test suite fails if the page and the code disagree. A public name absent from it is reachable but incidental, and may move. The table below is the map; that page is the inventory.
 
 | Module | Supported responsibility |
 | --- | --- |

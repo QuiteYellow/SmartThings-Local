@@ -34,141 +34,12 @@ from smartthings_local.protocol.ocf_multicast import (
     discover_ocf_responder_ports,
 )
 from smartthings_local.protocol.owner_psk import derive_mfg_certificate_owner_psk
+from tools import generate_api_docs
+from tools.api_contract import SUPPORTED_DOWNSTREAM_IMPORTS
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Explicit imports exercised by LocalThings, the reference bridge, and the
-# downstream Home Assistant integration. Keep the module boundaries visible;
-# this is intentionally not a root-level re-export list.
-SUPPORTED_DOWNSTREAM_IMPORTS = {
-    "smartthings_local.errors": (
-        "AuthenticationError",
-        "AuthorizationError",
-        "BlockwiseError",
-        "EndpointError",
-        "HandshakePeerCleanupError",
-        "MalformedMessageError",
-        "ObserveError",
-        "ProbeError",
-        "SessionClosedError",
-        "SessionError",
-        "SessionIdentifierError",
-        "SessionResetError",
-        "SessionTimeoutError",
-        "SmartThingsLocalError",
-    ),
-    "smartthings_local.protocol.auth": (
-        "AuthenticationProvider",
-        "CertificateAuth",
-        "PskAuth",
-        "SamsungServerProfile",
-        "SamsungServerRole",
-        "ServerCertificateAuth",
-    ),
-    "smartthings_local.protocol.dtls_session": (
-        "ConnectCancellation",
-        "DtlsCoapSession",
-        "ObserveDelivery",
-    ),
-    "smartthings_local.protocol.dtls_probe": (
-        "ALERT",
-        "AMBIGUOUS",
-        "COMPLETED",
-        "DEAD",
-        "DtlsLivenessResult",
-        "DtlsPortProbeResult",
-        "HELLO_VERIFY_REQUEST",
-        "LIVE",
-        "REJECTED",
-        "SELECTED",
-        "SERVER_HELLO",
-        "UNREACHABLE",
-        "probe_dtls_port",
-        "probe_dtls_ports",
-    ),
-    "smartthings_local.protocol.endpoint": (
-        "HostFilteredUdpSocket",
-        "ResolvedUdpEndpoint",
-        "open_connected_udp_socket",
-        "open_host_filtered_udp_socket",
-        "resolve_udp_endpoint",
-        "resolve_udp_endpoints",
-    ),
-    "smartthings_local.protocol.ocf_discovery": (
-        "OcfSecurePortDiscoveryResult",
-        "PlaintextOcfResourceResult",
-        "discover_ocf_secure_ports",
-        "read_plaintext_ocf_resource",
-    ),
-    "smartthings_local.protocol.ocf_multicast": (
-        "OcfResponderPortDiscoveryResult",
-        "discover_ocf_responder_ports",
-    ),
-    "smartthings_local.protocol.coap": (
-        "ACCEPT",
-        "BLOCK1",
-        "BLOCK2",
-        "CF_CBOR",
-        "CONTENT_FORMAT",
-        "METHOD_DELETE",
-        "METHOD_GET",
-        "METHOD_POST",
-        "TYPE_ACK",
-        "TYPE_CON",
-        "TYPE_NON",
-        "URI_PATH",
-        "URI_QUERY",
-        "Block2Accumulator",
-        "CoapMessage",
-        "CoapResponseClassification",
-        "block_fields",
-        "block_value",
-        "build_coap",
-        "build_empty_ack",
-        "build_get_request",
-        "classify_coap_response",
-        "decode_uint_option",
-        "fmt_code",
-        "option_values",
-        "parse_coap",
-        "parse_coap_message",
-        "split_dtls",
-    ),
-    "smartthings_local.protocol.coap_tcp": (
-        "CoapTcpCodecError",
-        "CoapTcpMessage",
-        "CoapTcpStreamDecoder",
-        "build_coap_tcp_csm",
-        "build_coap_tcp_delete",
-        "build_coap_tcp_get",
-        "build_coap_tcp_message",
-        "build_coap_tcp_post",
-        "encode_uint_option",
-        "parse_coap_tcp_message",
-    ),
-    "smartthings_local.protocol.ble_ocf": (
-        "AdaptiveBleOcfReassembler",
-        "BleOcfCodecError",
-        "BleOcfHeader",
-        "BleOcfInterleavedFrameError",
-        "BleOcfReassembler",
-        "ReassembledBleOcfPdu",
-        "decode_header",
-        "encode_header",
-        "fragment_pdu",
-    ),
-    "smartthings_local.protocol.owner_psk": (
-        "CONFIRMED_MFG_CERTIFICATE_OXM_LABEL",
-        "MFG_CERTIFICATE_KEY_BLOCK_LENGTHS",
-        "STANDARD_MFG_CERTIFICATE_OXM_LABEL",
-        "derive_mfg_certificate_owner_psk",
-    ),
-    "smartthings_local.ocf.state_cache": ("StateCache",),
-    "smartthings_local.ocf.poll_scheduler": ("PollScheduler", "PollTier"),
-    "smartthings_local.ocf.keepalive": ("KeepaliveTask",),
-    "smartthings_local.ocf.observe_refresh": ("ObserveRefreshTask",),
-}
 
 
 def _assert_compatible_signature(callable_object, expected: list[str]) -> None:
@@ -555,3 +426,21 @@ def test_ocf_secure_port_discovery_has_a_small_composable_surface():
 
     assert result.found
     assert result.ports == (5684,)
+
+
+def test_published_api_reference_matches_the_code():
+    # docs/api.md is what a downstream maintainer reads instead of unzipping
+    # a wheel, which is what happened before it existed. Generated, so a
+    # renamed argument or a new supported name fails here rather than
+    # quietly leaving the page wrong.
+    assert generate_api_docs.main(["--check"]) == 0, (
+        "docs/api.md is stale; run python tools/generate_api_docs.py"
+    )
+
+
+def test_every_declared_name_reaches_the_published_reference():
+    reference = generate_api_docs.DOC_PATH.read_text()
+    for module_name, names in SUPPORTED_DOWNSTREAM_IMPORTS.items():
+        assert f"## `{module_name}`" in reference, module_name
+        for name in names:
+            assert f"#### `{name}" in reference, f"{module_name}.{name}"
