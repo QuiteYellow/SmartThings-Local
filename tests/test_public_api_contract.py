@@ -506,3 +506,34 @@ def test_readme_links_render_on_pypi_and_on_github():
         if target.startswith(_REPO_BLOB):
             path = _REPO_ROOT / target[len(_REPO_BLOB):].split("#", 1)[0]
             assert path.exists(), f"README links to a missing file: {target}"
+
+
+def test_links_between_markdown_files_resolve():
+    """A cross-file anchor breaks silently: GitHub serves the page and does
+    not scroll, so a renamed heading leaves no trace.
+
+    `docs/bridge-demo.md` points into the README, which is the dependency
+    the bridge extraction created, and the README points back at the docs.
+    """
+    documents = [_REPO_ROOT / "README.md", *sorted((_REPO_ROOT / "docs").glob("*.md"))]
+    headings = {
+        document.name: {
+            generate_api_docs._slug(line)
+            for line in document.read_text().splitlines()
+            if line.startswith("#")
+        }
+        for document in documents
+    }
+
+    for document in documents:
+        for target in re.findall(r"\]\(([^)]+)\)", document.read_text()):
+            if not target.startswith(_REPO_BLOB):
+                continue
+            path, _, anchor = target[len(_REPO_BLOB):].partition("#")
+            assert (_REPO_ROOT / path).exists(), f"{document.name} -> {target}"
+            if anchor:
+                known = headings.get(Path(path).name)
+                assert known is not None, f"{document.name} -> {target}"
+                assert anchor in known, (
+                    f"{document.name} links to a heading that is gone: {target}"
+                )
