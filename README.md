@@ -21,6 +21,7 @@ The repo also ships a self-contained **reference bridge demo** (`mqtt_demo/`) th
 - **[`docs/certificates.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/certificates.md)** — obtaining the client certificate compatible firmware accepts.
 - [`docs/ocf-pki-laundry.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/ocf-pki-laundry.md) — the newer OCF-PKI appliance generation, and why an AC14K_M certificate is refused there.
 - [`docs/ocf-vd-devices.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/ocf-vd-devices.md) — server-authenticated findings from Samsung VD hardware.
+- [`docs/use-of-ai.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/use-of-ai.md) — how an AI assistant is used here, and the review the output goes through.
 
 ## Quick start (library)
 
@@ -766,6 +767,8 @@ If reconnects become persistent (e.g. >10 in a minute) something's wrong: check 
 ## Contributing
 
 If you submit a PR, please don't include real device UUIDs, MACs, serials, IPs, or bearer tokens. Use the placeholders from `.env.example`.
+
+If you drafted any of it with an AI assistant, [`docs/use-of-ai.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/use-of-ai.md) covers what is expected: measured claims, no device identifiers, and a human reading the wording before it goes out.
 
 ---
 
