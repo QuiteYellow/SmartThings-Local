@@ -212,6 +212,204 @@ terminal wakeup but closes the established socket immediately, without waiting
 for close-notify. All three methods are idempotent; a quiesced or aborted
 session cannot be connected again.
 
+## Writes and retransmission
+
+Reads retransmit each Block2 request; writes send once. Where a lost write
+has been shown to be the cause rather than a device that is simply refusing
+load, `write_max_attempts` lets `post()` retransmit inside the caller's own
+timeout, backing off per RFC 7252 §4.2 and pacing every retransmit:
+
+```python
+sess = DtlsCoapSession("192.0.2.100", 49154, auth=auth, write_max_attempts=3)
+```
+
+Each attempt resends the byte-identical datagram, so a server implementing
+§4.5 can recognise the duplicate and answer from its dedupe cache instead of
+re-running the write. Retrying from the caller cannot do that — a second
+`post()` mints a fresh Message ID, which is a new request. It defaults to `1`
+(send once) because retransmitting into an appliance that is already dropping
+under load turns one lost write into several, and §4.5 dedupe is unverified on
+RT-OCF.
+
+Note that `post()`'s `timeout` bounds the whole call, rate-limit pacing
+included, rather than only the wait that follows the send. Every attempt has to
+share one budget, and a caller that asked for 8 seconds should not wait 8
+seconds plus however long the limiter withheld the request. At the default 5
+req/s that is at most 200 ms of the budget; at a hand-tuned `rate_limit_rps=1.0`
+it is a full second, so a caller pairing a low rate limit with a short timeout
+should raise the timeout to match.
+
+## Authentication
+
+Every session needs a credential. A certificate provider covers the
+AC14K_M-compatible firmware families; the newer OCF-PKI generation needs a
+pinned server profile or a PSK, and
+[docs/ocf-pki-laundry.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/ocf-pki-laundry.md)
+covers which is which.
+
+### Credentials from memory
+
+If the cert/key are minted at runtime and never written to disk (e.g. inside
+an HA config flow), create the provider from memory instead:
+
+```python
+auth = CertificateAuth.from_memory(cert_pem, key_pem)
+sess = DtlsCoapSession("192.0.2.100", 49154, auth=auth)
+```
+
+### Samsung server-certificate profiles
+
+Some newer OCF-PKI devices require an exact Samsung DTLS offer and present a
+hardware certificate whose subject contains a certificate UUID. That UUID can
+be distinct from the runtime OCF device UUID reported by `/oic/d`, so callers
+must obtain and verify the certificate identity independently. When the caller
+already has an authorized client certificate and a previously verified
+hardware-certificate UUID, opt in to both requirements explicitly:
+
+```python
+from smartthings_local.protocol.auth import (
+    CertificateAuth,
+    SamsungServerProfile,
+)
+
+server_profile = SamsungServerProfile.bound_device(
+    expected_certificate_uuid,
+    additional_ca_pem=additional_samsung_ca_pem,
+)
+auth = CertificateAuth.from_memory(
+    cert_pem,
+    key_pem,
+    server_profile=server_profile,
+)
+sess = DtlsCoapSession("192.0.2.100", 49154, auth=auth)
+```
+
+The default profile is restricted to Samsung home-appliance leaves with
+`OU=OCF HA Device`. The profile limits the ClientHello to P-256,
+`ECDHE-ECDSA-AES128-GCM-SHA256`, and the observed SHA-256/SHA-1 RSA/ECDSA
+signature set, disables session tickets, preserves certificate-chain
+verification, and requires the exact subject role
+`C=KR, O=Samsung Electronics, OU=OCF HA Device` with a common name ending in
+the expected certificate UUID. `additional_ca_pem` is optional and accepts
+only a bounded PEM CA-certificate chain; it is applied only to this profiled
+context. Without a profile, `CertificateAuth` retains its existing verification
+behavior.
+
+Samsung VD-family devices can present the same wire profile with the distinct
+`OU=OCF VD Device` role. Select that role explicitly; profiles never fall back
+between device classes:
+
+```python
+from smartthings_local.protocol.auth import (
+    SamsungServerProfile,
+    SamsungServerRole,
+    ServerCertificateAuth,
+)
+
+server_profile = SamsungServerProfile.bound_device(
+    expected_certificate_uuid,
+    role=SamsungServerRole.VD_DEVICE,
+)
+auth = ServerCertificateAuth(server_profile=server_profile)
+sess = DtlsCoapSession("192.0.2.100", 5684, auth=auth)
+```
+
+`ServerCertificateAuth` is for a server-authenticated channel that does not
+send a client certificate, such as the initial DTLS carrier used by
+manufacturer-certificate OTM. It still verifies the CA chain, exact selected
+subject role, and pinned certificate UUID. It cannot be combined with client
+credentials.
+
+An explicit first-use workflow may need to authenticate the Samsung hardware
+certificate before its subject UUID is known. Use the discovery profile only
+for that bounded step:
+
+```python
+server_profile = SamsungServerProfile.discover_device(
+    additional_ca_pem=additional_samsung_ca_pem,
+)
+auth = ServerCertificateAuth(server_profile=server_profile)
+sess = DtlsCoapSession("192.0.2.100", 5684, auth=auth)
+sess.connect()
+certificate_uuid = sess.server_certificate_identity
+```
+
+The discovery profile still verifies the CA chain and the complete selected
+Samsung subject role before `connect()` exposes the non-zero certificate UUID.
+It does not trust an arbitrary first certificate, and neither the immutable
+profile nor its provider retains the learned identity. The caller must bind
+that UUID to independently authenticated device evidence, such as `/oic/d`
+read over the same authenticated session, before persisting it. Subsequent
+connections should use `bound_device()` with that verified binding. The
+certificate UUID and the OCF device UUID are separate identities and must not
+be assumed equal.
+
+This API deliberately does not discover, mint, authorize, provision, rotate,
+or persist credentials, and it performs no ownership transfer or OCF security
+resource writes. In particular, the server-only provider can authenticate the
+initial manufacturer-certificate channel, but it does not implement the OTM
+that follows. The already-owned new-PKI case in
+[issue #16](https://github.com/QuiteYellow/SmartThings-Local/issues/16) still
+requires an authorized client identity before ordinary protected resources
+can be used.
+
+For compatibility, the existing `cert_path` / `key_path` and `cert_pem` /
+`key_pem` session arguments remain supported without a deprecation warning.
+They are routed through `CertificateAuth` internally. Do not combine `auth`
+with those legacy arguments.
+
+### PSK credentials
+
+An existing OCF PSK credential can be supplied through `PskAuth`:
+
+```python
+from smartthings_local.protocol.auth import PskAuth
+
+auth = PskAuth(identity=psk_identity, key=psk_key)
+sess = DtlsCoapSession("192.0.2.100", 49154, auth=auth)
+```
+
+The identity must be the raw 16-byte OCF UUID and the key exactly 16 or 32 bytes. `PskAuth` selects only `ECDHE-PSK-AES128-CBC-SHA256` and does not acquire, derive, provision, rotate, or persist credentials. Ownership transfer and credential discovery are outside this package.
+
+An identity containing a zero byte is rejected, and that limit is OpenSSL's rather than the appliance's. An OCF device takes the identity as bytes with an explicit length, so a zero byte means nothing to it, but OpenSSL's DTLS 1.2 PSK client callback returns the identity as a C string. Measured against OpenSSL 4.0.0, a 16-byte identity with a NUL at byte 8 reaches the wire as 8 bytes and the handshake raises nothing locally, so the appliance answers a truncated identity it has never seen. DTLS 1.2 offers no length-carrying PSK callback to fall back on, which leaves such a credential unusable through this library: roughly 6% of uniformly random 16-byte identities, and about 5% of UUIDv4s, whose version and variant bytes can never be zero.
+
+Code holding a credential can check it, and report why, before building a provider or storing anything:
+
+```python
+try:
+    PskAuth.validate_identity(psk_identity)
+except (TypeError, ValueError) as exc:
+    print(f"unusable PSK identity: {exc}")
+```
+
+### OwnerPSK derivation
+
+Code that has already completed an authenticated manufacturer-certificate
+session can derive IoTivity's 128-bit OwnerPSK from the resulting TLS state:
+
+```python
+from smartthings_local.protocol.owner_psk import derive_mfg_certificate_owner_psk
+
+owner_psk = derive_mfg_certificate_owner_psk(
+    master_secret=master_secret,
+    client_random=client_random,
+    server_random=server_random,
+    owner_uuid=owner_uuid,
+    device_uuid=device_uuid,
+    cipher_name=cipher_name,
+    oxm_label=selected_oxm_label,
+)
+```
+
+The caller must supply the exact authenticated TLS values, non-nil raw OCF
+UUIDs, negotiated cipher name, and label for the selected OXM. Use
+`STANDARD_MFG_CERTIFICATE_OXM_LABEL` for `oic.sec.doxm.mfgcert` and
+`CONFIRMED_MFG_CERTIFICATE_OXM_LABEL` for
+`x.org.iotivity.conmfgcert`; do not infer the label from the appliance model.
+The helper performs deterministic key derivation only: it does not access a
+session, discover credentials, choose an ownership method, write security
+resources, run OTM, or persist the result.
+
 ## Supported library imports
 
 The public API is organized by responsibility rather than re-exported through
@@ -346,186 +544,6 @@ detectable missing or shortened fragments, and changed port or secure flags.
 The secure bit is transport metadata; this codec does not encrypt or
 authenticate the PDU. It also does not connect to Bluetooth, select GATT
 characteristics, discover credentials, or perform setup or ownership work.
-
-Reads retransmit each Block2 request; writes send once. Where a lost write
-has been shown to be the cause rather than a device that is simply refusing
-load, `write_max_attempts` lets `post()` retransmit inside the caller's own
-timeout, backing off per RFC 7252 §4.2 and pacing every retransmit:
-
-```python
-sess = DtlsCoapSession("192.0.2.100", 49154, auth=auth, write_max_attempts=3)
-```
-
-Each attempt resends the byte-identical datagram, so a server implementing
-§4.5 can recognise the duplicate and answer from its dedupe cache instead of
-re-running the write. Retrying from the caller cannot do that — a second
-`post()` mints a fresh Message ID, which is a new request. It defaults to `1`
-(send once) because retransmitting into an appliance that is already dropping
-under load turns one lost write into several, and §4.5 dedupe is unverified on
-RT-OCF.
-
-Note that `post()`'s `timeout` bounds the whole call, rate-limit pacing
-included, rather than only the wait that follows the send. Every attempt has to
-share one budget, and a caller that asked for 8 seconds should not wait 8
-seconds plus however long the limiter withheld the request. At the default 5
-req/s that is at most 200 ms of the budget; at a hand-tuned `rate_limit_rps=1.0`
-it is a full second, so a caller pairing a low rate limit with a short timeout
-should raise the timeout to match.
-
-If the cert/key are minted at runtime and never written to disk (e.g. inside
-an HA config flow), create the provider from memory instead:
-
-```python
-auth = CertificateAuth.from_memory(cert_pem, key_pem)
-sess = DtlsCoapSession("192.0.2.100", 49154, auth=auth)
-```
-
-Some newer OCF-PKI devices require an exact Samsung DTLS offer and present a
-hardware certificate whose subject contains a certificate UUID. That UUID can
-be distinct from the runtime OCF device UUID reported by `/oic/d`, so callers
-must obtain and verify the certificate identity independently. When the caller
-already has an authorized client certificate and a previously verified
-hardware-certificate UUID, opt in to both requirements explicitly:
-
-```python
-from smartthings_local.protocol.auth import (
-    CertificateAuth,
-    SamsungServerProfile,
-)
-
-server_profile = SamsungServerProfile.bound_device(
-    expected_certificate_uuid,
-    additional_ca_pem=additional_samsung_ca_pem,
-)
-auth = CertificateAuth.from_memory(
-    cert_pem,
-    key_pem,
-    server_profile=server_profile,
-)
-sess = DtlsCoapSession("192.0.2.100", 49154, auth=auth)
-```
-
-The default profile is restricted to Samsung home-appliance leaves with
-`OU=OCF HA Device`. The profile limits the ClientHello to P-256,
-`ECDHE-ECDSA-AES128-GCM-SHA256`, and the observed SHA-256/SHA-1 RSA/ECDSA
-signature set, disables session tickets, preserves certificate-chain
-verification, and requires the exact subject role
-`C=KR, O=Samsung Electronics, OU=OCF HA Device` with a common name ending in
-the expected certificate UUID. `additional_ca_pem` is optional and accepts
-only a bounded PEM CA-certificate chain; it is applied only to this profiled
-context. Without a profile, `CertificateAuth` retains its existing verification
-behavior.
-
-Samsung VD-family devices can present the same wire profile with the distinct
-`OU=OCF VD Device` role. Select that role explicitly; profiles never fall back
-between device classes:
-
-```python
-from smartthings_local.protocol.auth import (
-    SamsungServerProfile,
-    SamsungServerRole,
-    ServerCertificateAuth,
-)
-
-server_profile = SamsungServerProfile.bound_device(
-    expected_certificate_uuid,
-    role=SamsungServerRole.VD_DEVICE,
-)
-auth = ServerCertificateAuth(server_profile=server_profile)
-sess = DtlsCoapSession("192.0.2.100", 5684, auth=auth)
-```
-
-`ServerCertificateAuth` is for a server-authenticated channel that does not
-send a client certificate, such as the initial DTLS carrier used by
-manufacturer-certificate OTM. It still verifies the CA chain, exact selected
-subject role, and pinned certificate UUID. It cannot be combined with client
-credentials.
-
-An explicit first-use workflow may need to authenticate the Samsung hardware
-certificate before its subject UUID is known. Use the discovery profile only
-for that bounded step:
-
-```python
-server_profile = SamsungServerProfile.discover_device(
-    additional_ca_pem=additional_samsung_ca_pem,
-)
-auth = ServerCertificateAuth(server_profile=server_profile)
-sess = DtlsCoapSession("192.0.2.100", 5684, auth=auth)
-sess.connect()
-certificate_uuid = sess.server_certificate_identity
-```
-
-The discovery profile still verifies the CA chain and the complete selected
-Samsung subject role before `connect()` exposes the non-zero certificate UUID.
-It does not trust an arbitrary first certificate, and neither the immutable
-profile nor its provider retains the learned identity. The caller must bind
-that UUID to independently authenticated device evidence, such as `/oic/d`
-read over the same authenticated session, before persisting it. Subsequent
-connections should use `bound_device()` with that verified binding. The
-certificate UUID and the OCF device UUID are separate identities and must not
-be assumed equal.
-
-This API deliberately does not discover, mint, authorize, provision, rotate,
-or persist credentials, and it performs no ownership transfer or OCF security
-resource writes. In particular, the server-only provider can authenticate the
-initial manufacturer-certificate channel, but it does not implement the OTM
-that follows. The already-owned new-PKI case in
-[issue #16](https://github.com/QuiteYellow/SmartThings-Local/issues/16) still
-requires an authorized client identity before ordinary protected resources
-can be used.
-
-For compatibility, the existing `cert_path` / `key_path` and `cert_pem` /
-`key_pem` session arguments remain supported without a deprecation warning.
-They are routed through `CertificateAuth` internally. Do not combine `auth`
-with those legacy arguments.
-
-An existing OCF PSK credential can be supplied through `PskAuth`:
-
-```python
-from smartthings_local.protocol.auth import PskAuth
-
-auth = PskAuth(identity=psk_identity, key=psk_key)
-sess = DtlsCoapSession("192.0.2.100", 49154, auth=auth)
-```
-
-The identity must be the raw 16-byte OCF UUID and the key exactly 16 or 32 bytes. `PskAuth` selects only `ECDHE-PSK-AES128-CBC-SHA256` and does not acquire, derive, provision, rotate, or persist credentials. Ownership transfer and credential discovery are outside this package.
-
-An identity containing a zero byte is rejected, and that limit is OpenSSL's rather than the appliance's. An OCF device takes the identity as bytes with an explicit length, so a zero byte means nothing to it, but OpenSSL's DTLS 1.2 PSK client callback returns the identity as a C string. Measured against OpenSSL 4.0.0, a 16-byte identity with a NUL at byte 8 reaches the wire as 8 bytes and the handshake raises nothing locally, so the appliance answers a truncated identity it has never seen. DTLS 1.2 offers no length-carrying PSK callback to fall back on, which leaves such a credential unusable through this library: roughly 6% of uniformly random 16-byte identities, and about 5% of UUIDv4s, whose version and variant bytes can never be zero.
-
-Code holding a credential can check it, and report why, before building a provider or storing anything:
-
-```python
-try:
-    PskAuth.validate_identity(psk_identity)
-except (TypeError, ValueError) as exc:
-    print(f"unusable PSK identity: {exc}")
-```
-
-Code that has already completed an authenticated manufacturer-certificate
-session can derive IoTivity's 128-bit OwnerPSK from the resulting TLS state:
-
-```python
-from smartthings_local.protocol.owner_psk import derive_mfg_certificate_owner_psk
-
-owner_psk = derive_mfg_certificate_owner_psk(
-    master_secret=master_secret,
-    client_random=client_random,
-    server_random=server_random,
-    owner_uuid=owner_uuid,
-    device_uuid=device_uuid,
-    cipher_name=cipher_name,
-    oxm_label=selected_oxm_label,
-)
-```
-
-The caller must supply the exact authenticated TLS values, non-nil raw OCF
-UUIDs, negotiated cipher name, and label for the selected OXM. Use
-`STANDARD_MFG_CERTIFICATE_OXM_LABEL` for `oic.sec.doxm.mfgcert` and
-`CONFIRMED_MFG_CERTIFICATE_OXM_LABEL` for
-`x.org.iotivity.conmfgcert`; do not infer the label from the appliance model.
-The helper performs deterministic key derivation only: it does not access a
-session, discover credentials, choose an ownership method, write security
-resources, run OTM, or persist the result.
 
 ## Library reference
 
