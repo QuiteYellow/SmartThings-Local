@@ -4,7 +4,7 @@
 
 The repo also ships a self-contained **reference bridge demo** (`mqtt_demo/`) that turns the library into auto-discovered Home Assistant entities over MQTT. One process supervises multiple appliances, each on its own DTLS session. Configuration, deployment and per-appliance coverage are in [`docs/bridge-demo.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/bridge-demo.md).
 
-<img width="778" height="367" alt="image" src="https://github.com/user-attachments/assets/cc1dca15-f272-4625-a13c-2dc82283ff95" />
+<img width="1600" height="882" alt="image" src="https://github.com/user-attachments/assets/3b0e2646-66c7-4950-aee3-93086a6ed1e4" />
 
 > **Just want to control your Samsung appliance from Home Assistant?**
 > Use [localthings](https://github.com/mbillow/localthings), a Home
