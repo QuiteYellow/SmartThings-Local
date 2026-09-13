@@ -22,7 +22,7 @@ in the README.
 - **HA Energy Dashboard ready** (dryer): live watts + cumulative kWh as `total_increasing`.
 - **Bridge logs tagged per-appliance** with `<class>.<serial>` once each device's serial is read on connect: `dryer.<serial>` and `oven.<serial>` interleave in the same log stream, easy to grep.
 - **Zero HA YAML:** every entity is auto-discovered via MQTT discovery.
-- **Your state stays on your LAN:** bridge → broker → HA. Samsung's cloud sees nothing from HA. *(The appliance still maintains its own TLS session to Samsung. That's the appliance's design, not ours.)*
+- **Your state stays on your LAN:** bridge → broker → HA. Samsung's cloud sees nothing from HA. *(The appliance still maintains its own TLS session to Samsung. That's the appliance's design, not the bridge's.)*
 - **A few controls the cloud HA integration doesn't offer.** Talking to the appliance directly surfaces some writes the official SmartThings integration doesn't currently expose for these models: dryer course selection ([HA core #162501](https://github.com/home-assistant/core/issues/162501)) and the oven temperature setpoint (where the cloud integration provides a read-only sensor). It's not a strict superset (the cloud integration still covers surfaces this doesn't), but the reverse-engineered write set is broad.
 
 ## Under the hood
@@ -32,6 +32,12 @@ Each appliance runs an independent bridge built around three coordinated pieces 
 On the currently supported firmware families, authentication uses a client cert keyed to the UUID published in Samsung's own wildcard cloud TLS cert. Their factory ACL grants that UUID `perm=31` (full CRUDN) on `href=*`. That certificate path is not universal: the WD53 profile in issue #16 and the washer in issue #20 reject it. For those newer OCF-PKI devices, the `SamsungServerProfile` and `ServerCertificateAuth` providers (see Quick start) pin and verify the device's hardware certificate, but getting an authorized client credential to reach protected resources is still an open problem.
 
 ---
+
+A write that the appliance reverts is absorbed by publishing optimistically and
+verifying later: Home Assistant shows the new value, then the `PollScheduler`'s
+next tier poll, deferred about 4s past Samsung's revert window, re-reads and
+republishes the real state. The bridge does not fetch back immediately after a
+write, because that GET is itself what triggers the revert.
 
 ## How the app keeps in sync with the appliance
 
@@ -149,7 +155,7 @@ In HA: **Settings → Devices & Services → MQTT** should show both devices pop
 | Power on/off | ❌ | Accepted (2.04) but reverts within seconds; hardware-mirrored |
 | Child Lock / Remote Control toggle | ❌ | Same; hardware-mirrored physical buttons |
 
-The dryer's `/operational/state/vs/0` is on the bridge's hot poll tier (1s idle / 0.5s while a cycle is active) and also accepts OBSERVE registration. When the appliance has internet it pushes notifications within ~100ms of any state change and the cache absorbs them as fast freshness; when air-gapped the hot-tier poll carries the same UX with worst-case lag of one tier interval.
+The dryer's `/operational/state/vs/0` sits on the hot poll tier (1s idle, 0.5s during a cycle) and accepts OBSERVE registration, pushing within ~100ms of a change when the appliance has internet.
 
 ### Oven
 

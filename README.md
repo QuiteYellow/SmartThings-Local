@@ -216,18 +216,17 @@ session cannot be connected again.
 
 ## Writes and retransmission
 
-Reads retransmit each Block2 request; writes send once. Where a lost write
-has been shown to be the cause rather than a device that is simply refusing
-load, `write_max_attempts` lets `post()` retransmit inside the caller's own
-timeout, backing off per RFC 7252 §4.2 and pacing every retransmit:
+Reads retransmit each Block2 request; writes send once. Where a lost write is
+the proven cause, and not a device refusing load, `write_max_attempts` lets
+`post()` retransmit inside the caller's timeout, backing off per RFC 7252 §4.2
+and pacing each retransmit:
 
 ```python
 sess = DtlsCoapSession("192.0.2.100", 49154, auth=auth, write_max_attempts=3)
 ```
 
-Each attempt resends the byte-identical datagram, so a server implementing
-§4.5 can recognise the duplicate and answer from its dedupe cache instead of
-re-running the write. Retrying from the caller cannot do that — a second
+Each attempt resends the byte-identical datagram, so a §4.5 server answers the
+duplicate from its dedupe cache. Retrying from the caller cannot do that — a second
 `post()` mints a fresh Message ID, which is a new request. It defaults to `1`
 (send once) because retransmitting into an appliance that is already dropping
 under load turns one lost write into several, and §4.5 dedupe is unverified on
@@ -237,9 +236,8 @@ Note that `post()`'s `timeout` bounds the whole call, rate-limit pacing
 included, rather than only the wait that follows the send. Every attempt has to
 share one budget, and a caller that asked for 8 seconds should not wait 8
 seconds plus however long the limiter withheld the request. At the default 5
-req/s that is at most 200 ms of the budget; at a hand-tuned `rate_limit_rps=1.0`
-it is a full second, so a caller pairing a low rate limit with a short timeout
-should raise the timeout to match.
+req/s that costs at most 200 ms of it; at `rate_limit_rps=1.0` it costs a full
+second, so pair a low rate limit with a longer timeout.
 
 ## Authentication
 
@@ -388,7 +386,7 @@ sess = DtlsCoapSession("192.0.2.100", 49154, auth=auth)
 
 The identity must be the raw 16-byte OCF UUID and the key exactly 16 or 32 bytes. `PskAuth` selects only `ECDHE-PSK-AES128-CBC-SHA256` and does not acquire, derive, provision, rotate, or persist credentials. Ownership transfer and credential discovery are outside this package.
 
-An identity containing a zero byte is rejected, and that limit is OpenSSL's rather than the appliance's. An OCF device takes the identity as bytes with an explicit length, so a zero byte means nothing to it, but OpenSSL's DTLS 1.2 PSK client callback returns the identity as a C string. Measured against OpenSSL 4.0.0, a 16-byte identity with a NUL at byte 8 reaches the wire as 8 bytes and the handshake raises nothing locally, so the appliance answers a truncated identity it has never seen. DTLS 1.2 offers no length-carrying PSK callback to fall back on, which leaves such a credential unusable through this library: roughly 6% of uniformly random 16-byte identities, and about 5% of UUIDv4s, whose version and variant bytes can never be zero.
+An identity containing a zero byte is rejected, and that limit is OpenSSL's rather than the appliance's. An OCF device takes the identity as bytes with an explicit length, so a zero byte means nothing to it, but OpenSSL's DTLS 1.2 PSK client callback returns the identity as a C string. Measured against OpenSSL 4.0.0, a 16-byte identity with a NUL at byte 8 reaches the wire as 8 bytes and the handshake raises nothing locally, so the appliance answers a truncated identity it has never seen. DTLS 1.2 offers no length-carrying PSK callback, so such a credential is unusable here: roughly 6% of uniformly random 16-byte identities, and about 5% of UUIDv4s, which have two fixed bytes.
 
 Code holding a credential can check it, and report why, before building a provider or storing anything:
 
@@ -480,8 +478,8 @@ decoder = CoapTcpStreamDecoder(max_message_size=64 * 1024)
 messages = decoder.feed(received_chunk)
 ```
 
-The module deliberately does not open a TCP/TLS/Bluetooth connection, choose a
-carrier, or perform setup and ownership operations. Those remain caller policy.
+The module opens no TCP/TLS/Bluetooth connection, chooses
+no carrier, and performs no setup or ownership work. Those remain caller policy.
 
 ## BLE OCF framing
 
@@ -743,10 +741,10 @@ the capability registry and Home Assistant integration.
 These each looked like obvious improvements at some point. Each one broke something.
 
 - **Don't add OBSERVE subscriptions on OCF-standard `/<x>/0` paths.** They register successfully but never push. Use the Samsung `/<x>/vs/0` siblings (which do).
-- **Don't assume OBSERVE silence means the appliance is broken.** When the appliance can't reach Samsung's cloud, its OBSERVE notify dispatch goes quiet even though the local DTLS session, GETs, POSTs, and the cache continue to work normally (measured at `~14 req/s` dryer / `~8 req/s` oven with 200/200 GETs successful while firewalled). The polling tiers are the structural answer to this; treat OBSERVE strictly as an optional accelerator.
+- **Don't assume OBSERVE silence means the appliance is broken.** With no route to Samsung's cloud, OBSERVE dispatch goes quiet while the local DTLS session, GETs, POSTs and cache keep working. Measured firewalled: `~14 req/s` dryer, `~8 req/s` oven, 200/200 GETs. The polling tiers are the structural answer to this; treat OBSERVE strictly as an optional accelerator.
 - **Don't touch `/oic/sec/*` (doxm, pstat, cred, acl).** The bridge doesn't, and you shouldn't from helper scripts either. Those resources have wedge/brick risk on Samsung's RT-OCF security stack. The bridge surfaces are strictly `/<x>/vs/0` and `/device/0`.
 - **Don't run two clients against the same appliance simultaneously.** Samsung's RT-OCF DTLS allows one active session per peer; a second handshake will get the device to drop the new socket. If HA seems to flap, check whether you've got `python -m mqtt_demo` running locally AND the Docker container up.
-- **Expect gaps in write coverage, but few are hard limits.** The local DTLS surface appears to expose every write Samsung's own app uses; the ceiling is per-surface reverse-engineering (finding the resource, field, and encoding), not an API boundary. A control that isn't wired yet usually just hasn't been mapped. Oven cavity remote-start is the marquee open example: it works today through Samsung's cloud, and locally the write is accepted (`2.04`) but the cavity never engages. That's a reverse-engineering problem I haven't cracked yet, not a dead end. The hard limits are the few surfaces Samsung gates in hardware/firmware (power, child lock, remote-control enable), which accept the write then snap back to the physical switch. That mirrors Samsung's own behaviour, not a shortfall of the local path: the SmartThings app can't flip those remotely either (Remote Control is a button you press on the appliance). The optimistic-publish-then-verify pattern absorbs the reverts transparently: HA briefly shows the new value, then the PollScheduler's next tier poll (deferred ~4s past Samsung's revert window) re-reads and republishes the actual state. (The bridge deliberately does **not** fetch-back right after a write; that GET is itself what triggers the revert.)
+- **Expect gaps in write coverage, but few are hard limits.** The local DTLS surface appears to expose every write Samsung's own app uses, so a control that isn't wired yet usually just hasn't been mapped: the ceiling is per-surface reverse-engineering, meaning the resource, field and encoding. Oven cavity remote-start is the open example. Samsung's cloud does it; locally the write is accepted (`2.04`) and the cavity never engages, which is a problem I haven't cracked rather than a dead end. The real limits are the few surfaces gated in hardware or firmware (power, child lock, remote-control enable), which accept a write and snap back to the physical switch. The SmartThings app cannot flip those remotely either, since Remote Control is a button on the appliance.
 
 ---
 
