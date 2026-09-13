@@ -10,7 +10,7 @@ Samsung appliances in Home Assistant. For that, use
 built on this package.
 
 You need a client certificate before any of this works. See
-[Certificates](https://github.com/QuiteYellow/SmartThings-Local/blob/main/README.md#auth-for-ac14k_m-compatible-firmware)
+[docs/certificates.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/certificates.md)
 in the README.
 
 ## What the demo bridge gives you
@@ -32,6 +32,19 @@ Each appliance runs an independent bridge built around three coordinated pieces 
 On the currently supported firmware families, authentication uses a client cert keyed to the UUID published in Samsung's own wildcard cloud TLS cert. Their factory ACL grants that UUID `perm=31` (full CRUDN) on `href=*`. That certificate path is not universal: the WD53 profile in issue #16 and the washer in issue #20 reject it. For those newer OCF-PKI devices, the `SamsungServerProfile` and `ServerCertificateAuth` providers (see Quick start) pin and verify the device's hardware certificate, but getting an authorized client credential to reach protected resources is still an open problem.
 
 ---
+
+## How the app keeps in sync with the appliance
+
+There are two parallel paths between the appliance and the app over the local CoAP-DTLS socket:
+
+- **Push (OBSERVE).** When the appliance can reach Samsung's cloud, it emits a CoAP OBSERVE notification on the LAN socket within ~100ms of any state change: cycle start, door open, mode flip. The notification travels over the LAN; nothing about the push itself routes via Samsung. **But** the appliance's decision to emit it at all is gated inside its cloud-publish thread. Block the appliance from the internet and the LAN OBSERVE pushes stop, even though the LAN path itself is unaffected and the appliance still answers reads + accepts writes normally.
+- **Polling.** The app always polls a small tier of hot resources (operational state, door, etc.) on a sub-second cadence, a warmer tier (mode, kidslock, alarms, …) every 15–30 s, and a full `/device/0` sweep every 5 minutes. This carries the UX regardless of whether OBSERVE is firing.
+
+In normal operation both happen at once: an OBSERVE notification arrives first, the cache absorbs it, and the next-poll timer for that resource is reset. In an air-gapped LAN the app keeps working. Only the worst-case freshness changes (from ~100 ms with push to ≤1 s on hot-tier resources via polling). Reads, writes, and HA entities behave identically.
+
+Which path is doing the work is visible in Home Assistant. The bridge publishes per-appliance diagnostic entities including **Push Active** (on while OBSERVE is firing), **Last Update Source** (`observe` / `observe-register` / `poll` / `sweep` / `optimistic`), **Last OBSERVE Age**, **Poll Max RTT**, **Slow Polls (window)**, **Poll Errors (window)**, and **Stalest Resource Age**, all under each device's Diagnostic section.
+
+**Push Active** counts only what the appliance sent of its own accord. A device answers every OBSERVE register CON with the current representation, and that answer reaches the notification callback exactly as a spontaneous notification does. The bridge reads `ObserveDelivery.registration` to tell them apart and records the answer as `observe-register`, so an appliance with no route to Samsung's cloud reads offline instead of going online for the window after every connect.
 
 ## Configure your appliances
 
@@ -174,7 +187,7 @@ Notes specific to this firmware family:
 - **Port 49155**, not the 49154 the oven defaults to.
 - `/oic/res` only advertises 15 paths; the full resource tree lives at `/device/0` (32 links). The bridge's periodic `/device/0` sweep handles this transparently; no descriptor change needed.
 - `/hass/state/vs/0` and `/hass/command/vs/0` return `4.04`. They're vestigial paths from an earlier firmware and are ignored.
-- Doors are exposed as a Samsung-plural collection resource (`/doors/vs/0` with an `items[]` array keyed by `x.com.samsung.da.description`), not as per-room OCF resources like the newer RF9000B-class fridges use. This is one of the concrete divergences behind the ["Firmware families" caveat](https://github.com/QuiteYellow/SmartThings-Local/blob/main/README.md#firmware-families-a-limitation) in the README.
+- Doors are exposed as a Samsung-plural collection resource (`/doors/vs/0` with an `items[]` array keyed by `x.com.samsung.da.description`), not as per-room OCF resources like the newer RF9000B-class fridges use. This is one of the concrete divergences behind the ["Firmware families" caveat](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/appliance-compatibility.md#firmware-families-a-limitation) in the README.
 
 ---
 

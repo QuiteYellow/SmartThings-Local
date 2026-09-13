@@ -17,6 +17,8 @@ The repo also ships a self-contained **reference bridge demo** (`mqtt_demo/`) th
 
 - **[`docs/api.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/api.md)** — the supported API: every name downstream code may import, with its signature. Generated from the code, so it cannot drift.
 - **[`docs/bridge-demo.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/bridge-demo.md)** — the MQTT bridge demo: what it exposes, how to configure and deploy it, per-appliance coverage, config keys and topics.
+- **[`docs/appliance-compatibility.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/appliance-compatibility.md)** — which appliances answer a local session, how to check, and the firmware-family caveat.
+- **[`docs/certificates.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/certificates.md)** — obtaining the client certificate compatible firmware accepts.
 - [`docs/ocf-pki-laundry.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/ocf-pki-laundry.md) — the newer OCF-PKI appliance generation, and why an AC14K_M certificate is refused there.
 - [`docs/ocf-vd-devices.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/ocf-vd-devices.md) — server-authenticated findings from Samsung VD hardware.
 
@@ -29,7 +31,7 @@ pip install smartthings-local
 ```
 
 For compatible firmware, mint a client cert once (see
-[Auth for AC14K_M-compatible firmware](#auth-for-ac14k_m-compatible-firmware)), then drive a
+[Getting a certificate](#getting-a-certificate)), then drive a
 session directly:
 
 ```python
@@ -246,6 +248,21 @@ AC14K_M-compatible firmware families; the newer OCF-PKI generation needs a
 pinned server profile or a PSK, and
 [docs/ocf-pki-laundry.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/ocf-pki-laundry.md)
 covers which is which.
+
+### Getting a certificate
+
+A compatible appliance accepts a client certificate signed by `AC14K_M`, whose
+Subject DN carries a UUID those appliances' on-device ACLs grant access to.
+`setup_cert.py` mints one, extracting the UUID live so it self-updates:
+
+```sh
+python setup_cert.py
+```
+
+That writes `certs/client_fullchain.pem` and `certs/client.key`. Why it works,
+how durable it is, and how to read the UUID yourself are in
+[docs/certificates.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/certificates.md). Whether a given appliance accepts this
+credential at all is in [docs/appliance-compatibility.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/appliance-compatibility.md).
 
 ### Credentials from memory
 
@@ -681,187 +698,6 @@ access to protected appliance data. `content_format` and `size2` describe
 successful representations; they are `None` for a non-success diagnostic body.
 
 For a full worked integration, the higher-level `smartthings_local.ocf` layer (`StateCache`, `PollScheduler`, `KeepaliveTask`, `ObserveRefreshTask`) coordinates tiered polling and OBSERVE on top of a session. The MQTT bridge demo below wires all of it together.
-
-## Is your appliance compatible?
-
-Check before anything else; if it's older firmware, this project doesn't target it.
-
-```sh
-# UDP scan for public/secure standard OCF plus the dynamic appliance band
-nmap -Pn -sU -p 5683,5684,49152-49160 "$APPLIANCE_IP"
-```
-
-Read the result:
-
-- **`5684/udp` or a 4915x port with a DTLS first-flight response** → an OCF DTLS listener. Standard-port OCF-PKI firmware needs the Samsung server-certificate profile (`SamsungServerProfile` / `ServerCertificateAuth`, see Quick start), and no working client credential for it exists yet.
-- **`5683/udp` responds to public OCF security/resource GETs** → use `/oic/res` to learn the device's advertised secure endpoint; do not assume that endpoint is fixed.
-- **Only `8888/tcp` open (token-based HTTPS)** → older firmware (~2018–2022). **Not supported here.**
-
-nmap's `open|filtered` can't tell a real DTLS server from a silent UDP port. Confirm which of the candidate ports actually speaks DTLS with the ClientHello probe, which sends one ClientHello and reports back per port:
-
-```sh
-# Stateless liveness check: one ClientHello round trip, leaves no state on the device
-python -m smartthings_local.protocol.dtls_probe "$APPLIANCE_IP" 5684 49153 49154 49155 49156 --stateless
-```
-
-`live` means a DTLS server answered its first flight; `dead` means silent or not DTLS. Once you have the client cert (see [Auth for AC14K_M-compatible firmware](#auth-for-ac14k_m-compatible-firmware)), add the explicit `--diagnostic` flag to run the stateful diagnostic drive, which reports `completed` (cert accepted) or `rejected` with the server's fatal alert. Diagnostic mode can allocate appliance-side DTLS state and is never used by discovery or reconnect. An `unsupported_certificate` / `unknown_ca` alert means the endpoint is reachable but this certificate profile was rejected. It is not a reason to disable verification or keep retrying. The same bounded stateless API gates the bridge's reconnect loop and, when `OCF_PORT` is unset, probes both standard 5684 and ports 49152–49160.
-
-A device that rejects the certificate profile may still run a PSK endpoint, and `diagnose_dtls_handshake` takes any authentication provider through `auth=` so that carrier can be characterised the same way:
-
-```python
-from smartthings_local.protocol.auth import PskAuth
-from smartthings_local.protocol.dtls_probe import diagnose_dtls_handshake
-
-result = diagnose_dtls_handshake(
-    appliance_host,
-    secure_port,
-    auth=PskAuth(identity=psk_identity, key=psk_key),
-)
-```
-
-`auth=` is mutually exclusive with `cert_pem`/`key_pem`/`cert_path`/`key_path`. A `rejected` outcome carrying `unknown_psk_identity` means the endpoint negotiated ECDHE-PSK and then refused the credential, which distinguishes a PSK device from one with no local DTLS at all. The CLI exposes the same thing as `--diagnostic --psk-identity HEX --psk-key HEX`, and since a command line is readable by every process on the host, pass a throwaway value there rather than a real credential.
-
-A diagnostic never enforces trust, whichever credential it is given. A provider's own verification, including a `SamsungServerProfile`'s pinned server identity, is deliberately not honoured: the result has to report what the appliance did, so an untrusted chain is classified rather than rejected locally. Use `DtlsCoapSession` when the trust decision is the point.
-
-Consumers can discover ports outside that fallback range through the public,
-read-only OCF resource directory before probing them:
-
-```python
-from smartthings_local.protocol.dtls_probe import probe_dtls_ports
-from smartthings_local.protocol.ocf_discovery import discover_ocf_secure_ports
-
-fallback_ports = (5684, *range(49152, 49161))
-advertisement = discover_ocf_secure_ports(appliance_host)
-candidates = advertisement.ports or fallback_ports
-probe = probe_dtls_ports(appliance_host, candidates)
-```
-
-`discovery_port` is the target's already-known public CoAP request port. Its
-5683 default is only a convenience: this function does not scan or use
-multicast to locate a different public port. If the appliance does not listen
-on 5683, locate that public port separately and pass it explicitly as
-`discovery_port=...`.
-
-`discover_ocf_secure_ports()` first reads the public `/oic/res` directory and
-uses only `coaps://` endpoints whose literal host matches the correlated
-response source. If that first lookup yields no correlated response or no
-usable secure endpoint, the same overall deadline also bounds a filtered
-`/oic/res?rt=oic.r.doxm` fallback for Samsung's legacy secure-port policy. It
-accepts a different dynamic response source port after the request reaches the
-known public port, while still requiring the resolved target address and CoAP
-token, and assembles Block2 responses within fixed time, block-count, and
-payload limits.
-
-Directory discovery and the DTLS probe have separate jobs: discovery can learn
-a device-advertised port outside the caller's fixed fallback set, while
-`probe_dtls_ports()` only checks the candidates it receives for a stateless
-DTLS first-flight response. Neither step authenticates the appliance. An
-advertised port therefore remains only a candidate: require a successful
-stateless DTLS probe before attempting authentication.
-
-### Tested combinations
-
-| Appliance class | Model family | Confirmed |
-|---|---|---|
-| Washer | WW11DG (`DA_WM_TP2_20_COMMON`, `mnid=0AJT`) | All entities. Contributed by [@indykoning](https://github.com/indykoning) (PR #13); tested via [`mbillow/localthings`](https://github.com/mbillow/localthings) |
-| Dryer | DV5000T (`DA_WM_TP2_20_COMMON`, `mnid=0AJT`); DV90T (same `mnid=0AJT`) | All entities, ≤1s hot-tier poll (OBSERVE accelerates when online) |
-| Oven | NV7000BS-class (`TP1X_DA-KS-OVEN-0107X`, `mnid=0AJT`) | All entities; hot-tier poll covers door + operational state regardless of cloud reachability |
-| Fridge | ARTIK051_REF_17K (`DA-REF-ART-COMMON-1_20201124`) | Contributed by [@aminorjourney](https://github.com/aminorjourney) (PR #1). Older firmware family; port 49155, minimal `/oic/res` with full tree under `/device/0` |
-
-Other appliances on the same firmware family (dishwashers, AC units) almost certainly speak the same protocol: the auth path and read primitives are common, and a washer on the shared `DA_WM_TP2_20_COMMON` controller is already confirmed above. You'd write one new descriptor for the `localthings` registry.
-
-The Bespoke AI Laundry Combo `WD53DBA900HZ[A1]` on Tizen 7 software
-`20260416.215549` is a known OCF-PKI profile, but is not yet supported by the
-public authentication path. Its endpoint and manufacturer-OTM/OwnerPSK findings
-are documented [here](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/ocf-pki-laundry.md), including the exact relationship
-to issues [#16](https://github.com/QuiteYellow/SmartThings-Local/issues/16) and
-[#20](https://github.com/QuiteYellow/SmartThings-Local/issues/20).
-
-### Firmware families: a limitation
-
-Descriptors are firmware-family-specific. Each descriptor hardcodes the resource layout of one firmware family: which hrefs it polls, which fields it reads, which write surfaces it exposes. There's no runtime feature detection. The three sample descriptors here (`mqtt_demo/samples/`) are frozen references.
-
-**What this means in practice:** if you set `APPLIANCE_<n>_CLASS=fridge` on a fridge that speaks a different firmware family than the one this descriptor was built for, the bridge will start and connect fine, but many sensors will publish as unknown and some controls won't work. Nothing catastrophic. You just get a half-broken HA device card.
-
-If your appliance model doesn't match a row in the tested table above, it may still work if it's on the same firmware family; otherwise you'd write a new descriptor (see "Adding a new appliance class" below). The ARTIK051 fridge and the newer RF9000B-class fridge, for example, expose different resource models (collection-resource vs per-instance-resource) and can't share a descriptor even though they're both "fridges".
-
----
-
-## How the app keeps in sync with the appliance
-
-There are two parallel paths between the appliance and the app over the local CoAP-DTLS socket:
-
-- **Push (OBSERVE).** When the appliance can reach Samsung's cloud, it emits a CoAP OBSERVE notification on the LAN socket within ~100ms of any state change: cycle start, door open, mode flip. The notification travels over the LAN; nothing about the push itself routes via Samsung. **But** the appliance's decision to emit it at all is gated inside its cloud-publish thread. Block the appliance from the internet and the LAN OBSERVE pushes stop, even though the LAN path itself is unaffected and the appliance still answers reads + accepts writes normally.
-- **Polling.** The app always polls a small tier of hot resources (operational state, door, etc.) on a sub-second cadence, a warmer tier (mode, kidslock, alarms, …) every 15–30 s, and a full `/device/0` sweep every 5 minutes. This carries the UX regardless of whether OBSERVE is firing.
-
-In normal operation both happen at once: an OBSERVE notification arrives first, the cache absorbs it, and the next-poll timer for that resource is reset. In an air-gapped LAN the app keeps working. Only the worst-case freshness changes (from ~100 ms with push to ≤1 s on hot-tier resources via polling). Reads, writes, and HA entities behave identically.
-
-Which path is doing the work is visible in Home Assistant. The bridge publishes per-appliance diagnostic entities including **Push Active** (on while OBSERVE is firing), **Last Update Source** (`observe` / `observe-register` / `poll` / `sweep` / `optimistic`), **Last OBSERVE Age**, **Poll Max RTT**, **Slow Polls (window)**, **Poll Errors (window)**, and **Stalest Resource Age**, all under each device's Diagnostic section.
-
-**Push Active** counts only what the appliance sent of its own accord. A device answers every OBSERVE register CON with the current representation, and that answer reaches the notification callback exactly as a spontaneous notification does. The bridge reads `ObserveDelivery.registration` to tell them apart and records the answer as `observe-register`, so an appliance with no route to Samsung's cloud reads offline instead of going online for the window after every connect.
-
----
-
-## Auth for AC14K_M-compatible firmware
-
-For a compatible firmware family, the bridge authenticates with a **client
-cert** signed by `AC14K_M`, an intermediate CA that has been public for years.
-The cert's Subject DN carries a UUID that those appliances' on-device ACLs
-grant full access to.
-
-You can read the UUID yourself out of the relevant server cert:
-
-```sh
-openssl s_client -connect <samsung-host>:443 -servername <samsung-host> \
-                 -showcerts < /dev/null 2>/dev/null \
-  | openssl x509 -noout -subject
-# subject=C=KR, O=Samsung Electronics, OU=uuid:<UUID>, CN=*.samsungiotcloud.com
-```
-
-The UUID lives in `OU=uuid:<UUID>`. The server cert is currently valid through **2035-04-09**.
-
-This README doesn't pin the literal UUID: the setup script extracts it live each run, so it self-updates if upstream rotates.
-
-### Why this works
-
-- Each currently supported Tizen/RT-OCF firmware family has a **factory-baked ACE** in `/oic/sec/acl` granting this UUID `perm=31` on `href=*`.
-- TizenRT iotivity derives peerId from `memmem(subject_dn, "uuid:")`, which is RDN-agnostic. A cert with the UUID in CN authenticates the same as one with it in OU.
-- We don't need the matching private key from the original keyholder. We mint our own key and have `AC14K_M` sign our leaf. Different key, same identity, same access.
-
-### One-command setup
-
-```sh
-pip install -r requirements-bootstrap.txt
-TARGET_IP=$APPLIANCE_IP python setup_cert.py --test
-```
-
-What it does:
-
-1. Fetches the AC14K_M signing CA + private key + upstream chain (RemoteAccessCA → CECA → ROOTCA) from a public mirror.
-2. Fetches the relevant server cert and extracts the current UUID from its subject DN.
-3. Sanity-checks that the AC14K_M cert and key actually pair (modulus match) before signing anything.
-4. Generates a fresh RSA-2048 key pair you own.
-5. Builds a CSR with the UUID in OU + CN + SAN and signs it with `AC14K_M` (SHA-1, matching the on-device trust hierarchy).
-6. Concatenates `leaf + AC14K_M + 3 upstream CAs` into the fullchain PEM.
-7. With `--test`: opens a DTLS handshake against `$TARGET_IP:$TARGET_PORT` (default `49154`) and GETs `/oic/sec/acl`; a `2.05` reply proves the cert authenticated (anonymous peers get `4.01`).
-
-Output in `./certs/`: `client_fullchain.pem` + `client.key`.
-
-Neither the UUID nor the AC14K_M bundle is hardcoded in this repo; both are fetched live each run, so the script self-updates if upstream rotates. If either fetch fails, the script prints an inline workaround: supply the UUID via `UUID=<uuid>` env, or supply the AC14K_M bundle via `AC14K_M_CERT_BUNDLE=/path/to/cert.pem`. `BRAYSTORM_URL=<mirror>` points at a different bundle source.
-
-On Fedora/RHEL (and other hardened OpenSSL 3.x builds) the default crypto policy blocks SHA-1 signing, which step 5 needs. The script detects this, retries the signing step once with SHA-1 force-enabled for just that command, and only fails if the retry also fails. If it does, it prints the remedy: `sudo update-crypto-policies --set DEFAULT:SHA1` (undo afterward with `sudo update-crypto-policies --set DEFAULT`).
-
-### How durable is this on the compatible firmware families?
-
-Rotating the published UUID would require coordinated cloud certificate, ACL,
-and device identity changes across the compatible firmware families.
-`AC14K_M` has been public for years and remains accepted by the tested rows
-above, but it is already rejected by other 2026 appliance profiles. Do not
-extrapolate this certificate path to an untested model.
-
-> **Legacy path:** earlier versions used a per-hub-UUID cert via an anonymous `/oic/sec/doxm` read escalation. That still works on the dryer-family firmware but isn't necessary: the cert minted here authenticates against every appliance and survives device resets. The old `bootstrap.py` for the legacy flow was removed when the package was renamed; see git history if you need it.
-
----
 
 ## Repo layout
 
