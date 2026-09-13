@@ -185,7 +185,7 @@ def _render_member(name: str, obj) -> list[str]:
             lines += ["```python", signature, "```", ""]
     kind = _kind(obj)
     summary = _summary(obj)
-    lines.append(f"*{kind}*" + (f" — {summary}" if summary else ""))
+    lines.append(f"*{kind}*" + (f": {summary}" if summary else ""))
     if is_enum:
         lines.append("")
         for member in obj:
@@ -208,7 +208,7 @@ def _render_member(name: str, obj) -> list[str]:
                 member_summary = _summary(underlying)
                 bullet = f"- `{rendered}`"
                 if member_summary:
-                    bullet += f" — {member_summary}"
+                    bullet += f": {member_summary}"
                 lines.append(bullet)
     lines.append("")
     return lines

@@ -62,59 +62,59 @@ Public, redacted exception types for smartthings-local.
 
 #### `AuthenticationError`
 
-*exception* — The peer or local credentials could not be authenticated.
+*exception*: The peer or local credentials could not be authenticated.
 
 #### `AuthorizationError`
 
-*exception* — The authenticated peer is not authorized for an operation.
+*exception*: The authenticated peer is not authorized for an operation.
 
 #### `BlockwiseError`
 
-*exception* — A Block1 or Block2 transfer violated its bounded contract.
+*exception*: A Block1 or Block2 transfer violated its bounded contract.
 
 #### `EndpointError`
 
-*exception* — An endpoint could not be resolved, bound, or connected.
+*exception*: An endpoint could not be resolved, bound, or connected.
 
 #### `HandshakePeerCleanupError`
 
-*exception* — A cleanup alert was sent for an HVR-only half-open DTLS peer.
+*exception*: A cleanup alert was sent for an HVR-only half-open DTLS peer.
 
 #### `MalformedMessageError`
 
-*exception* — A protocol message could not be decoded safely.
+*exception*: A protocol message could not be decoded safely.
 
 #### `ObserveError`
 
-*exception* — A CoAP Observe relation could not be established or maintained.
+*exception*: A CoAP Observe relation could not be established or maintained.
 
 #### `ProbeError`
 
-*exception* — A DTLS probe failed before producing a protocol result.
+*exception*: A DTLS probe failed before producing a protocol result.
 
 #### `SessionClosedError`
 
-*exception* — An operation was attempted on a closed session.
+*exception*: An operation was attempted on a closed session.
 
 #### `SessionError`
 
-*exception* — A connected-session operation failed.
+*exception*: A connected-session operation failed.
 
 #### `SessionIdentifierError`
 
-*exception* — No free Message ID or token was available for a new exchange.
+*exception*: No free Message ID or token was available for a new exchange.
 
 #### `SessionResetError`
 
-*exception* — The peer rejected an exchange with a CoAP RST.
+*exception*: The peer rejected an exchange with a CoAP RST.
 
 #### `SessionTimeoutError`
 
-*exception* — A bounded session operation exceeded its deadline.
+*exception*: A bounded session operation exceeded its deadline.
 
 #### `SmartThingsLocalError`
 
-*exception* — Base class for classified library failures.
+*exception*: Base class for classified library failures.
 
 ## Authentication
 
@@ -128,9 +128,9 @@ Immutable authentication providers for DTLS sessions.
 AuthenticationProvider(*args, **kwargs)
 ```
 
-*class* — Configure authentication for a newly created DTLS context.
+*class*: Configure authentication for a newly created DTLS context.
 
-- `configure_context(context: OpenSSL.SSL.Context) -> None` — Configure a context while this provider remains session-owned.
+- `configure_context(context: OpenSSL.SSL.Context) -> None`: Configure a context while this provider remains session-owned.
 
 #### `CertificateAuth`
 
@@ -138,11 +138,11 @@ AuthenticationProvider(*args, **kwargs)
 CertificateAuth(*, certificate_path: str | os.PathLike[str] | None = None, private_key_path: str | os.PathLike[str] | None = None, certificate_pem: str | None = None, private_key_pem: str | None = None, server_profile: SamsungServerProfile | None = None)
 ```
 
-*class* — Certificate authentication loaded from files or in-memory PEM data.
+*class*: Certificate authentication loaded from files or in-memory PEM data.
 
-- `configure_context(context: OpenSSL.SSL.Context) -> None` — Apply the existing certificate authentication profile to a context.
-- `from_files(cls, certificate_path: str | os.PathLike[str], private_key_path: str | os.PathLike[str], *, server_profile: SamsungServerProfile | None = None) -> CertificateAuth` — Create a provider backed by certificate-chain and key files.
-- `from_memory(cls, certificate_pem: str, private_key_pem: str, *, server_profile: SamsungServerProfile | None = None) -> CertificateAuth` — Create a provider backed by an in-memory PEM chain and key.
+- `configure_context(context: OpenSSL.SSL.Context) -> None`: Apply the existing certificate authentication profile to a context.
+- `from_files(cls, certificate_path: str | os.PathLike[str], private_key_path: str | os.PathLike[str], *, server_profile: SamsungServerProfile | None = None) -> CertificateAuth`: Create a provider backed by certificate-chain and key files.
+- `from_memory(cls, certificate_pem: str, private_key_pem: str, *, server_profile: SamsungServerProfile | None = None) -> CertificateAuth`: Create a provider backed by an in-memory PEM chain and key.
 
 #### `PskAuth`
 
@@ -150,10 +150,10 @@ CertificateAuth(*, certificate_path: str | os.PathLike[str] | None = None, priva
 PskAuth(*, identity: bytes, key: bytes)
 ```
 
-*class* — DTLS authentication using an existing OCF PSK credential.
+*class*: DTLS authentication using an existing OCF PSK credential.
 
-- `configure_context(context: OpenSSL.SSL.Context) -> None` — Configure one context for the narrow Samsung OCF PSK profile.
-- `validate_identity(identity: bytes) -> None` — Raise unless `identity` is one OpenSSL can put on the wire.
+- `configure_context(context: OpenSSL.SSL.Context) -> None`: Configure one context for the narrow Samsung OCF PSK profile.
+- `validate_identity(identity: bytes) -> None`: Raise unless `identity` is one OpenSSL can put on the wire.
 
 #### `SamsungServerProfile`
 
@@ -161,14 +161,14 @@ PskAuth(*, identity: bytes, key: bytes)
 SamsungServerProfile(*, expected_certificate_identity: uuid.UUID | str, role: SamsungServerRole = <SamsungServerRole.HOME_APPLIANCE: 'OCF HA Device'>, additional_ca_pem: str | None = None)
 ```
 
-*class* — Opt-in Samsung hardware-certificate verification profile.
+*class*: Opt-in Samsung hardware-certificate verification profile.
 
-- `bound_device(cls, expected_certificate_identity: uuid.UUID | str, *, role: SamsungServerRole = <SamsungServerRole.HOME_APPLIANCE: 'OCF HA Device'>, additional_ca_pem: str | None = None) -> SamsungServerProfile` — Bind a verified Samsung hardware leaf to its certificate UUID.
-- `discover_device(cls, *, role: SamsungServerRole = <SamsungServerRole.HOME_APPLIANCE: 'OCF HA Device'>, additional_ca_pem: str | None = None) -> SamsungServerProfile` — Verify a Samsung hardware leaf before learning its certificate UUID.
+- `bound_device(cls, expected_certificate_identity: uuid.UUID | str, *, role: SamsungServerRole = <SamsungServerRole.HOME_APPLIANCE: 'OCF HA Device'>, additional_ca_pem: str | None = None) -> SamsungServerProfile`: Bind a verified Samsung hardware leaf to its certificate UUID.
+- `discover_device(cls, *, role: SamsungServerRole = <SamsungServerRole.HOME_APPLIANCE: 'OCF HA Device'>, additional_ca_pem: str | None = None) -> SamsungServerProfile`: Verify a Samsung hardware leaf before learning its certificate UUID.
 
 #### `SamsungServerRole`
 
-*class* — Known Samsung OCF hardware-certificate subject roles.
+*class*: Known Samsung OCF hardware-certificate subject roles.
 
 - `HOME_APPLIANCE` = `'OCF HA Device'`
 - `VD_DEVICE` = `'OCF VD Device'`
@@ -179,9 +179,9 @@ SamsungServerProfile(*, expected_certificate_identity: uuid.UUID | str, role: Sa
 ServerCertificateAuth(*, server_profile: SamsungServerProfile)
 ```
 
-*class* — Verify a pinned Samsung server without a client certificate.
+*class*: Verify a pinned Samsung server without a client certificate.
 
-- `configure_context(context: OpenSSL.SSL.Context) -> None` — Verify the selected server profile without loading client material.
+- `configure_context(context: OpenSSL.SSL.Context) -> None`: Verify the selected server profile without loading client material.
 
 ## Sessions
 
@@ -191,10 +191,10 @@ CoAP-over-DTLS client for Samsung RT-OCF appliances (RFC 7252 + 6347).
 
 #### `ConnectCancellation`
 
-*class* — One-way, socket-backed cancellation signal for `connect()`.
+*class*: One-way, socket-backed cancellation signal for `connect()`.
 
-- `is_set() -> bool` — Return whether cancellation has been requested.
-- `set() -> None` — Cancel current and future connection attempts using this signal.
+- `is_set() -> bool`: Return whether cancellation has been requested.
+- `set() -> None`: Cancel current and future connection attempts using this signal.
 
 #### `DtlsCoapSession`
 
@@ -202,22 +202,22 @@ CoAP-over-DTLS client for Samsung RT-OCF appliances (RFC 7252 + 6347).
 DtlsCoapSession(host, port, cert_path=None, key_path=None, *, cert_pem=None, key_pem=None, on_notification=None, mtu=1200, rate_limit_rps: float = 5.0, local_port=None, family=<AddressFamily.AF_UNSPEC: 0>, write_max_attempts: int = 1, auth: AuthenticationProvider | None = None, on_legacy_notification=None, on_observe_pending=None, on_observe_error=None, on_observe_delivery=None)
 ```
 
-*class* — Single sustained DTLS-CoAP session.
+*class*: Single sustained DTLS-CoAP session.
 
-- `abort()` — Immediately stop work and close the established transport.
-- `close()` — Tear down session. Sends best-effort OBSERVE deregisters first so Samsung's RT-OCF cleans up its observer table — without this, the per-cert observer state survives DTLS close and a quick reconnect...
-- `connect(*, timeout: float | None = None, cancel: ConnectCancellation | None = None, cleanup_hvr_peer: bool = False)` — Perform a cancellable DTLS handshake using a monotonic deadline.
-- `delete(path_segs, timeout=8.0, *, query=(), extra_options=())` — Single-frame DELETE. Returns (code, payload_bytes).
-- `get(path_segs, query=(), timeout=10.0, *, extra_options=())` — Token-stable Block2 GET. Returns (code, payload_bytes).
-- `join()` — Block until the reader thread exits (i.e. socket dies).
-- `pace() -> None` — Sleep only the part of the rate-limit interval not already consumed since the last real send. Uses _stop so session teardown wakes it.
-- `ping()` — RFC 7252 §4.4 CoAP Ping — empty CON, no token, no payload. Fire-and-forget: we do not wait for the matching RST because Samsung's RT-OCF doesn't reliably emit one (verified 2026-06-04: every sync p...
-- `post(path_segs, body_cbor, timeout=8.0, *, query=(), extra_options=())` — POST a CBOR-encoded body and return (code, payload_bytes).
-- `quiesce_for_close()` — Stop new work while retaining an established socket for close().
-- `refresh_observes(paths, *, queries_by_href=None)` — Replace only the requested Observe paths and report send results.
-- `start_reader()` — Spawn the reader thread. Must be called after connect().
-- `subscribe(path_segs, *, query=())` — Register an OBSERVE on the given path. The initial 2.05 notification and all subsequent state-change notifications will fire on_notification(href, payload_bytes).
-- `unsubscribe(path_segs)` — Deregister and retire every active relation for one exact path.
+- `abort()`: Immediately stop work and close the established transport.
+- `close()`: Tear down session. Sends best-effort OBSERVE deregisters first so Samsung's RT-OCF cleans up its observer table — without this, the per-cert observer state survives DTLS close and a quick reconnect...
+- `connect(*, timeout: float | None = None, cancel: ConnectCancellation | None = None, cleanup_hvr_peer: bool = False)`: Perform a cancellable DTLS handshake using a monotonic deadline.
+- `delete(path_segs, timeout=8.0, *, query=(), extra_options=())`: Single-frame DELETE. Returns (code, payload_bytes).
+- `get(path_segs, query=(), timeout=10.0, *, extra_options=())`: Token-stable Block2 GET. Returns (code, payload_bytes).
+- `join()`: Block until the reader thread exits (i.e. socket dies).
+- `pace() -> None`: Sleep only the part of the rate-limit interval not already consumed since the last real send. Uses _stop so session teardown wakes it.
+- `ping()`: RFC 7252 §4.4 CoAP Ping — empty CON, no token, no payload. Fire-and-forget: we do not wait for the matching RST because Samsung's RT-OCF doesn't reliably emit one (verified 2026-06-04: every sync p...
+- `post(path_segs, body_cbor, timeout=8.0, *, query=(), extra_options=())`: POST a CBOR-encoded body and return (code, payload_bytes).
+- `quiesce_for_close()`: Stop new work while retaining an established socket for close().
+- `refresh_observes(paths, *, queries_by_href=None)`: Replace only the requested Observe paths and report send results.
+- `start_reader()`: Spawn the reader thread. Must be called after connect().
+- `subscribe(path_segs, *, query=())`: Register an OBSERVE on the given path. The initial 2.05 notification and all subsequent state-change notifications will fire on_notification(href, payload_bytes).
+- `unsubscribe(path_segs)`: Deregister and retire every active relation for one exact path.
 
 #### `ObserveDelivery`
 
@@ -225,7 +225,7 @@ DtlsCoapSession(host, port, cert_path=None, key_path=None, *, cert_pem=None, key
 ObserveDelivery(href: str, payload: bytes, query: tuple[str, ...] = (), registration: bool = False, sequence: int | None = None, legacy: bool = False)
 ```
 
-*class* — One representation delivered on an Observe relation.
+*class*: One representation delivered on an Observe relation.
 
 ## Discovery and probing
 
@@ -239,7 +239,7 @@ DTLS ClientHello probe — a cheap, deterministic liveness + diagnostic primitiv
 DtlsLivenessResult(port: int, response_kind: str | None, attempts: int, rtt_s: float | None = None, alert: tuple[int, str] | None = None, error_code: str | None = None)
 ```
 
-*class* — Bounded, non-sensitive result for one stateless port probe.
+*class*: Bounded, non-sensitive result for one stateless port probe.
 
 #### `DtlsPortProbeResult`
 
@@ -247,7 +247,7 @@ DtlsLivenessResult(port: int, response_kind: str | None, attempts: int, rtt_s: f
 DtlsPortProbeResult(outcome: str, selected_port: int | None, results: tuple[DtlsLivenessResult, ...])
 ```
 
-*class* — Selection result for one bounded concurrent probe set.
+*class*: Selection result for one bounded concurrent probe set.
 
 #### `diagnose_dtls_handshake`
 
@@ -255,7 +255,7 @@ DtlsPortProbeResult(outcome: str, selected_port: int | None, results: tuple[Dtls
 diagnose_dtls_handshake(host, port, *, auth=None, cert_pem=None, key_pem=None, cert_path=None, key_path=None, retries=2, timeout=3.0, mtu=1200, family=<AddressFamily.AF_UNSPEC: 0>)
 ```
 
-*function* — Opt in to a stateful DTLS handshake for protocol diagnosis.
+*function*: Opt in to a stateful DTLS handshake for protocol diagnosis.
 
 #### `probe_dtls_port`
 
@@ -263,7 +263,7 @@ diagnose_dtls_handshake(host, port, *, auth=None, cert_pem=None, key_pem=None, c
 probe_dtls_port(host, port, *, timeout=3.0, retries=2, mtu=1200, family=<AddressFamily.AF_UNSPEC: 0>)
 ```
 
-*function* — Prove one DTLS listener without sending a cookie-bearing flight.
+*function*: Prove one DTLS listener without sending a cookie-bearing flight.
 
 #### `probe_dtls_ports`
 
@@ -271,7 +271,7 @@ probe_dtls_port(host, port, *, timeout=3.0, retries=2, mtu=1200, family=<Address
 probe_dtls_ports(host, ports, *, preferred_port=None, timeout=3.0, retries=2, mtu=1200, family=<AddressFamily.AF_UNSPEC: 0>)
 ```
 
-*function* — Probe a bounded port set concurrently and select without guessing.
+*function*: Probe a bounded port set concurrently and select without guessing.
 
 **Constants**
 
@@ -298,7 +298,7 @@ Bounded plaintext OCF reads and advertised secure-port discovery.
 OcfSecurePortDiscoveryResult(ports: tuple[int, ...], attempts: int, response_received: bool, error_code: str | None = None)
 ```
 
-*class* — Redacted outcome of one bounded secure-port discovery operation.
+*class*: Redacted outcome of one bounded secure-port discovery operation.
 
 #### `PlaintextOcfResourceResult`
 
@@ -306,7 +306,7 @@ OcfSecurePortDiscoveryResult(ports: tuple[int, ...], attempts: int, response_rec
 PlaintextOcfResourceResult(code: int | None, payload: bytes, blocks_received: int, content_format: int | None, size2: int | None, attempts: int, response_received: bool, error_code: str | None = None)
 ```
 
-*class* — Redacted outcome of one bounded plaintext OCF resource read.
+*class*: Redacted outcome of one bounded plaintext OCF resource read.
 
 #### `discover_ocf_secure_ports`
 
@@ -314,7 +314,7 @@ PlaintextOcfResourceResult(code: int | None, payload: bytes, blocks_received: in
 discover_ocf_secure_ports(host, *, discovery_port=5683, timeout=3.0, retries=1, family=<AddressFamily.AF_UNSPEC: 0>)
 ```
 
-*function* — Discover secure ports advertised by a target's public OCF directory.
+*function*: Discover secure ports advertised by a target's public OCF directory.
 
 #### `read_plaintext_ocf_resource`
 
@@ -322,7 +322,7 @@ discover_ocf_secure_ports(host, *, discovery_port=5683, timeout=3.0, retries=1, 
 read_plaintext_ocf_resource(host, href, *, query=(), port=5683, timeout=3.0, retries=1, family=<AddressFamily.AF_UNSPEC: 0>)
 ```
 
-*function* — Read one known plaintext OCF resource under fixed transfer bounds.
+*function*: Read one known plaintext OCF resource under fixed transfer bounds.
 
 ### `smartthings_local.protocol.ocf_multicast`
 
@@ -334,7 +334,7 @@ Bounded discovery of a known host's plaintext OCF response port.
 OcfResponderPortDiscoveryResult(ports: tuple[int, ...], attempts: int, responses: int, error_code: str | None = None)
 ```
 
-*class* — Redacted result of one known-host multicast discovery operation.
+*class*: Redacted result of one known-host multicast discovery operation.
 
 #### `discover_ocf_responder_ports`
 
@@ -342,7 +342,7 @@ OcfResponderPortDiscoveryResult(ports: tuple[int, ...], attempts: int, responses
 discover_ocf_responder_ports(target_address: str, *, interface_address: str, discovery_port: int = 5683, timeout: float = 3.0, rounds: int = 2) -> OcfResponderPortDiscoveryResult
 ```
 
-*function* — Find plaintext OCF response ports for one known IPv4 host.
+*function*: Find plaintext OCF response ports for one known IPv4 host.
 
 ### `smartthings_local.protocol.endpoint`
 
@@ -354,14 +354,14 @@ Deterministic UDP endpoint resolution and connected socket setup.
 HostFilteredUdpSocket(sock, endpoint)
 ```
 
-*class* — UDP socket that accepts replies from any port on one target host.
+*class*: UDP socket that accepts replies from any port on one target host.
 
 - `close()`
 - `fileno()`
 - `getsockname()`
 - `gettimeout()`
-- `recv(bufsize)` — Return the next datagram from the target host.
-- `send(data)` — Send to the resolved destination, mirroring `socket.send`.
+- `recv(bufsize)`: Return the next datagram from the target host.
+- `send(data)`: Send to the resolved destination, mirroring `socket.send`.
 - `settimeout(timeout)`
 
 #### `ResolvedUdpEndpoint`
@@ -370,9 +370,9 @@ HostFilteredUdpSocket(sock, endpoint)
 ResolvedUdpEndpoint(family: int, sockaddr: tuple)
 ```
 
-*class* — One concrete IPv4 or IPv6 UDP destination.
+*class*: One concrete IPv4 or IPv6 UDP destination.
 
-- `bind_address(local_port)` — Return the wildcard bind tuple matching this endpoint's family.
+- `bind_address(local_port)`: Return the wildcard bind tuple matching this endpoint's family.
 
 #### `open_connected_udp_socket`
 
@@ -380,7 +380,7 @@ ResolvedUdpEndpoint(family: int, sockaddr: tuple)
 open_connected_udp_socket(host, port, *, family=<AddressFamily.AF_UNSPEC: 0>, local_port=None, timeout=None)
 ```
 
-*function* — Create, optionally bind, and connect a UDP socket.
+*function*: Create, optionally bind, and connect a UDP socket.
 
 #### `open_host_filtered_udp_socket`
 
@@ -388,7 +388,7 @@ open_connected_udp_socket(host, port, *, family=<AddressFamily.AF_UNSPEC: 0>, lo
 open_host_filtered_udp_socket(host, port, *, family=<AddressFamily.AF_UNSPEC: 0>, local_port=None, timeout=None)
 ```
 
-*function* — Open an unconnected UDP socket bound to one target host.
+*function*: Open an unconnected UDP socket bound to one target host.
 
 #### `resolve_udp_endpoint`
 
@@ -396,7 +396,7 @@ open_host_filtered_udp_socket(host, port, *, family=<AddressFamily.AF_UNSPEC: 0>
 resolve_udp_endpoint(host, port, *, family=<AddressFamily.AF_UNSPEC: 0>)
 ```
 
-*function* — Resolve the first usable UDP candidate.
+*function*: Resolve the first usable UDP candidate.
 
 #### `resolve_udp_endpoints`
 
@@ -404,7 +404,7 @@ resolve_udp_endpoint(host, port, *, family=<AddressFamily.AF_UNSPEC: 0>)
 resolve_udp_endpoints(host, port, *, family=<AddressFamily.AF_UNSPEC: 0>)
 ```
 
-*function* — Resolve all unique IPv4/IPv6 UDP candidates in resolver order.
+*function*: Resolve all unique IPv4/IPv6 UDP candidates in resolver order.
 
 ## Wire formats
 
@@ -418,7 +418,7 @@ CoAP wire encoding/decoding (RFC 7252 + 7641 + 7959).
 Block2Accumulator(token, *, max_blocks=32, max_payload_bytes=65536, accepted_content_formats=None)
 ```
 
-*class* — Bounded, token-stable Block2 representation accumulator.
+*class*: Bounded, token-stable Block2 representation accumulator.
 
 - `add_response(message)`
 
@@ -428,7 +428,7 @@ Block2Accumulator(token, *, max_blocks=32, max_payload_bytes=65536, accepted_con
 CoapMessage(mtype: int, code: int, mid: int, token: bytes, options: tuple[tuple[int, bytes], ...], payload: bytes)
 ```
 
-*class* — One decoded CoAP datagram.
+*class*: One decoded CoAP datagram.
 
 #### `CoapResponseClassification`
 
@@ -436,7 +436,7 @@ CoapMessage(mtype: int, code: int, mid: int, token: bytes, options: tuple[tuple[
 CoapResponseClassification(kind: str, message: coap.CoapMessage | None = None, acknowledgement: bytes | None = None)
 ```
 
-*class* — Transport-independent classification of a possible response.
+*class*: Transport-independent classification of a possible response.
 
 #### `block_fields`
 
@@ -444,7 +444,7 @@ CoapResponseClassification(kind: str, message: coap.CoapMessage | None = None, a
 block_fields(value)
 ```
 
-*function* — Decode a CoAP Block-N option value. Inverse of block_value(). Returns (num, more, szx). An empty value means block 0, no more, SZX=0 — RFC 7959 §2.2 allows a zero-length option to elide it.
+*function*: Decode a CoAP Block-N option value. Inverse of block_value(). Returns (num, more, szx). An empty value means block 0, no more, SZX=0 — RFC 7959 §2.2 allows a zero-length option to elide it.
 
 #### `block_value`
 
@@ -452,7 +452,7 @@ block_fields(value)
 block_value(num, more, szx)
 ```
 
-*function* — Encode a CoAP Block-N option value.
+*function*: Encode a CoAP Block-N option value.
 
 #### `build_coap`
 
@@ -460,7 +460,7 @@ block_value(num, more, szx)
 build_coap(mtype, code, mid, token, options, payload=b'')
 ```
 
-*function* — Build a CoAP datagram. mtype: CON/NON/ACK/RST. token: bytes (may be empty for ACK). options: list of (num, value_bytes).
+*function*: Build a CoAP datagram. mtype: CON/NON/ACK/RST. token: bytes (may be empty for ACK). options: list of (num, value_bytes).
 
 #### `build_empty_ack`
 
@@ -468,7 +468,7 @@ build_coap(mtype, code, mid, token, options, payload=b'')
 build_empty_ack(mid)
 ```
 
-*function* — Build the bare ACK required for a confirmable CoAP response.
+*function*: Build the bare ACK required for a confirmable CoAP response.
 
 #### `build_get_request`
 
@@ -476,7 +476,7 @@ build_empty_ack(mid)
 build_get_request(mtype, mid, token, path_segs, query=(), *, accept=b'<', block_number=None, block_szx=6, extra_options=())
 ```
 
-*function* — Build a GET with optional query, Block2, and extension options.
+*function*: Build a GET with optional query, Block2, and extension options.
 
 #### `classify_coap_response`
 
@@ -484,7 +484,7 @@ build_get_request(mtype, mid, token, path_segs, query=(), *, accept=b'<', block_
 classify_coap_response(datagram, *, token=None, request_mid=None)
 ```
 
-*function* — Classify a response without coupling it to a socket implementation.
+*function*: Classify a response without coupling it to a socket implementation.
 
 #### `decode_uint_option`
 
@@ -492,7 +492,7 @@ classify_coap_response(datagram, *, token=None, request_mid=None)
 decode_uint_option(options, number, *, max_length)
 ```
 
-*function* — Decode one optional CoAP uint option.
+*function*: Decode one optional CoAP uint option.
 
 #### `fmt_code`
 
@@ -500,7 +500,7 @@ decode_uint_option(options, number, *, max_length)
 fmt_code(c)
 ```
 
-*function* — 0x45 → '2.05', 0x84 → '4.04'. Used in log lines.
+*function*: 0x45 → '2.05', 0x84 → '4.04'. Used in log lines.
 
 #### `option_values`
 
@@ -508,7 +508,7 @@ fmt_code(c)
 option_values(options, number)
 ```
 
-*function* — Return all values for one option number, preserving wire order.
+*function*: Return all values for one option number, preserving wire order.
 
 #### `parse_coap`
 
@@ -516,7 +516,7 @@ option_values(options, number)
 parse_coap(data)
 ```
 
-*function* — Decode a CoAP datagram. Returns (mtype, code, mid, token, options, payload). options is a list of (num, value_bytes).
+*function*: Decode a CoAP datagram. Returns (mtype, code, mid, token, options, payload). options is a list of (num, value_bytes).
 
 #### `parse_coap_message`
 
@@ -524,7 +524,7 @@ parse_coap(data)
 parse_coap_message(data)
 ```
 
-*function* — Decode `data` into an immutable :class:`CoapMessage`.
+*function*: Decode `data` into an immutable :class:`CoapMessage`.
 
 #### `split_dtls`
 
@@ -532,7 +532,7 @@ parse_coap_message(data)
 split_dtls(buf)
 ```
 
-*function* — Split a UDP datagram that contains one-or-more DTLS records. OpenSSL sometimes hands the BIO multiple records back-to-back; we must send each as its own UDP datagram or TizenRT drops them.
+*function*: Split a UDP datagram that contains one-or-more DTLS records. OpenSSL sometimes hands the BIO multiple records back-to-back; we must send each as its own UDP datagram or TizenRT drops them.
 
 **Constants**
 
@@ -558,7 +558,7 @@ Pure CoAP-over-TCP wire codec used by Samsung's IoTivity stack.
 
 #### `CoapTcpCodecError`
 
-*exception* — An invalid or unsupported CoAP-over-TCP message.
+*exception*: An invalid or unsupported CoAP-over-TCP message.
 
 #### `CoapTcpMessage`
 
@@ -566,7 +566,7 @@ Pure CoAP-over-TCP wire codec used by Samsung's IoTivity stack.
 CoapTcpMessage(code: int, token: bytes, options: tuple[tuple[int, bytes], ...], payload: bytes)
 ```
 
-*class* — One decoded CoAP-over-TCP message.
+*class*: One decoded CoAP-over-TCP message.
 
 #### `CoapTcpStreamDecoder`
 
@@ -574,11 +574,11 @@ CoapTcpMessage(code: int, token: bytes, options: tuple[tuple[int, bytes], ...], 
 CoapTcpStreamDecoder(*, max_message_size: int = 4194304)
 ```
 
-*class* — Incrementally split and parse CoAP messages from a byte stream.
+*class*: Incrementally split and parse CoAP messages from a byte stream.
 
-- `feed(data: bytes | bytearray | memoryview) -> tuple[coap_tcp.CoapTcpMessage, ...]` — Consume a stream chunk and return every complete message in it.
-- `finish() -> None` — Accept end-of-stream only when no partial message remains.
-- `reset() -> None` — Discard an incomplete frame.
+- `feed(data: bytes | bytearray | memoryview) -> tuple[coap_tcp.CoapTcpMessage, ...]`: Consume a stream chunk and return every complete message in it.
+- `finish() -> None`: Accept end-of-stream only when no partial message remains.
+- `reset() -> None`: Discard an incomplete frame.
 
 #### `build_coap_tcp_csm`
 
@@ -586,7 +586,7 @@ CoapTcpStreamDecoder(*, max_message_size: int = 4194304)
 build_coap_tcp_csm(*, receive_max_message_size: int | None = None, block_wise_transfer: bool = False, max_message_size: int = 4194304) -> bytes
 ```
 
-*function* — Build an RFC 8323 Capabilities and Settings Message.
+*function*: Build an RFC 8323 Capabilities and Settings Message.
 
 #### `build_coap_tcp_delete`
 
@@ -594,7 +594,7 @@ build_coap_tcp_csm(*, receive_max_message_size: int | None = None, block_wise_tr
 build_coap_tcp_delete(path: str, *, token: bytes | bytearray | memoryview = b'', query: collections.abc.Iterable[str] = (), accept: int | None = None, extra_options: collections.abc.Iterable[tuple[int, bytes | bytearray | memoryview]] = (), max_message_size: int = 4194304) -> bytes
 ```
 
-*function* — Build a DELETE for one absolute OCF href and bounded query.
+*function*: Build a DELETE for one absolute OCF href and bounded query.
 
 #### `build_coap_tcp_get`
 
@@ -602,7 +602,7 @@ build_coap_tcp_delete(path: str, *, token: bytes | bytearray | memoryview = b'',
 build_coap_tcp_get(path: str, *, token: bytes | bytearray | memoryview = b'', query: collections.abc.Iterable[str] = (), accept: int | None = None, extra_options: collections.abc.Iterable[tuple[int, bytes | bytearray | memoryview]] = (), max_message_size: int = 4194304) -> bytes
 ```
 
-*function* — Build a GET with repeated Uri-Path and Uri-Query options.
+*function*: Build a GET with repeated Uri-Path and Uri-Query options.
 
 #### `build_coap_tcp_message`
 
@@ -610,7 +610,7 @@ build_coap_tcp_get(path: str, *, token: bytes | bytearray | memoryview = b'', qu
 build_coap_tcp_message(*, code: int, token: bytes | bytearray | memoryview = b'', options: collections.abc.Iterable[tuple[int, bytes | bytearray | memoryview]] = (), payload: bytes | bytearray | memoryview = b'', max_message_size: int = 4194304) -> bytes
 ```
 
-*function* — Build one bounded CoAP-over-TCP wire message.
+*function*: Build one bounded CoAP-over-TCP wire message.
 
 #### `build_coap_tcp_post`
 
@@ -618,7 +618,7 @@ build_coap_tcp_message(*, code: int, token: bytes | bytearray | memoryview = b''
 build_coap_tcp_post(path: str, payload: bytes | bytearray | memoryview, *, token: bytes | bytearray | memoryview = b'', query: collections.abc.Iterable[str] = (), content_format: int = 60, accept: int | None = 60, extra_options: collections.abc.Iterable[tuple[int, bytes | bytearray | memoryview]] = (), max_message_size: int = 4194304) -> bytes
 ```
 
-*function* — Build a POST with one bounded payload for an absolute OCF href.
+*function*: Build a POST with one bounded payload for an absolute OCF href.
 
 #### `encode_uint_option`
 
@@ -626,7 +626,7 @@ build_coap_tcp_post(path: str, payload: bytes | bytearray | memoryview, *, token
 encode_uint_option(value: int) -> bytes
 ```
 
-*function* — Encode a non-negative CoAP uint option in its shortest form.
+*function*: Encode a non-negative CoAP uint option in its shortest form.
 
 #### `parse_coap_tcp_message`
 
@@ -634,7 +634,7 @@ encode_uint_option(value: int) -> bytes
 parse_coap_tcp_message(data: bytes | bytearray | memoryview, *, max_message_size: int = 4194304) -> coap_tcp.CoapTcpMessage
 ```
 
-*function* — Parse exactly one complete bounded CoAP-over-TCP message.
+*function*: Parse exactly one complete bounded CoAP-over-TCP message.
 
 ### `smartthings_local.protocol.ble_ocf`
 
@@ -646,14 +646,14 @@ Pure IoTivity BLE transport framing for OCF PDUs.
 AdaptiveBleOcfReassembler(*, max_pdu_size: int = 1048576)
 ```
 
-*class* — Infer IoTivity's transport frame size from each first frame.
+*class*: Infer IoTivity's transport frame size from each first frame.
 
-- `feed(frame: bytes | bytearray | memoryview) -> ble_ocf.ReassembledBleOcfPdu | None` — Consume one frame, inferring a new frame size at PDU boundaries.
-- `reset() -> None` — Discard any partial PDU and its inferred frame size.
+- `feed(frame: bytes | bytearray | memoryview) -> ble_ocf.ReassembledBleOcfPdu | None`: Consume one frame, inferring a new frame size at PDU boundaries.
+- `reset() -> None`: Discard any partial PDU and its inferred frame size.
 
 #### `BleOcfCodecError`
 
-*exception* — An invalid or unsupported BLE OCF frame.
+*exception*: An invalid or unsupported BLE OCF frame.
 
 #### `BleOcfHeader`
 
@@ -661,11 +661,11 @@ AdaptiveBleOcfReassembler(*, max_pdu_size: int = 1048576)
 BleOcfHeader(start: bool, source_port: int, secure: bool, destination_port: int)
 ```
 
-*class* — Semantic representation of the two-byte IoTivity BLE header.
+*class*: Semantic representation of the two-byte IoTivity BLE header.
 
 #### `BleOcfInterleavedFrameError`
 
-*exception* — A frame belongs to a different PDU than the active reassembly.
+*exception*: A frame belongs to a different PDU than the active reassembly.
 
 #### `BleOcfReassembler`
 
@@ -673,10 +673,10 @@ BleOcfHeader(start: bool, source_port: int, secure: bool, destination_port: int)
 BleOcfReassembler(*, mtu: int, max_pdu_size: int = 1048576)
 ```
 
-*class* — Strict, single-PDU IoTivity BLE reassembly state machine.
+*class*: Strict, single-PDU IoTivity BLE reassembly state machine.
 
-- `feed(frame: bytes | bytearray | memoryview) -> ble_ocf.ReassembledBleOcfPdu | None` — Consume one complete GATT value and return a PDU when complete.
-- `reset() -> None` — Discard any partial PDU.
+- `feed(frame: bytes | bytearray | memoryview) -> ble_ocf.ReassembledBleOcfPdu | None`: Consume one complete GATT value and return a PDU when complete.
+- `reset() -> None`: Discard any partial PDU.
 
 #### `ReassembledBleOcfPdu`
 
@@ -684,7 +684,7 @@ BleOcfReassembler(*, mtu: int, max_pdu_size: int = 1048576)
 ReassembledBleOcfPdu(pdu: bytes, source_port: int, destination_port: int, secure: bool)
 ```
 
-*class* — A complete OCF PDU and the transport metadata that carried it.
+*class*: A complete OCF PDU and the transport metadata that carried it.
 
 #### `decode_header`
 
@@ -692,7 +692,7 @@ ReassembledBleOcfPdu(pdu: bytes, source_port: int, destination_port: int, secure
 decode_header(frame: bytes | bytearray | memoryview) -> ble_ocf.BleOcfHeader
 ```
 
-*function* — Decode and validate the header at the beginning of `frame`.
+*function*: Decode and validate the header at the beginning of `frame`.
 
 #### `encode_header`
 
@@ -700,7 +700,7 @@ decode_header(frame: bytes | bytearray | memoryview) -> ble_ocf.BleOcfHeader
 encode_header(*, start: bool, source_port: int, secure: bool, destination_port: int) -> bytes
 ```
 
-*function* — Encode the two-byte IoTivity BLE transport header.
+*function*: Encode the two-byte IoTivity BLE transport header.
 
 #### `fragment_pdu`
 
@@ -708,7 +708,7 @@ encode_header(*, start: bool, source_port: int, secure: bool, destination_port: 
 fragment_pdu(pdu: bytes | bytearray | memoryview, *, mtu: int, source_port: int, destination_port: int, secure: bool, max_pdu_size: int = 1048576) -> tuple[bytes, ...]
 ```
 
-*function* — Fragment one non-empty OCF PDU into IoTivity BLE frames.
+*function*: Fragment one non-empty OCF PDU into IoTivity BLE frames.
 
 ### `smartthings_local.protocol.owner_psk`
 
@@ -720,7 +720,7 @@ Pure IoTivity manufacturer-certificate OwnerPSK derivation.
 derive_mfg_certificate_owner_psk(*, master_secret: bytes, client_random: bytes, server_random: bytes, owner_uuid: bytes, device_uuid: bytes, cipher_name: str, oxm_label: bytes) -> bytes
 ```
 
-*function* — Derive a 128-bit OwnerPSK from caller-supplied DTLS state.
+*function*: Derive a 128-bit OwnerPSK from caller-supplied DTLS state.
 
 **Constants**
 
@@ -748,7 +748,7 @@ StateCache(descriptor: '_ObservationHook')
 - `apply_rep(href: str, rep: dict, source: str) -> bool`
 - `freshness_s(href: str) -> float | None`
 - `get(href: str) -> dict | None`
-- `index_device_tree(device0_body) -> dict[str, dict]` — Turn a /device/0 CBOR list-of-{href, rep} sweep response into a dict keyed by href. Some responses put a device-level `/device/0` rep first, while others put a normal resource in that slot.
+- `index_device_tree(device0_body) -> dict[str, dict]`: Turn a /device/0 CBOR list-of-{href, rep} sweep response into a dict keyed by href. Some responses put a device-level `/device/0` rep first, while others put a normal resource in that slot.
 - `set_on_change(cb: Callable[[bool, str], NoneType]) -> None`
 - `snapshot() -> dict[str, dict]`
 - `stalest() -> tuple[str, float] | None`
@@ -766,7 +766,7 @@ PollScheduler(session: DtlsCoapSession, cache: 'StateCache', tiers: list[poll_sc
 *class*
 
 - `run_forever(stop: threading.Event) -> None`
-- `take_window_stats() -> tuple[float, int, int]` — Return (max RTT ms over successful polls, slow-poll count, timeout count) seen since the last call, and reset all three. Slow threshold is `self.slow_threshold_ms`. The timeout count is snapshotted...
+- `take_window_stats() -> tuple[float, int, int]`: Return (max RTT ms over successful polls, slow-poll count, timeout count) seen since the last call, and reset all three. Slow threshold is `self.slow_threshold_ms`. The timeout count is snapshotted...
 - `write_in_progress(href: str, settle_s: float = 4.0) -> None`
 
 #### `PollTier`
@@ -775,7 +775,7 @@ PollScheduler(session: DtlsCoapSession, cache: 'StateCache', tiers: list[poll_sc
 PollTier(name: str, interval_s: float, paths: tuple[tuple[str, ...], ...], active_interval_s: float | None = None, is_sweep: bool = False, timeout_s: float | None = None)
 ```
 
-*class* — PollTier(name: 'str', interval_s: 'float', paths: 'tuple[tuple[str, ...], ...]', active_interval_s: 'Optional[float]' = None, is_sweep: 'bool' = False, timeout_s: 'Optional[float]' = None)
+*class*: PollTier(name: 'str', interval_s: 'float', paths: 'tuple[tuple[str, ...], ...]', active_interval_s: 'Optional[float]' = None, is_sweep: 'bool' = False, timeout_s: 'Optional[float]' = None)
 
 ### `smartthings_local.ocf.keepalive`
 
