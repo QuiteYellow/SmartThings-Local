@@ -28,7 +28,7 @@ This README doesn't pin the literal UUID: the setup script extracts it live each
 
 - Each currently supported Tizen/RT-OCF firmware family has a **factory-baked ACE** in `/oic/sec/acl` granting this UUID `perm=31` on `href=*`.
 - TizenRT iotivity derives peerId from `memmem(subject_dn, "uuid:")`, which is RDN-agnostic. A cert with the UUID in CN authenticates the same as one with it in OU.
-- We don't need the matching private key from the original keyholder. We mint our own key and have `AC14K_M` sign our leaf. Different key, same identity, same access.
+- The original keyholder's private key never comes into it: `setup_cert.py` mints a fresh key and has `AC14K_M` sign its leaf. Different key, same identity, same access.
 
 ## One-command setup
 
