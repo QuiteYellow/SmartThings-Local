@@ -16,7 +16,7 @@ class DistributionError(RuntimeError):
 
 def _tracked_files() -> set[str]:
     proc = subprocess.run(
-        ["git", "ls-files", "-z", "--", "smartthings_local", "tests"],
+        ["git", "ls-files", "-z", "--", "smartthings_local"],
         capture_output=True,
         check=True,
     )

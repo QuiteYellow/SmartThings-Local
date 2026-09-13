@@ -54,10 +54,15 @@ artifacts = ["smartthings_local/protocol/ocf_root_ca.pem"]
 # in-repo and are not part of the distributable package.
 packages = ["smartthings_local"]
 
+# The sdist carries the library and its metadata, matching the wheel comment
+# above: mqtt_demo/, tests/, tools/ and setup_cert.py are in-repo development
+# material. tests/ used to ship, with no stated reason and against that same
+# intent, and it could not be run from an sdist anyway because the packages it
+# imports stayed behind. Anyone wanting to run the suite uses the git tag, as
+# CI does.
 [tool.hatch.build.targets.sdist]
 include = [
     "smartthings_local",
-    "tests",
     "README.md",
     "LICENSE",
     "NOTICE",
