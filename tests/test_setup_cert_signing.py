@@ -24,7 +24,38 @@ def _make_ca(dir_path):
     return cert, key
 
 
+def test_mint_self_signed_default(tmp_path):
+    """The default path: a self-signed SHA-256 leaf carrying only the UUID,
+    no AC14K_M, no vendor OIDs, no org identity."""
+    paths = setup_cert.mint_self_signed(UUID, tmp_path / "out")
+
+    for name in ("key", "leaf", "fullchain"):
+        assert paths[name].exists() and paths[name].stat().st_size > 0
+
+    text = subprocess.run(
+        ["openssl", "x509", "-in", str(paths["leaf"]), "-noout", "-text"],
+        check=True, capture_output=True, text=True).stdout
+    assert "sha256WithRSAEncryption" in text        # SHA-256, not SHA-1
+    assert "sha1WithRSAEncryption" not in text
+    assert f"URI:urn:uuid:{UUID}" in text           # UUID in the SAN
+    assert "1.3.6.1.4.1.51414" not in text          # no vendor OIDs
+
+    subject = subprocess.run(
+        ["openssl", "x509", "-in", str(paths["leaf"]), "-noout", "-subject"],
+        check=True, capture_output=True, text=True).stdout
+    assert f"uuid:{UUID}" in subject
+    assert "Samsung" not in subject                 # no vendor org claimed
+
+    issuer = subprocess.run(
+        ["openssl", "x509", "-in", str(paths["leaf"]), "-noout", "-issuer"],
+        check=True, capture_output=True, text=True).stdout
+    assert "AC14K_M" not in issuer                   # self-signed by a throwaway CA
+    # fullchain is leaf + the throwaway CA
+    assert paths["fullchain"].read_text().count("BEGIN CERTIFICATE") == 2
+
+
 def test_mint_cert_produces_sha1_leaf_with_uuid(tmp_path):
+    # mint_cert is the --fallback (AC14K_M-signed) path; it stays SHA-1.
     ca_cert, ca_key = _make_ca(tmp_path)
     paths = setup_cert.mint_cert(
         UUID, ca_cert, ca_key, [ca_cert], tmp_path / "out")

@@ -9,16 +9,19 @@ is fetched live from public sources; nothing is hardcoded.
 
 Steps:
 
-1. Fetch the AC14K_M intermediate CA bundle (CA cert + key + upstream
-   chain) from a public mirror.
-2. Open a TLS connection to a Samsung cloud endpoint, read its
-   server cert, and extract the `uuid:<UUID>` token from the subject DN.
-3. Generate a fresh RSA-2048 key pair (yours, not Samsung's).
-4. Build a CSR with the UUID in CN, OU, and SAN.
-5. Sign the CSR with AC14K_M using SHA-1, matching the on-device
-   trust hierarchy.
-6. Assemble `<uuid>.key`, `<uuid>.pem`, `<uuid>_fullchain.pem`.
-7. With `--test`, DTLS-handshake to an appliance and GET
+1. Open a TLS connection to a Samsung cloud endpoint, read its server
+   cert, and extract the `uuid:<UUID>` token from the subject DN. This is
+   the identity the on-device ACL grants access to, and the only field the
+   appliance authorizes on.
+2. Generate a fresh RSA-2048 key pair (yours, not Samsung's).
+3. Build a CSR with the UUID in CN, OU, and SAN.
+4. Sign the leaf. By default, with a throwaway CA generated on the spot
+   (self-signed): on the appliances tested the device did not validate the
+   signer or chain, so no external CA was needed. With `--fallback`, sign
+   with the public AC14K_M intermediate instead (the pre-2026 path), for a
+   device that does validate the chain.
+5. Assemble `<uuid>.key`, `<uuid>.pem`, `<uuid>_fullchain.pem`.
+6. With `--test`, DTLS-handshake to an appliance and GET
    `/oic/sec/acl`; a 2.05 reply confirms the cert is accepted.
 
 Background:
@@ -27,8 +30,9 @@ Background:
   subject DN — anyone can read it with `openssl s_client`.
 - TizenRT iotivity locates the peer UUID via `memmem(subject, "uuid:")`,
   so the same UUID in any RDN works.
-- The AC14K_M intermediate has been public for years and remains in
-  current firmware trust stores.
+- The default self-signed path needs no external CA. `--fallback` uses
+  the AC14K_M intermediate, which has been public for years; it is only
+  needed for a device that validates the chain.
 
 Fallbacks if the live fetches fail:
 
@@ -43,11 +47,12 @@ Fallbacks if the live fetches fail:
 
 Usage:
 
-    python setup_cert.py
+    python setup_cert.py                 # self-signed (default)
     python setup_cert.py --test
+    python setup_cert.py --fallback      # AC14K_M-signed (pre-2026 path)
     TARGET_IP=192.168.1.1 python setup_cert.py --test
 
-Env overrides (all optional):
+Env overrides (all optional; AC14K_M_* apply only with --fallback):
     AC14K_M_CERT         AC14K_M cert PEM (skip live fetch)
     AC14K_M_KEY          AC14K_M private key PEM
     AC14K_M_CERT_BUNDLE  combined PEM (key + 4 certs)
@@ -60,6 +65,7 @@ Env overrides (all optional):
 """
 import argparse
 import os
+import secrets
 import re
 import socket
 import ssl
@@ -70,7 +76,7 @@ import urllib.request
 from pathlib import Path
 
 
-SAMSUNG_HOST = 'connect-v2.samsungiotcloud.com'
+SAMSUNG_HOST = 'connect.samsungiotcloud.com'  # unversioned; connect-v2 serves the same wildcard cert
 SAMSUNG_PORT = 443
 
 BRAYSTORM_URL = (
@@ -184,10 +190,12 @@ def verify_cert_key_pair(cert_path, key_path):
             f"AC14K_M cert and key do not pair (cert modulus != key modulus)")
 
 
-# OpenSSL config that force-enables SHA-1 signatures. Fedora/RHEL (and some
-# other hardened OpenSSL 3.x builds) reject SHA-1 signing under the default
-# crypto policy, but the AC14K_M trust chain requires a SHA-1-signed leaf, so
-# we re-enable it just for the signing step via a scoped OPENSSL_CONF.
+# OpenSSL config that force-enables SHA-1 signatures, for the --fallback
+# path only. That path signs the leaf with SHA-1 to match the pre-2026
+# AC14K_M recipe; Fedora/RHEL (and some hardened OpenSSL 3.x builds) reject
+# SHA-1 signing under the default crypto policy, so re-enable it just for
+# that signing step via a scoped OPENSSL_CONF. The default self-signed path
+# uses SHA-256 and needs none of this.
 SHA1_OVERRIDE_CONF = """\
 openssl_conf = openssl_init
 
@@ -301,6 +309,73 @@ DNS.1 = {uuid}
         parts.append(Path(p).read_text())
     paths['fullchain'].write_text(''.join(parts))
 
+    return paths
+
+
+def mint_self_signed(uuid, out_dir):
+    """Mint a self-signed client cert carrying the UUID. Default path.
+
+    On the appliances tested, the device did not validate the client
+    certificate's signer or chain; authorization was by the subject UUID,
+    matched against the on-device ACL. There, a leaf signed by a throwaway
+    CA generated here worked identically to an AC14K_M-signed one, needing
+    no AC14K_M CA -- reads + a write on both, with signer, chain, digest,
+    key, org, and vendor OIDs all cosmetic and only the UUID mattering. A
+    device that does validate the chain (see docs/ocf-pki-laundry.md) needs
+    the --fallback path, and rejects AC14K_M anyway; that is what --fallback
+    and the loud-failure-then-report flow are for.
+
+    Output matches mint_cert: <uuid>.key + <uuid>_fullchain.pem.
+    """
+    out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
+    paths = {
+        'ca_key':    out / 'selfsigned_ca.key',
+        'ca_cert':   out / 'selfsigned_ca.pem',
+        'key':       out / f'{uuid}.key',
+        'csr':       out / f'{uuid}.csr',
+        'leaf':      out / f'{uuid}.pem',
+        'fullchain': out / f'{uuid}_fullchain.pem',
+        'ext':       out / 'ext.cnf',
+        'srl':       out / f'{uuid}.srl',
+    }
+
+    # Throwaway CA with a random name (not AC14K_M, trusted by nothing).
+    run(['openssl', 'genrsa', '-out', str(paths['ca_key']), '2048'])
+    run(['openssl', 'req', '-x509', '-new', '-key', str(paths['ca_key']),
+         '-out', str(paths['ca_cert']), '-days', '3650', '-sha256',
+         '-subj', f'/CN=ca-{secrets.token_hex(8)}/O={secrets.token_hex(8)}'])
+
+    # Subject/SAN carry only the UUID. Standard EKU, no vendor OIDs, no
+    # org/country -- all verified cosmetic on hardware.
+    paths['ext'].write_text(f"""basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth, serverAuth
+subjectAltName = @alt_names
+
+[alt_names]
+URI.1 = urn:uuid:{uuid}
+URI.2 = uri:uuid:{uuid}
+URI.3 = uuid:{uuid}
+DNS.1 = {uuid}
+""")
+
+    run(['openssl', 'genrsa', '-out', str(paths['key']), '2048'])
+    try:
+        os.chmod(paths['key'], 0o600)
+    except OSError:
+        pass
+
+    run(['openssl', 'req', '-new', '-key', str(paths['key']),
+         '-out', str(paths['csr']),
+         '-subj', f'/OU=uuid:{uuid}/CN=urn:uuid:{uuid}'])
+    run(['openssl', 'x509', '-req', '-in', str(paths['csr']),
+         '-CA', str(paths['ca_cert']), '-CAkey', str(paths['ca_key']),
+         '-CAcreateserial', '-CAserial', str(paths['srl']),
+         '-out', str(paths['leaf']), '-days', '3650',
+         '-extfile', str(paths['ext']), '-sha256'])
+
+    paths['fullchain'].write_text(
+        paths['leaf'].read_text() + paths['ca_cert'].read_text())
     return paths
 
 
@@ -459,6 +534,10 @@ def main():
         description=__doc__)
     p.add_argument('--test', action='store_true',
                    help='After minting, attempt a DTLS handshake to TARGET_IP:TARGET_PORT')
+    p.add_argument('--fallback', action='store_true',
+                   help='Mint an AC14K_M-signed cert (the pre-2026 path) instead of '
+                        'the default self-signed cert. Use only if a device rejects '
+                        'the self-signed cert -- and please report the model.')
     args = p.parse_args()
 
     out_dir    = os.environ.get('OUT_DIR', './certs/')
@@ -466,30 +545,10 @@ def main():
     target_port = int(os.environ.get('TARGET_PORT', 49154))
     uuid_override = os.environ.get('UUID')
 
+    # Phase 1: identify the UUID. Both paths need it, and it is the only
+    # field the appliance authorizes on.
     print("=" * 60)
-    print("Phase 1: AC14K_M signing materials")
-    print("=" * 60)
-    try:
-        ac14k_cert, ac14k_key, chain_files = resolve_ac14k_inputs(out_dir)
-    except SystemExit:
-        raise
-    except Exception as e:
-        print(f"[!] {e}", file=sys.stderr)
-        return 2
-    print(f"  AC14K_M cert: {ac14k_cert}")
-    print(f"  AC14K_M key:  {ac14k_key}")
-    print(f"  chain:        {len(chain_files)} certs ({', '.join(p.name for p in chain_files)})")
-
-    try:
-        verify_cert_key_pair(ac14k_cert, ac14k_key)
-    except RuntimeError as e:
-        print(f"[!] AC14K_M cert/key sanity check failed: {e}", file=sys.stderr)
-        return 2
-    print(f"  cert/key modulus pair OK")
-
-    print()
-    print("=" * 60)
-    print("Phase 2: identify peer UUID")
+    print("Phase 1: identify peer UUID")
     print("=" * 60)
     samsung_pem = None
     if uuid_override:
@@ -516,23 +575,53 @@ def main():
             print(f"  Saved server leaf cert to "
                   f"{samsung_ref / 'samsung_cloud_leaf.pem'}")
 
+    # Phase 2: mint. Self-signed by default; AC14K_M-signed under --fallback.
     print()
     print("=" * 60)
-    print(f"Phase 3: mint client cert with UUID {uuid}")
+    if args.fallback:
+        print(f"Phase 2: mint AC14K_M-signed cert (--fallback) with UUID {uuid}")
+    else:
+        print(f"Phase 2: mint self-signed cert with UUID {uuid}")
     print("=" * 60)
-    try:
-        paths = mint_cert(uuid, ac14k_cert, ac14k_key, chain_files, out_dir)
-    except CommandError as e:
-        print(f"\n[!] Failed to mint the client cert:\n{e}", file=sys.stderr)
-        print(
-            "\n  If the failure mentions SHA-1 / disabled digests, your "
-            "OpenSSL build blocks SHA-1 signing (common on Fedora/RHEL).\n"
-            "  The AC14K_M chain requires SHA-1, so allow it and re-run:\n"
-            "    sudo update-crypto-policies --set DEFAULT:SHA1\n"
-            "  (or LEGACY). Undo afterwards with: "
-            "sudo update-crypto-policies --set DEFAULT",
-            file=sys.stderr)
-        return 4
+
+    if args.fallback:
+        try:
+            ac14k_cert, ac14k_key, chain_files = resolve_ac14k_inputs(out_dir)
+        except SystemExit:
+            raise
+        except Exception as e:
+            print(f"[!] {e}", file=sys.stderr)
+            return 2
+        print(f"  AC14K_M cert: {ac14k_cert}")
+        print(f"  AC14K_M key:  {ac14k_key}")
+        print(f"  chain:        {len(chain_files)} certs "
+              f"({', '.join(pp.name for pp in chain_files)})")
+        try:
+            verify_cert_key_pair(ac14k_cert, ac14k_key)
+        except RuntimeError as e:
+            print(f"[!] AC14K_M cert/key sanity check failed: {e}", file=sys.stderr)
+            return 2
+        print(f"  cert/key modulus pair OK")
+        try:
+            paths = mint_cert(uuid, ac14k_cert, ac14k_key, chain_files, out_dir)
+        except CommandError as e:
+            print(f"\n[!] Failed to mint the client cert:\n{e}", file=sys.stderr)
+            print(
+                "\n  If the failure mentions SHA-1 / disabled digests, your "
+                "OpenSSL build blocks SHA-1 signing (common on Fedora/RHEL).\n"
+                "  The --fallback path signs the leaf with SHA-1; allow it and re-run:\n"
+                "    sudo update-crypto-policies --set DEFAULT:SHA1\n"
+                "  (or LEGACY). Undo afterwards with: "
+                "sudo update-crypto-policies --set DEFAULT\n"
+                "  Or drop --fallback: the self-signed cert needs no SHA-1.",
+                file=sys.stderr)
+            return 4
+    else:
+        try:
+            paths = mint_self_signed(uuid, out_dir)
+        except CommandError as e:
+            print(f"\n[!] Failed to mint the self-signed cert:\n{e}", file=sys.stderr)
+            return 4
 
     print(f"  key:       {paths['key']}")
     print(f"  leaf:      {paths['leaf']}")
@@ -544,7 +633,7 @@ def main():
     if args.test:
         print()
         print("=" * 60)
-        print("Phase 4: verify cert against target appliance")
+        print("Phase 3: verify cert against target appliance")
         print("=" * 60)
         if not target_ip:
             print("  [!] TARGET_IP not set; cannot run connectivity test", file=sys.stderr)
