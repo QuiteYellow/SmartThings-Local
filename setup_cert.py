@@ -325,18 +325,20 @@ def mint_self_signed(uuid, out_dir):
     the --fallback path, and rejects AC14K_M anyway; that is what --fallback
     and the loud-failure-then-report flow are for.
 
-    Output matches mint_cert: <uuid>.key + <uuid>_fullchain.pem.
+    Output names match mint_cert -- client.key + client_fullchain.pem --
+    so both paths drop into the same README, bridge config and deploy
+    steps, plus the throwaway CA this path also writes.
     """
     out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
     paths = {
         'ca_key':    out / 'selfsigned_ca.key',
         'ca_cert':   out / 'selfsigned_ca.pem',
-        'key':       out / f'{uuid}.key',
-        'csr':       out / f'{uuid}.csr',
-        'leaf':      out / f'{uuid}.pem',
-        'fullchain': out / f'{uuid}_fullchain.pem',
+        'key':       out / 'client.key',
+        'csr':       out / 'client.csr',
+        'leaf':      out / 'client.pem',
+        'fullchain': out / 'client_fullchain.pem',
         'ext':       out / 'ext.cnf',
-        'srl':       out / f'{uuid}.srl',
+        'srl':       out / 'client.srl',
     }
 
     # Throwaway CA with a random name (not AC14K_M, trusted by nothing).

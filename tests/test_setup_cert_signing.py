@@ -54,6 +54,22 @@ def test_mint_self_signed_default(tmp_path):
     assert paths["fullchain"].read_text().count("BEGIN CERTIFICATE") == 2
 
 
+def test_both_mint_paths_write_the_documented_filenames(tmp_path):
+    """README, docs/bridge-demo.md, mqtt_demo/.env.example and
+    mqtt_demo/config.py's defaults all name client_fullchain.pem and
+    client.key, so both paths have to write those, not one each."""
+    ca_cert, ca_key = _make_ca(tmp_path)
+    minted = {
+        "self-signed": setup_cert.mint_self_signed(UUID, tmp_path / "ss"),
+        "fallback": setup_cert.mint_cert(
+            UUID, ca_cert, ca_key, [ca_cert], tmp_path / "fb"),
+    }
+    for path_name, paths in minted.items():
+        assert paths["key"].name == "client.key", path_name
+        assert paths["fullchain"].name == "client_fullchain.pem", path_name
+        assert paths["key"].exists() and paths["fullchain"].exists()
+
+
 def test_mint_cert_produces_sha1_leaf_with_uuid(tmp_path):
     # mint_cert is the --fallback (AC14K_M-signed) path; it stays SHA-1.
     ca_cert, ca_key = _make_ca(tmp_path)
