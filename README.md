@@ -708,7 +708,7 @@ mqtt_demo/                           MQTT bridge demo (consumes smartthings_loca
   deploy.sh                          tar + ssh + docker compose up --build
   requirements.txt                   Python dependencies for the bridge
   .env.example                       Template — copy to .env, fill in
-setup_cert.py                        One-shot cert minting script (live-fetches AC14K_M + UUID)
+setup_cert.py                        One-shot cert minting script (self-signed by default, --fallback signs with AC14K_M)
 pyproject.toml                       Packaging — PyPI dist `smartthings-local`, hatch-vcs versioning
 tests/                               pytest suite (CoAP wire, state cache, import isolation, cert loading, DTLS probe, bridge port resolution, cert signing, certificate profiles, OwnerPSK derivation, connect deadline, session interruption)
 .github/workflows/publish.yml        Build + PyPI Trusted Publishing on `v*` tags

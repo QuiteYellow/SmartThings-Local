@@ -2,7 +2,7 @@
 
 How to obtain the client certificate a compatible appliance accepts, why it works, and how durable it is. Passing one to the library is covered by [Authentication](https://github.com/QuiteYellow/SmartThings-Local/blob/main/README.md#authentication) in the README. Whether a given appliance accepts this credential at all is covered by [docs/appliance-compatibility.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/appliance-compatibility.md).
 
-For a compatible firmware family, the bridge authenticates with a **client cert** whose Subject DN carries a UUID that those appliances' on-device ACLs grant full access to. The UUID is what authorizes; on the appliances tested, the signer and chain are not checked, on the devices I’ve tested, so `setup_cert.py` self-signs the cert by default. `--fallback` signs it with `AC14K_M` instead, an intermediate CA that has been public for years, for a device that does validate the chain.
+For a compatible firmware family, the bridge authenticates with a **client cert** whose Subject DN carries a UUID that those appliances' on-device ACLs grant full access to. The UUID is what authorizes; on the appliances tested, the signer and chain are not checked, so `setup_cert.py` self-signs the cert by default. `--fallback` signs it with `AC14K_M` instead, an intermediate CA that has been public for years, for a device that does validate the chain.
 
 You can read the UUID yourself out of the cloud gateway's server cert:
 
