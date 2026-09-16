@@ -250,18 +250,13 @@ covers which is which.
 
 ### Getting a certificate
 
-A compatible appliance accepts a client certificate signed by `AC14K_M`, whose
-Subject DN carries a UUID those appliances' on-device ACLs grant access to.
-`setup_cert.py` mints one, extracting the UUID live so it self-updates:
+A compatible appliance accepts a client certificate whose Subject DN carries a UUID those appliances' on-device ACLs grant access to. On the appliances tested the signer is not checked, so `setup_cert.py` self-signs by default, extracting the UUID live from the cloud gateway's certificate. Pass `--fallback` to sign with `AC14K_M` instead, for a device that validates the chain:
 
 ```sh
 python setup_cert.py
 ```
 
-That writes `certs/client_fullchain.pem` and `certs/client.key`. Why it works,
-how durable it is, and how to read the UUID yourself are in
-[docs/certificates.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/certificates.md). Whether a given appliance accepts this
-credential at all is in [docs/appliance-compatibility.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/appliance-compatibility.md).
+That writes `certs/client_fullchain.pem` and `certs/client.key`. Why it works, how durable it is, and how to read the UUID yourself are in [docs/certificates.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/certificates.md). Whether a given appliance accepts this credential at all is in [docs/appliance-compatibility.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/appliance-compatibility.md).
 
 ### Credentials from memory
 
