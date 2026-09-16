@@ -778,4 +778,6 @@ This is an independent, unofficial project. It is **not affiliated with, authori
 
 "Samsung", "SmartThings", and any related names, marks, and logos are trademarks of Samsung Electronics Co., Ltd. They are used in this project **only nominatively** — to identify the hardware and protocols this software interoperates with — and no claim is made to any right in them. Use of these marks does not imply any affiliation with or endorsement by their owner.
 
+**Intended use.** This is designed solely for communicating with devices you own, on your own local network. A session needs LAN reach to the appliance and a certificate the appliance's access list already trusts, so what it offers a device owner is a local alternative to the SmartThings cloud. That is the whole of the intended scope: your hardware, your network.
+
 The software is provided under the [MIT License](https://github.com/QuiteYellow/SmartThings-Local/blob/main/LICENSE) for interoperability with hardware you own, without warranty of any kind.
