@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 setup_cert.py — One-shot client cert generator for local DTLS-CoAP
-access to Samsung Tizen/RT-OCF appliances on your LAN.
+access to Tizen/RT-OCF appliances on your LAN.
 
 Builds a client cert keyed to the identity that each appliance's factory
 ACL already grants `perm=31` on `href=*`. Everything used at build time
@@ -9,11 +9,11 @@ is fetched live from public sources; nothing is hardcoded.
 
 Steps:
 
-1. Open a TLS connection to a Samsung cloud endpoint, read its server
-   cert, and extract the `uuid:<UUID>` token from the subject DN. This is
+1. Open a TLS connection to the host whose certificate carries the UUID,
+   read its server cert, and extract the `uuid:<UUID>` token from the subject DN. This is
    the identity the on-device ACL grants access to, and the only field the
    appliance authorizes on.
-2. Generate a fresh RSA-2048 key pair (yours, not Samsung's).
+2. Generate a fresh RSA-2048 key pair of your own.
 3. Build a CSR with the UUID in CN, OU, and SAN.
 4. Sign the leaf. By default, with a throwaway CA generated on the spot
    (self-signed): on the appliances tested the device did not validate the
@@ -26,7 +26,7 @@ Steps:
 
 Background:
 
-- The cloud-bridge UUID is published in Samsung's own TLS server cert
+- The cloud-bridge UUID is published in that bridge's own TLS server cert
   subject DN — anyone can read it with `openssl s_client`.
 - TizenRT iotivity locates the peer UUID via `memmem(subject, "uuid:")`,
   so the same UUID in any RDN works.
@@ -37,7 +37,8 @@ Background:
 Fallbacks if the live fetches fail:
 
   # Manual UUID lookup
-  openssl s_client -connect <samsung-host>:443 -servername <samsung-host> \\
+  openssl s_client -connect <host-containing-uuid>:443 \\
+                   -servername <host-containing-uuid> \\
                    -showcerts < /dev/null 2>/dev/null \\
     | openssl x509 -noout -subject
   UUID=<paste-uuid-here> python setup_cert.py ...
@@ -76,8 +77,8 @@ import urllib.request
 from pathlib import Path
 
 
-SAMSUNG_HOST = 'connect.samsungiotcloud.com'  # unversioned; connect-v2 serves the same wildcard cert
-SAMSUNG_PORT = 443
+UUID_SOURCE_HOST = 'connect.samsungiotcloud.com'  # unversioned; connect-v2 serves the same wildcard cert
+UUID_SOURCE_PORT = 443
 
 BRAYSTORM_URL = (
     'https://raw.githubusercontent.com/brayStorm/samsung-appliance-token/main/cert.pem'
@@ -86,17 +87,17 @@ BRAYSTORM_URL = (
 BUNDLE_CERT_NAMES = ['ac14k_m.pem', 'cert_2.pem', 'cert_3.pem', 'cert_4.pem']
 
 
-def fetch_samsung_uuid(timeout=10):
+def fetch_uuid(timeout=10):
     """Return (uuid, server_cert_pem) or (None, None) on failure."""
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        with socket.create_connection((SAMSUNG_HOST, SAMSUNG_PORT), timeout=timeout) as raw:
-            with ctx.wrap_socket(raw, server_hostname=SAMSUNG_HOST) as s:
+        with socket.create_connection((UUID_SOURCE_HOST, UUID_SOURCE_PORT), timeout=timeout) as raw:
+            with ctx.wrap_socket(raw, server_hostname=UUID_SOURCE_HOST) as s:
                 der = s.getpeercert(binary_form=True)
     except Exception as e:
-        print(f"[!] Could not fetch Samsung cloud cert: {e}", file=sys.stderr)
+        print(f"[!] Could not fetch the UUID source cert: {e}", file=sys.stderr)
         return None, None
 
     tmp = tempfile.NamedTemporaryFile(suffix='.der', delete=False)
@@ -552,30 +553,30 @@ def main():
     print("=" * 60)
     print("Phase 1: identify peer UUID")
     print("=" * 60)
-    samsung_pem = None
+    source_pem = None
     if uuid_override:
         uuid = uuid_override.lower()
         print(f"  Using UUID from env: {uuid}")
     else:
-        print(f"  Fetching from {SAMSUNG_HOST}:{SAMSUNG_PORT}...")
-        uuid, samsung_pem = fetch_samsung_uuid()
+        print(f"  Fetching from {UUID_SOURCE_HOST}:{UUID_SOURCE_PORT}...")
+        uuid, source_pem = fetch_uuid()
         if uuid is None:
             print(f"\n  [!] Live fetch failed.", file=sys.stderr)
             print(f"\n  Workaround:", file=sys.stderr)
             print(f"  1. From any machine with internet access, run:", file=sys.stderr)
-            print(f"       openssl s_client -connect {SAMSUNG_HOST}:{SAMSUNG_PORT} \\", file=sys.stderr)
-            print(f"                        -servername {SAMSUNG_HOST} \\", file=sys.stderr)
+            print(f"       openssl s_client -connect {UUID_SOURCE_HOST}:{UUID_SOURCE_PORT} \\", file=sys.stderr)
+            print(f"                        -servername {UUID_SOURCE_HOST} \\", file=sys.stderr)
             print(f"                        -showcerts < /dev/null 2>/dev/null \\", file=sys.stderr)
             print(f"         | openssl x509 -noout -subject", file=sys.stderr)
             print(f"  2. Find OU=uuid:<UUID> in the subject.", file=sys.stderr)
             print(f"  3. Re-run with UUID=<uuid> ...", file=sys.stderr)
             return 3
         print(f"  Extracted UUID: {uuid}")
-        if samsung_pem:
-            samsung_ref = Path(out_dir); samsung_ref.mkdir(parents=True, exist_ok=True)
-            (samsung_ref / 'samsung_cloud_leaf.pem').write_text(samsung_pem)
+        if source_pem:
+            ref_dir = Path(out_dir); ref_dir.mkdir(parents=True, exist_ok=True)
+            (ref_dir / 'uuid_source_leaf.pem').write_text(source_pem)
             print(f"  Saved server leaf cert to "
-                  f"{samsung_ref / 'samsung_cloud_leaf.pem'}")
+                  f"{ref_dir / 'uuid_source_leaf.pem'}")
 
     # Phase 2: mint. Self-signed by default; AC14K_M-signed under --fallback.
     print()
