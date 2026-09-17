@@ -128,15 +128,19 @@ python3 -m venv .venv
 14:08:42  INFO   mqtt_demo                  [1] dryer @ <dryer-ip>:49155? (DTLS, auto-discover) → topic samsung_dryer/*
 14:08:42  INFO   mqtt_demo                  [2] oven  @ <oven-ip>:49154? (DTLS, auto-discover) → topic samsung_oven/*
 14:08:42  INFO   mqtt_demo                MQTT connected → <broker-ip>:1883
-14:08:43  INFO   dryer                    discovered DTLS port 49155
-14:08:43  INFO   oven                     discovered DTLS port 49154
+14:08:43  INFO   dryer                    directory on 5683 advertises 49155
+14:08:43  INFO   oven                     directory on 5683 advertises 49154
+14:08:43  INFO   dryer                    DTLS port 49155 -- advertised by /oic/res on 5683
+14:08:43  INFO   oven                     DTLS port 49154 -- advertised by /oic/res on 5683
 14:08:43  INFO   dryer                    DTLS connected — subscribing 11 paths
 14:08:44  INFO   dryer.<dryer-serial>     identified — serial=…
 14:08:44  INFO   dryer.<dryer-serial>     seeded → 25 links; sensors live
 14:08:44  INFO   oven                     DTLS connected — subscribing 11 paths
 14:08:46  INFO   oven.<oven-serial>       identified — serial=…
-14:08:46  INFO   oven.<oven-serial>       seeded → 16 links; sensors live
+14:08:46  INFO   oven.<oven-serial>       seeded → 17 links; sensors live
 ```
+
+The line after each port names which tier chose it, because the number alone does not say whether the device answered for itself. Four are possible: `configured OCF_PORT`, `cached from an earlier connect`, `advertised by /oic/res on 5683`, and `found by sweeping the OCF band`. A swept port means the plaintext directory read got nothing out of that device, which is the detail to include in a bug report.
 
 In HA: **Settings → Devices & Services → MQTT** should show both devices populated.
 
