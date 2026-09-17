@@ -15,12 +15,11 @@ Steps:
    appliance authorizes on.
 2. Generate a fresh RSA-2048 key pair of your own.
 3. Build a CSR with the UUID in CN, OU, and SAN.
-4. Sign the leaf. By default, with a throwaway CA generated on the spot
-   (self-signed): on the appliances tested the device did not validate the
-   signer or chain, so no external CA was needed. With `--fallback`, sign
-   with the public AC14K_M intermediate instead (the pre-2026 path), for a
-   device that does validate the chain.
-5. Assemble `<uuid>.key`, `<uuid>.pem`, `<uuid>_fullchain.pem`.
+4. Sign the leaf. By default it signs itself, with no CA anywhere: on the
+   appliances tested the device did not validate the signer or chain. With
+   `--fallback`, sign with the public AC14K_M intermediate instead (the
+   pre-2026 path), for a device that does validate the chain.
+5. Assemble `client.key`, `client.pem`, `client_fullchain.pem`.
 6. With `--test`, DTLS-handshake to an appliance and GET
    `/oic/sec/acl`; a 2.05 reply confirms the cert is accepted.
 
@@ -30,9 +29,9 @@ Background:
   subject DN — anyone can read it with `openssl s_client`.
 - TizenRT iotivity locates the peer UUID via `memmem(subject, "uuid:")`,
   so the same UUID in any RDN works.
-- The default self-signed path needs no external CA. `--fallback` uses
-  the AC14K_M intermediate, which has been public for years; it is only
-  needed for a device that validates the chain.
+- The default self-signed path needs no CA at all. `--fallback` uses the
+  AC14K_M intermediate, which has been public for years; it is only needed
+  for a device that validates the chain.
 
 Fallbacks if the live fetches fail:
 
@@ -66,7 +65,6 @@ Env overrides (all optional; AC14K_M_* apply only with --fallback):
 """
 import argparse
 import os
-import secrets
 import re
 import socket
 import ssl
@@ -316,37 +314,32 @@ DNS.1 = {uuid}
 def mint_self_signed(uuid, out_dir):
     """Mint a self-signed client cert carrying the UUID. Default path.
 
+    The leaf signs itself: there is no CA anywhere, and the fullchain PEM
+    holds that one certificate.
+
     On the appliances tested, the device did not validate the client
     certificate's signer or chain; authorization was by the subject UUID,
-    matched against the on-device ACL. There, a leaf signed by a throwaway
-    CA generated here worked identically to an AC14K_M-signed one, needing
-    no AC14K_M CA -- reads + a write on both, with signer, chain, digest,
-    key, org, and vendor OIDs all cosmetic and only the UUID mattering. A
-    device that does validate the chain (see docs/ocf-pki-laundry.md) needs
-    the --fallback path, and rejects AC14K_M anyway; that is what --fallback
-    and the loud-failure-then-report flow are for.
+    matched against the on-device ACL. There, a self-signed leaf read and
+    wrote exactly what an AC14K_M-signed one did, with signer, chain,
+    digest, key, org, and vendor OIDs all cosmetic and only the UUID
+    mattering. Four appliances across four model families, two of them
+    reported on issue #96. A device that does validate the chain (see
+    docs/ocf-pki-laundry.md) needs the --fallback path, and rejects
+    AC14K_M anyway; that is what --fallback and the loud-failure-then-
+    report flow are for.
 
     Output names match mint_cert -- client.key + client_fullchain.pem --
     so both paths drop into the same README, bridge config and deploy
-    steps, plus the throwaway CA this path also writes.
+    steps.
     """
     out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
     paths = {
-        'ca_key':    out / 'selfsigned_ca.key',
-        'ca_cert':   out / 'selfsigned_ca.pem',
         'key':       out / 'client.key',
         'csr':       out / 'client.csr',
         'leaf':      out / 'client.pem',
         'fullchain': out / 'client_fullchain.pem',
         'ext':       out / 'ext.cnf',
-        'srl':       out / 'client.srl',
     }
-
-    # Throwaway CA with a random name (not AC14K_M, trusted by nothing).
-    run(['openssl', 'genrsa', '-out', str(paths['ca_key']), '2048'])
-    run(['openssl', 'req', '-x509', '-new', '-key', str(paths['ca_key']),
-         '-out', str(paths['ca_cert']), '-days', '3650', '-sha256',
-         '-subj', f'/CN=ca-{secrets.token_hex(8)}/O={secrets.token_hex(8)}'])
 
     # Subject/SAN carry only the UUID. Standard EKU, no vendor OIDs, no
     # org/country -- all verified cosmetic on hardware.
@@ -372,13 +365,11 @@ DNS.1 = {uuid}
          '-out', str(paths['csr']),
          '-subj', f'/OU=uuid:{uuid}/CN=urn:uuid:{uuid}'])
     run(['openssl', 'x509', '-req', '-in', str(paths['csr']),
-         '-CA', str(paths['ca_cert']), '-CAkey', str(paths['ca_key']),
-         '-CAcreateserial', '-CAserial', str(paths['srl']),
+         '-signkey', str(paths['key']),
          '-out', str(paths['leaf']), '-days', '3650',
          '-extfile', str(paths['ext']), '-sha256'])
 
-    paths['fullchain'].write_text(
-        paths['leaf'].read_text() + paths['ca_cert'].read_text())
+    paths['fullchain'].write_text(paths['leaf'].read_text())
     return paths
 
 

@@ -19,7 +19,7 @@ The UUID lives in `OU=uuid:<UUID>`. The server cert is currently valid through *
 
 - The compatible appliances tested carry a **factory-baked ACE** in `/oic/sec/acl` granting this UUID `perm=31` on `href=*`.
 - TizenRT iotivity derives peerId from `memmem(subject_dn, "uuid:")`, which is RDN-agnostic. A cert with the UUID in CN authenticates the same as one with it in OU.
-- The signature is not a gate on the appliances tested. A leaf signed by a throwaway CA the appliance has never seen reads the same resources as an `AC14K_M`-signed one, over both DTLS and TCP-TLS, and a leaf carrying an un-ACL'd UUID is refused `4.01` on every resource. Signer, chain, digest and key are all cosmetic there.
+- The signature is not a gate on the appliances tested. A self-signed leaf, and a leaf signed by a CA the appliance has never seen, read the same resources as an `AC14K_M`-signed one, over both DTLS and TCP-TLS, and a leaf carrying an un-ACL'd UUID is refused `4.01` on every resource. Signer, chain, digest and key are all cosmetic there.
 - No original private key comes into it either way: `setup_cert.py` mints a fresh key of your own. Different key, same identity, same access.
 
 ## One-command setup
@@ -34,7 +34,7 @@ What it does:
 1. Fetches the cloud gateway's server cert and extracts the current UUID from its subject DN.
 2. Generates a fresh RSA-2048 key pair you own.
 3. Builds a CSR with the UUID in OU + CN + SAN.
-4. Signs the leaf with a throwaway CA generated on the spot, using SHA-256, and concatenates `leaf + throwaway CA` into the fullchain PEM.
+4. Signs the leaf with its own key, using SHA-256. There is no CA, so the fullchain PEM holds the one certificate.
 5. With `--test`: opens a DTLS handshake against `$TARGET_IP:$TARGET_PORT` (default `49154`) and GETs `/oic/sec/acl`; a `2.05` reply proves the cert authenticated (anonymous peers get `4.01`).
 
 With `--fallback`, step 4 becomes the pre-2026 recipe instead: fetch the AC14K_M signing CA, private key and upstream chain (RemoteAccessCA → CECA → ROOTCA) from a public mirror, check that the cert and key actually pair (modulus match), sign the leaf with `AC14K_M` using SHA-1 as the original recipe did, and concatenate `leaf + AC14K_M + 3 upstream CAs`.

@@ -49,9 +49,11 @@ def test_mint_self_signed_default(tmp_path):
     issuer = subprocess.run(
         ["openssl", "x509", "-in", str(paths["leaf"]), "-noout", "-issuer"],
         check=True, capture_output=True, text=True).stdout
-    assert "AC14K_M" not in issuer                   # self-signed by a throwaway CA
-    # fullchain is leaf + the throwaway CA
-    assert paths["fullchain"].read_text().count("BEGIN CERTIFICATE") == 2
+    assert "AC14K_M" not in issuer
+    # The leaf signs itself, so issuer and subject are the same DN...
+    assert issuer.replace("issuer=", "") == subject.replace("subject=", "")
+    # ...and there is no CA above it to put in the fullchain.
+    assert paths["fullchain"].read_text().count("BEGIN CERTIFICATE") == 1
 
 
 def test_both_mint_paths_write_the_documented_filenames(tmp_path):
