@@ -27,6 +27,7 @@ from smartthings_local.ocf.keepalive import KeepaliveTask
 from smartthings_local.ocf.observe_refresh import ObserveRefreshTask
 from smartthings_local.ocf.poll_scheduler import PollScheduler
 from smartthings_local.ocf.state_cache import StateCache
+from smartthings_local.errors import PeerInitiatedHandshakeError
 from smartthings_local.protocol.dtls_probe import (
     AMBIGUOUS,
     probe_dtls_port,
@@ -114,6 +115,14 @@ _SOURCE_CONFIGURED = 'configured OCF_PORT'
 _SOURCE_CACHED = 'cached from an earlier connect'
 _SOURCE_ADVERTISED = f'advertised by /oic/res on {OCF_DISCOVERY_PORT}'
 _SOURCE_SWEPT = 'found by sweeping the OCF band'
+
+# Delay before retrying a handshake the appliance refused because it was
+# opening its own toward our fixed local port. Its stack drops that peer as
+# it rejects our ClientHello, so the endpoint is free immediately and the
+# next attempt succeeds; this is only long enough to keep a pathological
+# repeat from becoming a tight loop. It deliberately does not grow the
+# backoff, since nothing is wrong with the device or the network.
+_PEER_HANDSHAKE_RETRY_S = 0.5
 
 # The pre-flight liveness gate tolerates one dropped ClientHello (retries=1
 # → ~1 RTT when the device answers, ~4 s to call a silent port DEAD),
@@ -1005,9 +1014,18 @@ class PushBridge:
     def run_forever(self):
         backoff = 1.0
         while not self.stop.is_set():
+            immediate = False
             try:
                 self.session_once()
                 backoff = 1.0
+            except PeerInitiatedHandshakeError:
+                # The appliance was already handshaking toward our fixed
+                # local port, so ours was refused. Expected peer behaviour:
+                # retry at once, and leave error_count for real faults so
+                # the health topic keeps meaning what it says.
+                immediate = True
+                self.log.info(
+                    "appliance was opening its own session; retrying")
             except Exception as e:
                 self.error_count += 1
                 self.log.warning("session error: %s", e)
@@ -1020,6 +1038,10 @@ class PushBridge:
             self.session_started_ts = None
             if self.stop.is_set():
                 break
+            if immediate:
+                if self.stop.wait(_PEER_HANDSHAKE_RETRY_S):
+                    break
+                continue
             # Jitter the backoff so multiple bridges (dryer + oven) don't
             # reconnect in lockstep after a router blip — synchronized
             # storms make the broker / DTLS layer flap harder than need
