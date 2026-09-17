@@ -4,15 +4,13 @@ setup_cert.py — One-shot client cert generator for local DTLS-CoAP
 access to Tizen/RT-OCF appliances on your LAN.
 
 Builds a client cert keyed to the identity that each appliance's factory
-ACL already grants `perm=31` on `href=*`. Everything used at build time
-is fetched live from public sources; nothing is hardcoded.
+ACL already grants `perm=31` on `href=*`.
 
 Steps:
 
-1. Open a TLS connection to the host whose certificate carries the UUID,
-   read its server cert, and extract the `uuid:<UUID>` token from the subject DN. This is
-   the identity the on-device ACL grants access to, and the only field the
-   appliance authorizes on.
+1. Take the UUID the appliance authorizes on. It is the constant
+   `CLIENT_UUID` below, since it does not rotate; `UUID=<uuid>` overrides
+   it. This is the only field the appliance checks.
 2. Generate a fresh RSA-2048 key pair of your own.
 3. Build a CSR with the UUID in CN, OU, and SAN.
 4. Sign the leaf. By default it signs itself, with no CA anywhere: on the
@@ -25,32 +23,26 @@ Steps:
 
 Background:
 
-- The cloud-bridge UUID is published in that bridge's own TLS server cert
-  subject DN — anyone can read it with `openssl s_client`.
+- The UUID is a cloud service identity, published in the subject DN of a
+  public server certificate. It is pinned by the installed base: rotating
+  it would mean pushing an ACL change to every appliance in the field.
 - TizenRT iotivity locates the peer UUID via `memmem(subject, "uuid:")`,
   so the same UUID in any RDN works.
 - The default self-signed path needs no CA at all. `--fallback` uses the
   AC14K_M intermediate, which has been public for years; it is only needed
   for a device that validates the chain.
 
-Fallbacks if the live fetches fail:
-
-  # Manual UUID lookup
-  openssl s_client -connect <host-containing-uuid>:443 \\
-                   -servername <host-containing-uuid> \\
-                   -showcerts < /dev/null 2>/dev/null \\
-    | openssl x509 -noout -subject
-  UUID=<paste-uuid-here> python setup_cert.py ...
+Fallback if the --fallback bundle fetch fails:
 
   # Manual AC14K_M bundle (point at any mirror)
-  AC14K_M_CERT_BUNDLE=/path/to/cert.pem python setup_cert.py
+  AC14K_M_CERT_BUNDLE=/path/to/cert.pem python setup_cert.py --fallback
 
 Usage:
 
     python setup_cert.py                 # self-signed (default)
     python setup_cert.py --test
     python setup_cert.py --fallback      # AC14K_M-signed (pre-2026 path)
-    TARGET_IP=192.168.1.1 python setup_cert.py --test
+    TARGET_IP=192.0.2.10 python setup_cert.py --test
 
 Env overrides (all optional; AC14K_M_* apply only with --fallback):
     AC14K_M_CERT         AC14K_M cert PEM (skip live fetch)
@@ -58,7 +50,7 @@ Env overrides (all optional; AC14K_M_* apply only with --fallback):
     AC14K_M_CERT_BUNDLE  combined PEM (key + 4 certs)
     CHAIN_DIR            dir containing cert_1..4.pem
     BRAYSTORM_URL        bundle source URL
-    UUID                 supply the UUID manually
+    UUID                 override CLIENT_UUID
     OUT_DIR              output dir (default ./certs/)
     TARGET_IP            device IP for --test
     TARGET_PORT          device port for --test (default 49154)
@@ -67,7 +59,6 @@ import argparse
 import os
 import re
 import socket
-import ssl
 import subprocess
 import sys
 import tempfile
@@ -75,47 +66,13 @@ import urllib.request
 from pathlib import Path
 
 
-UUID_SOURCE_HOST = 'connect.samsungiotcloud.com'  # unversioned; connect-v2 serves the same wildcard cert
-UUID_SOURCE_PORT = 443
+CLIENT_UUID = 'ab0b0ac4-aae9-4958-a04d-8ec36fe1b2f9'
 
 BRAYSTORM_URL = (
     'https://raw.githubusercontent.com/brayStorm/samsung-appliance-token/main/cert.pem'
 )
 
 BUNDLE_CERT_NAMES = ['ac14k_m.pem', 'cert_2.pem', 'cert_3.pem', 'cert_4.pem']
-
-
-def fetch_uuid(timeout=10):
-    """Return (uuid, server_cert_pem) or (None, None) on failure."""
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        with socket.create_connection((UUID_SOURCE_HOST, UUID_SOURCE_PORT), timeout=timeout) as raw:
-            with ctx.wrap_socket(raw, server_hostname=UUID_SOURCE_HOST) as s:
-                der = s.getpeercert(binary_form=True)
-    except Exception as e:
-        print(f"[!] Could not fetch the UUID source cert: {e}", file=sys.stderr)
-        return None, None
-
-    tmp = tempfile.NamedTemporaryFile(suffix='.der', delete=False)
-    tmp.write(der); tmp.close()
-    try:
-        subj = subprocess.run(
-            ['openssl', 'x509', '-inform', 'DER', '-in', tmp.name,
-             '-noout', '-subject'],
-            capture_output=True, text=True, check=True).stdout
-        pem = subprocess.run(
-            ['openssl', 'x509', '-inform', 'DER', '-in', tmp.name],
-            capture_output=True, text=True, check=True).stdout
-    finally:
-        os.unlink(tmp.name)
-
-    m = re.search(r'uuid:([0-9a-fA-F-]{36})', subj)
-    if not m:
-        print(f"[!] No `uuid:...` in subject: {subj.strip()}", file=sys.stderr)
-        return None, pem
-    return m.group(1).lower(), pem
 
 
 def split_bundle_pem(text):
@@ -544,30 +501,12 @@ def main():
     print("=" * 60)
     print("Phase 1: identify peer UUID")
     print("=" * 60)
-    source_pem = None
     if uuid_override:
         uuid = uuid_override.lower()
         print(f"  Using UUID from env: {uuid}")
     else:
-        print(f"  Fetching from {UUID_SOURCE_HOST}:{UUID_SOURCE_PORT}...")
-        uuid, source_pem = fetch_uuid()
-        if uuid is None:
-            print(f"\n  [!] Live fetch failed.", file=sys.stderr)
-            print(f"\n  Workaround:", file=sys.stderr)
-            print(f"  1. From any machine with internet access, run:", file=sys.stderr)
-            print(f"       openssl s_client -connect {UUID_SOURCE_HOST}:{UUID_SOURCE_PORT} \\", file=sys.stderr)
-            print(f"                        -servername {UUID_SOURCE_HOST} \\", file=sys.stderr)
-            print(f"                        -showcerts < /dev/null 2>/dev/null \\", file=sys.stderr)
-            print(f"         | openssl x509 -noout -subject", file=sys.stderr)
-            print(f"  2. Find OU=uuid:<UUID> in the subject.", file=sys.stderr)
-            print(f"  3. Re-run with UUID=<uuid> ...", file=sys.stderr)
-            return 3
-        print(f"  Extracted UUID: {uuid}")
-        if source_pem:
-            ref_dir = Path(out_dir); ref_dir.mkdir(parents=True, exist_ok=True)
-            (ref_dir / 'uuid_source_leaf.pem').write_text(source_pem)
-            print(f"  Saved server leaf cert to "
-                  f"{ref_dir / 'uuid_source_leaf.pem'}")
+        uuid = CLIENT_UUID
+        print(f"  Using UUID: {uuid}")
 
     # Phase 2: mint. Self-signed by default; AC14K_M-signed under --fallback.
     print()

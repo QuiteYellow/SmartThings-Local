@@ -4,16 +4,7 @@ How to obtain the client certificate a compatible appliance accepts, why it work
 
 For a compatible firmware family, the bridge authenticates with a **client cert** whose Subject DN carries a UUID that those appliances' on-device ACLs grant full access to. The UUID is what authorizes; on the appliances tested, the signer and chain are not checked, so `setup_cert.py` self-signs the cert by default. `--fallback` signs it with `AC14K_M` instead, an intermediate CA that has been public for years, for a device that does validate the chain.
 
-You can read the UUID yourself out of the cloud gateway's server cert:
-
-```sh
-openssl s_client -connect <host-containing-uuid>:443 \
-                 -servername <host-containing-uuid> \
-                 -showcerts < /dev/null 2>/dev/null \
-  | openssl x509 -noout -subject
-```
-
-The UUID lives in `OU=uuid:<UUID>`. The server cert is currently valid through **2035-04-09**.
+`setup_cert.py` carries that UUID as the constant `CLIENT_UUID`. It is a cloud service identity, published in the subject DN of a public server certificate as `OU=uuid:<UUID>`, and it is pinned by the installed base: rotating it would mean pushing an ACL change to every appliance in the field. Two certificates issued years apart, under different sub-CA generations, were observed carrying the same value. Set `UUID=<uuid>` to override the constant.
 
 ## Why this works
 
@@ -31,7 +22,7 @@ TARGET_IP=$APPLIANCE_IP python setup_cert.py --test
 
 What it does:
 
-1. Fetches the cloud gateway's server cert and extracts the current UUID from its subject DN.
+1. Takes the UUID from `CLIENT_UUID` (or from `UUID=<uuid>` in the environment).
 2. Generates a fresh RSA-2048 key pair you own.
 3. Builds a CSR with the UUID in OU + CN + SAN.
 4. Signs the leaf with its own key, using SHA-256. There is no CA, so the fullchain PEM holds the one certificate.
@@ -41,7 +32,7 @@ With `--fallback`, step 4 becomes the pre-2026 recipe instead: fetch the AC14K_M
 
 Output in `./certs/`: `client_fullchain.pem` + `client.key`.
 
-Neither the UUID nor the AC14K_M bundle is hardcoded in this repo. The UUID is fetched live each run, and the bundle whenever `--fallback` calls for it. If either fetch fails, the script prints an inline workaround: supply the UUID via `UUID=<uuid>` env, or supply the AC14K_M bundle via `AC14K_M_CERT_BUNDLE=/path/to/cert.pem`. `BRAYSTORM_URL=<mirror>` points at a different bundle source.
+The AC14K_M bundle is not in this repo. `--fallback` fetches it from a public mirror each run, and if that fetch fails the script prints the workaround: supply the bundle via `AC14K_M_CERT_BUNDLE=/path/to/cert.pem`, or point at another mirror with `BRAYSTORM_URL=<mirror>`.
 
 On Fedora/RHEL (and other hardened OpenSSL 3.x builds) the default crypto policy blocks SHA-1 signing, which `--fallback` needs. (The default path signs with SHA-256 and is unaffected.) The script detects this, retries the signing step once with SHA-1 force-enabled for just that command, and only fails if the retry also fails. If it does, it prints the remedy: `sudo update-crypto-policies --set DEFAULT:SHA1` (undo afterward with `sudo update-crypto-policies --set DEFAULT`).
 
