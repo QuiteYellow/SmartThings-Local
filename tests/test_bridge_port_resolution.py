@@ -21,6 +21,33 @@ def _mk_bridge(ocf_port, default=49155, discovered=None):
     return b
 
 
+def _fake_directory(ports, *, error=None):
+    """Return a plaintext-directory stand-in advertising ``ports``."""
+    def fake(ip, **kw):
+        if error is not None:
+            raise error
+        return types.SimpleNamespace(
+            ports=tuple(ports),
+            found=bool(ports),
+            attempts=1,
+            response_received=bool(ports),
+            error_code=None if ports else 'no_secure_ports',
+        )
+    return fake
+
+
+@pytest.fixture(autouse=True)
+def silent_directory(monkeypatch):
+    """Default every test to a device that advertises nothing.
+
+    Without this the directory tier would read a real socket. Tests about
+    the band sweep keep their original meaning, and the ones about the
+    directory override it explicitly.
+    """
+    monkeypatch.setattr(
+        bridge, 'discover_ocf_secure_ports', _fake_directory(()))
+
+
 def _fake_port_probe(live_ports):
     """Return a one-port probe stand-in for the selected live ports."""
     def fake(ip, port, **kw):
@@ -114,3 +141,100 @@ def test_candidate_ports_cover_band_plus_default(monkeypatch):
     assert bridge.OCF_STANDARD_SECURE_PORT in cands
     assert 49200 in cands
     assert cands == sorted(cands)
+
+
+def test_an_advertised_port_is_probed_before_the_band(monkeypatch):
+    # The device names 49155 and it answers, so the band is never swept.
+    # This is the one exchange that gets the port right on a device whose
+    # DTLS port sits outside the band entirely.
+    swept = []
+
+    def fake_set(ip, ports, **kw):
+        swept.append(tuple(ports))
+        return types.SimpleNamespace(outcome='selected', selected_port=ports[0])
+
+    monkeypatch.setattr(
+        bridge, 'discover_ocf_secure_ports', _fake_directory((51163,)))
+    monkeypatch.setattr(bridge, 'probe_dtls_ports', fake_set)
+    b = _mk_bridge(ocf_port=None, default=49155)
+
+    assert b._resolve_port() == 51163
+    assert swept == [(51163,)]
+    assert b._discovered_port == 51163
+
+
+def test_an_advertised_port_that_does_not_answer_falls_back_to_the_band(
+        monkeypatch):
+    # A directory serialised before the DTLS bind, or after the port moved,
+    # advertises a port nothing is listening on. The probe is what decides,
+    # so the band still runs.
+    monkeypatch.setattr(
+        bridge, 'discover_ocf_secure_ports', _fake_directory((49999,)))
+    monkeypatch.setattr(bridge, 'probe_dtls_ports', _fake_port_set({49154}))
+    b = _mk_bridge(ocf_port=None, default=49155)
+
+    assert b._resolve_port() == 49154
+    assert b._discovered_port == 49154
+
+
+def test_a_failed_directory_read_falls_back_to_the_band(monkeypatch):
+    monkeypatch.setattr(
+        bridge,
+        'discover_ocf_secure_ports',
+        _fake_directory((), error=OSError('no route')),
+    )
+    monkeypatch.setattr(bridge, 'probe_dtls_ports', _fake_port_set({49154}))
+    b = _mk_bridge(ocf_port=None, default=49155)
+
+    assert b._resolve_port() == 49154
+
+
+def test_a_pinned_port_never_reads_the_directory(monkeypatch):
+    # A pinned OCF_PORT is gated but never overridden, so there is nothing
+    # for an advertisement to contribute.
+    read = []
+
+    def fake_directory(ip, **kw):
+        read.append(ip)
+        return types.SimpleNamespace(ports=(49999,), found=True)
+
+    monkeypatch.setattr(
+        bridge, 'discover_ocf_secure_ports', fake_directory)
+    monkeypatch.setattr(bridge, 'probe_dtls_port', _fake_port_probe({49155}))
+    b = _mk_bridge(ocf_port=49155)
+
+    assert b._resolve_port() == 49155
+    assert read == []
+
+
+def test_a_cached_port_never_reads_the_directory(monkeypatch):
+    read = []
+
+    def fake_directory(ip, **kw):
+        read.append(ip)
+        return types.SimpleNamespace(ports=(49999,), found=True)
+
+    monkeypatch.setattr(
+        bridge, 'discover_ocf_secure_ports', fake_directory)
+    monkeypatch.setattr(bridge, 'probe_dtls_port', _fake_port_probe({49156}))
+    b = _mk_bridge(ocf_port=None, default=49155, discovered=49156)
+
+    assert b._resolve_port() == 49156
+    assert read == []
+
+
+def test_ambiguity_in_the_directory_tier_still_demands_a_pinned_port(
+        monkeypatch):
+    # Two advertised ports that both answer are as ambiguous as two swept
+    # ones: nothing here can choose between them, so say so.
+    monkeypatch.setattr(
+        bridge,
+        'discover_ocf_secure_ports',
+        _fake_directory((49154, 49155)),
+    )
+    monkeypatch.setattr(
+        bridge, 'probe_dtls_ports', _fake_port_set({49154, 49155}))
+    b = _mk_bridge(ocf_port=None, default=49155)
+
+    with pytest.raises(ConnectionError, match='multiple DTLS listeners'):
+        b._resolve_port()
