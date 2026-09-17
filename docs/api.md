@@ -236,7 +236,7 @@ DTLS ClientHello probe — a cheap, deterministic liveness + diagnostic primitiv
 #### `DtlsLivenessResult`
 
 ```python
-DtlsLivenessResult(port: int, response_kind: str | None, attempts: int, rtt_s: float | None = None, alert: tuple[int, str] | None = None, error_code: str | None = None)
+DtlsLivenessResult(port: int, response_kind: str | None, attempts: int, rtt_s: float | None = None, alert: tuple[int, str] | None = None, error_code: str | None = None, responder_port: int | None = None)
 ```
 
 *class*: Bounded, non-sensitive result for one stateless port probe.
