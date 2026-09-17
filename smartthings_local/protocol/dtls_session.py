@@ -44,6 +44,7 @@ from ..errors import (
     EndpointError,
     HandshakePeerCleanupError,
     MalformedMessageError,
+    PeerInitiatedHandshakeError,
     SessionClosedError,
     SessionError,
     SessionIdentifierError,
@@ -440,6 +441,41 @@ class ConnectCancellation:
         return interrupted
 
 
+# A DTLS client never legitimately receives a ClientHello. An OCF server with
+# a message for an endpoint it holds no session for opens one itself
+# (IoTivity classic ca_adapter_net_ssl.c:1520 CAencryptSsl ->
+# InitiateTlsHandshake), and because its peer table is keyed on address and
+# port with no role (GetSslPeer), our own ClientHello is then stepped into
+# that client-role context and rejected. Its failure path skips the alert for
+# MBEDTLS_ERR_SSL_BAD_HS_CLIENT_HELLO and removes the peer, so the server goes
+# silent and the next handshake wins. Detect the collision so the caller can
+# retry at once instead of reading it as a session fault.
+_CONTENT_TYPE_HANDSHAKE = 22
+_HANDSHAKE_CLIENT_HELLO = 1
+_DTLS_RECORD_HEADER_LEN = 13
+
+
+def _carries_peer_client_hello(datagram):
+    """Return whether a datagram holds an unencrypted ClientHello record.
+
+    Only epoch 0 is inspected: a later epoch is encrypted, so its handshake
+    type cannot be read and a peer-initiated first flight never appears there.
+    """
+    offset = 0
+    while offset + _DTLS_RECORD_HEADER_LEN <= len(datagram):
+        length = int.from_bytes(datagram[offset + 11:offset + 13], 'big')
+        end = offset + _DTLS_RECORD_HEADER_LEN + length
+        if end > len(datagram):
+            return False
+        fragment = datagram[offset + _DTLS_RECORD_HEADER_LEN:end]
+        if (datagram[offset] == _CONTENT_TYPE_HANDSHAKE
+                and datagram[offset + 3:offset + 5] == b'\x00\x00'
+                and fragment[:1] == bytes([_HANDSHAKE_CLIENT_HELLO])):
+            return True
+        offset = end
+    return False
+
+
 class DtlsCoapSession:
     """Single sustained DTLS-CoAP session.
 
@@ -736,6 +772,16 @@ class DtlsCoapSession:
         cleanup_transcript = (
             _HvrPeerCleanupTranscript() if cleanup_hvr_peer else None
         )
+        peer_client_hello = False
+        peer_initiated = False
+
+        def note_received(datagram):
+            nonlocal peer_client_hello
+            if not peer_client_hello and _carries_peer_client_hello(datagram):
+                peer_client_hello = True
+            if cleanup_transcript is not None:
+                cleanup_transcript.record_received(datagram)
+
         try:
             try:
                 completed = _drive_dtls_handshake(
@@ -747,11 +793,7 @@ class DtlsCoapSession:
                         if wake_subscription is not None
                         else None
                     ),
-                    on_datagram=(
-                        cleanup_transcript.record_received
-                        if cleanup_transcript is not None
-                        else None
-                    ),
+                    on_datagram=note_received,
                     on_record_sent=(
                         cleanup_transcript.record_sent
                         if cleanup_transcript is not None
@@ -762,10 +804,21 @@ class DtlsCoapSession:
                 cancelled = True
             except SSL.Error as e:
                 backend_failed = True
-                # The alert is the whole diagnosis and the raised error
-                # is redacted by contract, so record it here or lose it.
-                logger.warning("dtls handshake failed at the TLS layer: %s",
-                               _openssl_error_reasons(e))
+                if peer_client_hello:
+                    # Expected peer behaviour, not a fault: the server was
+                    # mid-handshake toward this endpoint. Reported at info so
+                    # a retry does not read as an error in the caller's log.
+                    peer_initiated = True
+                    logger.info(
+                        "dtls handshake refused: the peer was already "
+                        "handshaking toward this endpoint (%s)",
+                        _openssl_error_reasons(e))
+                else:
+                    # The alert is the whole diagnosis and the raised error
+                    # is redacted by contract, so record it here or lose it.
+                    logger.warning(
+                        "dtls handshake failed at the TLS layer: %s",
+                        _openssl_error_reasons(e))
             except OSError:
                 io_failed = True
         finally:
@@ -782,6 +835,9 @@ class DtlsCoapSession:
             raise SessionClosedError()
         if backend_failed:
             sock.close()
+            if peer_initiated:
+                raise PeerInitiatedHandshakeError() from ConnectionError(
+                    'peer initiated a concurrent handshake')
             raise SessionError() from ConnectionError('DTLS backend failed')
         if io_failed:
             sock.close()

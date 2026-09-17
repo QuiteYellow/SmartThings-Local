@@ -88,6 +88,10 @@ Public, redacted exception types for smartthings-local.
 
 *exception*: A CoAP Observe relation could not be established or maintained.
 
+#### `PeerInitiatedHandshakeError`
+
+*exception*: The peer was already handshaking toward this endpoint, so ours failed.
+
 #### `ProbeError`
 
 *exception*: A DTLS probe failed before producing a protocol result.

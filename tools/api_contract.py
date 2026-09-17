@@ -20,6 +20,7 @@ SUPPORTED_DOWNSTREAM_IMPORTS = {
         "HandshakePeerCleanupError",
         "MalformedMessageError",
         "ObserveError",
+        "PeerInitiatedHandshakeError",
         "ProbeError",
         "SessionClosedError",
         "SessionError",
