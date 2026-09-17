@@ -238,3 +238,43 @@ def test_ambiguity_in_the_directory_tier_still_demands_a_pinned_port(
 
     with pytest.raises(ConnectionError, match='multiple DTLS listeners'):
         b._resolve_port()
+
+
+def test_every_resolution_path_logs_which_tier_chose_the_port(
+        monkeypatch, caplog):
+    # The port number alone does not say whether the directory tier worked,
+    # which is the part a bug report turns on.
+    monkeypatch.setattr(bridge, 'probe_dtls_port', _fake_port_probe({49155}))
+    monkeypatch.setattr(bridge, 'probe_dtls_ports', _fake_port_set({49155}))
+
+    with caplog.at_level(logging.INFO):
+        _mk_bridge(ocf_port=49155)._resolve_port()
+        assert bridge._SOURCE_CONFIGURED in caplog.text
+
+        caplog.clear()
+        _mk_bridge(ocf_port=None, discovered=49155)._resolve_port()
+        assert bridge._SOURCE_CACHED in caplog.text
+
+        caplog.clear()
+        monkeypatch.setattr(
+            bridge, 'discover_ocf_secure_ports', _fake_directory((49155,)))
+        _mk_bridge(ocf_port=None)._resolve_port()
+        assert bridge._SOURCE_ADVERTISED in caplog.text
+        assert str(bridge.OCF_DISCOVERY_PORT) in caplog.text
+
+        caplog.clear()
+        monkeypatch.setattr(
+            bridge, 'discover_ocf_secure_ports', _fake_directory(()))
+        _mk_bridge(ocf_port=None)._resolve_port()
+        assert bridge._SOURCE_SWEPT in caplog.text
+        assert 'advertised no secure port' in caplog.text
+
+
+def test_a_pinned_port_is_never_written_to_the_discovery_cache(monkeypatch):
+    # _discovered_port means "a port discovery proved". A pinned port is
+    # re-read from config every connect and never consulted from the cache.
+    monkeypatch.setattr(bridge, 'probe_dtls_port', _fake_port_probe({49155}))
+    b = _mk_bridge(ocf_port=49155)
+
+    assert b._resolve_port() == 49155
+    assert b._discovered_port is None

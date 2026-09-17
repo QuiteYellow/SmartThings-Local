@@ -106,6 +106,15 @@ OCF_DISCOVERY_PORT = 5683
 _DIRECTORY_TIMEOUT_S = 3.0
 _DIRECTORY_RETRIES = 1
 
+# Which tier produced the port in use. Four paths can pick it, and they carry
+# very different diagnostic weight: a swept port means the directory tier got
+# nothing out of this device, which is the reading a bug report needs and the
+# port number alone does not carry.
+_SOURCE_CONFIGURED = 'configured OCF_PORT'
+_SOURCE_CACHED = 'cached from an earlier connect'
+_SOURCE_ADVERTISED = f'advertised by /oic/res on {OCF_DISCOVERY_PORT}'
+_SOURCE_SWEPT = 'found by sweeping the OCF band'
+
 # The pre-flight liveness gate tolerates one dropped ClientHello (retries=1
 # → ~1 RTT when the device answers, ~4 s to call a silent port DEAD),
 # which is far cheaper than eating the 12 s HANDSHAKE_TIMEOUT_S on a
@@ -363,12 +372,21 @@ class PushBridge:
                 retries=_DIRECTORY_RETRIES,
             )
         except OSError as exc:
-            self.log.debug("directory read failed: %s", exc)
+            self.log.info(
+                "no directory read from %d: %s", OCF_DISCOVERY_PORT, exc)
             return []
         if not result.found:
-            self.log.debug(
-                "directory advertised no secure port (%s)", result)
+            # The redacted repr carries the error code and attempt count,
+            # which is what separates a silent plaintext port from a device
+            # that answered and advertised nothing usable.
+            self.log.info(
+                "directory on %d advertised no secure port -- %s",
+                OCF_DISCOVERY_PORT, result)
             return []
+        self.log.info(
+            "directory on %d advertises %s",
+            OCF_DISCOVERY_PORT,
+            ', '.join(str(port) for port in result.ports))
         return list(result.ports)
 
     def _candidate_ports(self) -> list[int]:
@@ -410,7 +428,7 @@ class PushBridge:
             )
             if not r.is_dtls_server:
                 raise ConnectionError('configured port is not a DTLS server')
-            return pinned
+            return self._accept_port(pinned, _SOURCE_CONFIGURED, cache=False)
 
         # A previously discovered port is almost certainly still the one —
         # try it alone first and only fall back to the full candidate set if
@@ -423,14 +441,21 @@ class PushBridge:
                 timeout=_GATE_TIMEOUT_S,
             )
             if r.is_dtls_server:
-                return self._discovered_port
+                return self._accept_port(
+                    self._discovered_port, _SOURCE_CACHED)
+            self.log.info(
+                "cached DTLS port %d has gone silent -- rediscovering",
+                self._discovered_port)
             self._discovered_port = None
 
         # Ask, then sweep. An advertised port is proven by the same probe
         # as a guessed one, so a device that lies or has moved on since it
         # serialised its directory still falls through to the band.
-        advertised = self._advertised_ports()
-        for candidates in (advertised, self._candidate_ports()):
+        tiers = (
+            (self._advertised_ports(), _SOURCE_ADVERTISED),
+            (self._candidate_ports(), _SOURCE_SWEPT),
+        )
+        for candidates, source in tiers:
             if not candidates:
                 continue
             selection = self._probe_candidates(candidates)
@@ -438,15 +463,21 @@ class PushBridge:
                 raise ConnectionError(
                     'multiple DTLS listeners answered; configure OCF_PORT')
             if selection.selected_port is None:
+                self.log.info("no DTLS server among ports %s", source)
                 continue
-            self.log.info(
-                "discovered DTLS port %d (%s)",
-                selection.selected_port,
-                'advertised' if candidates is advertised else 'probed',
-            )
-            self._discovered_port = selection.selected_port
-            return selection.selected_port
+            return self._accept_port(selection.selected_port, source)
         raise ConnectionError('no live DTLS server found')
+
+    def _accept_port(self, port: int, source: str, *, cache=True) -> int:
+        """Report which tier produced a proven port, and cache what was
+        discovered. A pinned port is not cached: it is re-read from config
+        on every connect and the cache is only ever consulted when no port
+        is pinned, so storing it would leave _discovered_port meaning two
+        different things."""
+        self.log.info("DTLS port %d -- %s", port, source)
+        if cache:
+            self._discovered_port = port
+        return port
 
     def session_once(self):
         port = self._resolve_port()
