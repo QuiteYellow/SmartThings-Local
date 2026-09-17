@@ -6,8 +6,33 @@ services:
     container_name: smartthings-local
     restart: unless-stopped
 
-    # Bridge is outbound-only (DTLS UDP to each appliance, MQTT to the
-    # broker on 1883). No ports to expose.
+    # Host networking, and it carries weight here beyond tidiness.
+    # Docker's bridge NAT keys its conntrack entry on the port dialled, so
+    # a reply arriving from any other port reads as an unrelated new
+    # inbound flow. Reverse-NAT needs a conntrack entry to match, so the
+    # kernel drops that reply at the bridge. That silently rules out the
+    # plain-CoAP discovery path on 5683, which is how standard-port
+    # firmware and non-Samsung OCF devices are reached. Symmetric traffic
+    # (DTLS to an already-known port) traverses bridge NAT fine, which is
+    # why this ran bridged for so long with the gap staying hidden.
+    #
+    # Host mode was tried once before the probe was ready, on 2026-09-17,
+    # and broke discovery: an OCF stack binds its DTLS socket to port 0
+    # and answers a first flight from that port whatever port was dialled
+    # (RT-OCF messaging/transport/rt_udp.c:152,158,164; iotivity-lite
+    # keeps the same split at port/linux/ipadapter.c:1472 vs :1491), and
+    # the probe's socket filters inbound on host only. These appliances
+    # bind the standard CoAPS port 5684 as well as their ephemeral DTLS
+    # port, and both answer from the ephemeral one, so the probe saw 5684
+    # and 49155 as two separate listeners: "multiple DTLS listeners
+    # answered", then a confident but wrong "discovered DTLS port 5684".
+    # Bridge NAT had been discarding those mismatched replies and standing
+    # in for a correctness check the probe did not have. probe_dtls_ports
+    # now selects on the port a reply came *from*, so host mode is safe.
+    #
+    # No ports are published: the bridge opens every connection itself
+    # (DTLS UDP per appliance, MQTT to the broker on 1883).
+    network_mode: host
 
     volumes:
       # Holds the client cert + key. SMARTTHINGS_LOCAL_APPDATA_DIR comes
