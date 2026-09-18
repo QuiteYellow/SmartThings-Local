@@ -44,8 +44,9 @@ The practical rules are:
   host string;
 - rediscover the secure endpoint before authentication when the appliance has
   slept or restarted; and
-- prove a listener with a DTLS ClientHello instead of treating an Nmap
-  `open|filtered` result as protocol evidence.
+- prove a server with a DTLS ClientHello instead of treating an Nmap
+  `open|filtered` result as protocol evidence, and read the endpoint off the
+  reply's source port.
 
 The production liveness probe must stop after the first
 HelloVerifyRequest/ServerHello/Alert. It never returns the cookie to the
