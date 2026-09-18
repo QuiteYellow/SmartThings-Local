@@ -1,8 +1,8 @@
 """Periodic OBSERVE re-subscribe.
 
 CoAP OBSERVE (RFC 7641) has no built-in TTL, but real-world peers age
-out observer state on their own schedule — Samsung's RT-OCF is known
-to silently drop notify delivery during cloud auth blips even though
+out observer state on their own schedule — Samsung appliance firmware is
+known to silently drop notify delivery during cloud auth blips even though
 the DTLS session stays healthy. Without a re-subscribe, recovery from
 such a blip requires a full session reconnect.
 

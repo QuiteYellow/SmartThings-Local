@@ -10,8 +10,8 @@ Adaptive cadence: when descriptor.is_active(cache.links) returns True
 and tier.active_interval_s is set, that tier uses the tighter cadence.
 If the previous health window saw `active_throttle_threshold` timeouts,
 the throttle drops back to idle cadence even when active=True — the
-RT-OCF stack wedges under load and stacking poll attempts only makes
-it worse.
+appliance firmware wedges under load and stacking poll attempts only
+makes it worse.
 
 Per-tier timeouts: tier.timeout_s overrides the scheduler default. Hot
 tiers want a tight ceiling (e.g. 2s) so one wedged path can't eat
@@ -168,7 +168,7 @@ class PollScheduler:
                 self.log.info("active=%s", active)
             self._last_active = active
         # Active-window throttle: if the previous health window saw a
-        # cluster of timeouts (RT-OCF wedging under load), drop back to
+        # cluster of timeouts (the appliance wedging under load), drop back to
         # idle cadence even when is_active=True. Lets the device breathe
         # instead of stacking poll attempts on a stalled responder.
         with self._stats_lock:

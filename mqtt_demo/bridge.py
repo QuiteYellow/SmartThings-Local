@@ -62,7 +62,7 @@ SERIAL_FIELD = 'x.com.samsung.da.serialNum'
 UNREACHABLE_RECONNECT_S = 120.0
 
 # Periodic OBSERVE re-subscribe interval. Safety net for the case where
-# the device stays reachable on the DTLS layer but Samsung's RT-OCF
+# the device stays reachable on the DTLS layer but the appliance
 # clears its observer table (e.g. during cloud auth blips). Without
 # this, push delivery stays dead even after upstream connectivity
 # recovers, since nothing triggers a fresh subscribe on the existing
@@ -84,7 +84,7 @@ CMD_SYNC_CLOCK = 'cmd/sync_clock'
 # orphan otherwise lingers 5-15 min.
 DTLS_LOCAL_PORT_BASE = 49700
 
-# Samsung's RT-OCF appliances commonly bind CoAP-DTLS in this dynamic band,
+# Samsung appliances are commonly found with CoAP-DTLS in this dynamic band,
 # while full-Tizen OCF-PKI appliances also use the standard secure CoAP port.
 # When OCF_PORT is unset, probe both profiles instead of assuming one fleet-
 # wide port layout.

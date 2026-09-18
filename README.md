@@ -232,7 +232,7 @@ duplicate from its dedupe cache. Retrying from the caller cannot do that — a s
 `post()` mints a fresh Message ID, which is a new request. It defaults to `1`
 (send once) because retransmitting into an appliance that is already dropping
 under load turns one lost write into several, and §4.5 dedupe is unverified on
-RT-OCF.
+these appliances.
 
 Note that `post()`'s `timeout` bounds the whole call, rate-limit pacing
 included, rather than only the wait that follows the send. Every attempt has to
@@ -739,15 +739,15 @@ These each looked like obvious improvements at some point. Each one broke someth
 
 - **Don't add OBSERVE subscriptions on OCF-standard `/<x>/0` paths.** They register successfully but never push. Use the Samsung `/<x>/vs/0` siblings (which do).
 - **Don't assume OBSERVE silence means the appliance is broken.** With no route to Samsung's cloud, OBSERVE dispatch goes quiet while the local DTLS session, GETs, POSTs and cache keep working. Measured firewalled: `~14 req/s` dryer, `~8 req/s` oven, 200/200 GETs. The polling tiers are the structural answer to this; treat OBSERVE strictly as an optional accelerator.
-- **Don't touch `/oic/sec/*` (doxm, pstat, cred, acl).** The bridge doesn't, and you shouldn't from helper scripts either. Those resources have wedge/brick risk on Samsung's RT-OCF security stack. The bridge surfaces are strictly `/<x>/vs/0` and `/device/0`.
-- **Don't run two clients against the same appliance simultaneously.** Samsung's RT-OCF DTLS allows one active session per peer; a second handshake will get the device to drop the new socket. If HA seems to flap, check whether you've got `python -m mqtt_demo` running locally AND the Docker container up.
+- **Don't touch `/oic/sec/*` (doxm, pstat, cred, acl).** The bridge doesn't, and you shouldn't from helper scripts either. Those resources have wedge/brick risk on the appliance's security stack. The bridge surfaces are strictly `/<x>/vs/0` and `/device/0`.
+- **Don't run two clients against the same appliance simultaneously.** Samsung appliance DTLS allows one active session per peer; a second handshake will get the device to drop the new socket. If HA seems to flap, check whether you've got `python -m mqtt_demo` running locally AND the Docker container up.
 - **Expect gaps in write coverage, but few are hard limits.** The local DTLS surface appears to expose every write Samsung's own app uses, so a control that isn't wired yet usually just hasn't been mapped: the ceiling is per-surface reverse-engineering, meaning the resource, field and encoding. Oven cavity remote-start is the open example. Samsung's cloud does it; locally the write is accepted (`2.04`) and the cavity never engages, which is a problem I haven't cracked rather than a dead end. The real limits are the few surfaces gated in hardware or firmware (power, child lock, remote-control enable), which accept a write and snap back to the physical switch. The SmartThings app cannot flip those remotely either, since Remote Control is a button on the appliance.
 
 ---
 
 ## Known DTLS flakiness
 
-Samsung's RT-OCF DTLS stack occasionally closes sessions actively, usually right after a Block2 GET or in the seconds after a POST. The bridge handles this with exponential reconnect (1s → 30s) and a re-seed on each new session. From HA's perspective the entity briefly goes offline then comes back; from the bridge's perspective you'll see lines like:
+The appliance's DTLS stack occasionally closes sessions actively, usually right after a Block2 GET or in the seconds after a POST. The bridge handles this with exponential reconnect (1s → 30s) and a re-seed on each new session. From HA's perspective the entity briefly goes offline then comes back; from the bridge's perspective you'll see lines like:
 
 ```
 oven.…  DTLS recv: Unexpected EOF

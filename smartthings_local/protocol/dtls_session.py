@@ -1,4 +1,4 @@
-"""CoAP-over-DTLS client for Samsung RT-OCF appliances (RFC 7252 + 6347).
+"""CoAP-over-DTLS client for Samsung appliances (RFC 7252 + 6347).
 
 Replaces the TLS-over-TCP transport used in the original dryer bridge.
 Both the oven (UDP/49154) and the dryer (UDP/49155) speak CoAP-over-DTLS
@@ -7,7 +7,7 @@ with the ECDHE-ECDSA-AES128-GCM-SHA256 cipher and a client cert.
 Wire-level details that matter (from local-tools/oven-findings.md §17):
   * DTLS ciphertext MTU must be 1200; otherwise OpenSSL fragments the
     client cert across two datagrams and TizenRT drops the second.
-  * Samsung's RT-OCF uses ACK+separate-CON for the larger responses.
+  * The appliance firmware uses ACK+separate-CON for the larger responses.
     The reader MUST correlate by (token, mid) — not arrival order —
     or interleaved one-shot / OBSERVE traffic mis-attributes.
   * Multi-block GET requires the SAME CoAP token across every block
@@ -123,7 +123,7 @@ _MAX_BLOCK1_REQUESTS = 1024
 # Base per-attempt wait for a write retransmission, doubled per attempt
 # (RFC 7252 §4.2). Retransmission itself is off by default: a device that
 # is already dropping under load turns one lost write into several, and
-# MID dedupe (§4.5) is unverified on RT-OCF, which does not reliably emit
+# MID dedupe (§4.5) is unverified here, and the appliances do not reliably emit
 # RST either. Enable per session via write_max_attempts once pacing has
 # been shown insufficient on real hardware (LocalThings#384).
 _WRITE_ACK_TIMEOUT = 2.0
@@ -134,7 +134,7 @@ _WRITE_ACK_TIMEOUT = 2.0
 _BLOCK_LIVENESS_POLL_S = 0.25
 
 # Inter-request pacing: minimum seconds between CoAP CON sends on one session.
-# Samsung's RT-OCF stacks drop requests when hit faster than their firmware
+# Samsung appliances drop requests when hit faster than their firmware
 # ceiling (dryer ~14 req/s, oven ~8 req/s, dishwasher unknown). 5 req/s
 # (200 ms) is conservative enough for all tested devices; tune per device
 # once the ceiling is measured empirically.
@@ -522,7 +522,7 @@ class DtlsCoapSession:
         # a restart re-handshake over the SAME 5-tuple, which RFC 6347
         # §4.2.8 requires the server to treat as a rebooted peer: complete
         # the new handshake and discard the old association. Verified
-        # accepted by RT-OCF (oven, 2026-07-26).
+        # accepted on the oven, 2026-07-26.
         self.local_port = local_port
         self.family = family
 
@@ -559,8 +559,8 @@ class DtlsCoapSession:
         # registration response while refresh, unsubscribe, or close runs.
         self._observe_operation_lock = threading.RLock()
         # Randomize MID and token counter starting points so reconnects
-        # don't reuse identifiers from previous sessions — Samsung's
-        # RT-OCF appears to remember observer state across DTLS
+        # don't reuse identifiers from previous sessions — the
+        # appliance appears to remember observer state across DTLS
         # sessions, and re-registering with a token it still thinks is
         # active is silently no-ops.
         self._mid = int.from_bytes(os.urandom(2), 'big')
@@ -934,7 +934,7 @@ class DtlsCoapSession:
 
     def close(self):
         """Tear down session. Sends best-effort OBSERVE deregisters
-        first so Samsung's RT-OCF cleans up its observer table —
+        first so the appliance cleans up its observer table —
         without this, the per-cert observer state survives DTLS close
         and a quick reconnect with the same tokens silently no-ops."""
         with self._observe_operation_lock:
@@ -1318,7 +1318,7 @@ class DtlsCoapSession:
                 logger.warning("ACK send: %s", e)
 
         # Empty ACK with no options & no payload = "separate response
-        # coming" — used by Samsung's RT-OCF for the larger reads. Stop
+        # coming" — used by the appliance firmware for the larger reads. Stop
         # the retransmit timer on the client side and wait for the CON.
         if classification.kind == RESPONSE_EMPTY_ACK:
             with self._state_lock:
@@ -1670,7 +1670,7 @@ class DtlsCoapSession:
         Mints one fresh 4-byte token and holds it across every block of
         the transfer. Also the notification-refetch primitive: RFC 7959
         §3.4 forbids continuing a blockwise notification on the
-        observation's token, and Samsung's RT-OCF drops a transfer that
+        observation's token, and the appliance firmware drops a transfer that
         opens at NUM>0 under a token it has not seen, so a truncated
         notification is recovered by re-reading from block 0 through
         this same path rather than by a §2.6 continuation.
@@ -2257,7 +2257,7 @@ class DtlsCoapSession:
     def ping(self):
         """RFC 7252 §4.4 CoAP Ping — empty CON, no token, no payload.
         Fire-and-forget: we do not wait for the matching RST because
-        Samsung's RT-OCF doesn't reliably emit one (verified
+        the appliance firmware doesn't reliably emit one (verified
         2026-06-04: every sync ping timed out while polls succeeded
         at 200+/window). The send itself is the keepalive — it
         tickles Samsung's observer state so OBSERVE subscriptions

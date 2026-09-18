@@ -40,7 +40,7 @@ CF_CBOR = b'\x3c'
 OBSERVE_REGISTER   = b''           # register / refresh
 OBSERVE_DEREGISTER = bytes([1])    # deregister
 
-# Block2 SZX=6 → 1024-byte blocks. The largest size Samsung's RT-OCF
+# Block2 SZX=6 → 1024-byte blocks. The largest size the appliance firmware
 # will honour and the only one the probes have validated end-to-end.
 BLOCK_SZX = 6
 
@@ -364,7 +364,7 @@ class Block2Accumulator:
     At most ``max_blocks`` response blocks (32 by default) and
     ``max_payload_bytes`` assembled bytes (64 KiB by default) are accepted.
     Block offsets must remain contiguous.  A bounded SZX downshift is accepted
-    because Samsung RT-OCF may return the requested payload size while
+    because the appliance firmware may return the requested payload size while
     advertising a smaller size for the next request; upshifts and unaligned
     transitions remain invalid.  ETag and Content-Format omissions on
     continuation blocks are tolerated, while conflicting values that are
@@ -548,7 +548,7 @@ class Block2Accumulator:
                     and response_szx > self._negotiated_szx):
                 raise BlockwiseError()
 
-            # Some Samsung RT-OCF versions answer a request at the previous
+            # Some appliance firmware versions answer a request at the previous
             # SZX-sized payload while advertising a smaller SZX for the next
             # request.  Compatibility mode accepts only this bounded downward
             # transition.  The byte offset below still has to land exactly on
