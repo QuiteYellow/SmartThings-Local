@@ -1,8 +1,8 @@
 """DTLS-layer liveness via CoAP empty-CON ping + poll-success watchdog.
 
 Each interval_s the task:
-  1. Sends a CoAP ping. This is fire-and-forget — Samsung's RT-OCF
-     doesn't reliably reply with an RST, so the send itself is the
+  1. Sends a CoAP ping. This is fire-and-forget — the appliance
+     firmware doesn't reliably reply with an RST, so the send itself is the
      keepalive (it tickles Samsung's observer state). The send only
      fails if the underlying socket is gone, in which case the failure
      counts toward fail_threshold.

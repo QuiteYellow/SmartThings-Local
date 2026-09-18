@@ -183,8 +183,8 @@ class HostFilteredUdpSocket:
     """UDP socket that accepts replies from any port on one target host.
 
     A connected UDP socket accepts datagrams only from the exact port it
-    dialled. RT-OCF binds its DTLS socket to port 0, so an appliance answers
-    from a kernel-assigned port that need not match the port addressed, and a
+    dialled. An appliance's DTLS socket is bound to a kernel-assigned port,
+    so it answers from a port that need not match the one addressed, and a
     connected socket makes a live appliance look silent. This wrapper keeps
     sending to the resolved destination and filters inbound datagrams on host
     alone, which is what ``ocf_discovery`` already does.

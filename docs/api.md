@@ -187,7 +187,7 @@ ServerCertificateAuth(*, server_profile: SamsungServerProfile)
 
 ### `smartthings_local.protocol.dtls_session`
 
-CoAP-over-DTLS client for Samsung RT-OCF appliances (RFC 7252 + 6347).
+CoAP-over-DTLS client for Samsung appliances (RFC 7252 + 6347).
 
 #### `ConnectCancellation`
 
@@ -205,13 +205,13 @@ DtlsCoapSession(host, port, cert_path=None, key_path=None, *, cert_pem=None, key
 *class*: Single sustained DTLS-CoAP session.
 
 - `abort()`: Immediately stop work and close the established transport.
-- `close()`: Tear down session. Sends best-effort OBSERVE deregisters first so Samsung's RT-OCF cleans up its observer table — without this, the per-cert observer state survives DTLS close and a quick reconnect...
+- `close()`: Tear down session. Sends best-effort OBSERVE deregisters first so the appliance cleans up its observer table — without this, the per-cert observer state survives DTLS close and a quick reconnect wi...
 - `connect(*, timeout: float | None = None, cancel: ConnectCancellation | None = None, cleanup_hvr_peer: bool = False)`: Perform a cancellable DTLS handshake using a monotonic deadline.
 - `delete(path_segs, timeout=8.0, *, query=(), extra_options=())`: Single-frame DELETE. Returns (code, payload_bytes).
 - `get(path_segs, query=(), timeout=10.0, *, extra_options=())`: Token-stable Block2 GET. Returns (code, payload_bytes).
 - `join()`: Block until the reader thread exits (i.e. socket dies).
 - `pace() -> None`: Sleep only the part of the rate-limit interval not already consumed since the last real send. Uses _stop so session teardown wakes it.
-- `ping()`: RFC 7252 §4.4 CoAP Ping — empty CON, no token, no payload. Fire-and-forget: we do not wait for the matching RST because Samsung's RT-OCF doesn't reliably emit one (verified 2026-06-04: every sync p...
+- `ping()`: RFC 7252 §4.4 CoAP Ping — empty CON, no token, no payload. Fire-and-forget: we do not wait for the matching RST because the appliance firmware doesn't reliably emit one (verified 2026-06-04: every...
 - `post(path_segs, body_cbor, timeout=8.0, *, query=(), extra_options=())`: POST a CBOR-encoded body and return (code, payload_bytes).
 - `quiesce_for_close()`: Stop new work while retaining an established socket for close().
 - `refresh_observes(paths, *, queries_by_href=None)`: Replace only the requested Observe paths and report send results.
