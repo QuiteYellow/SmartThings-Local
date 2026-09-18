@@ -4,7 +4,7 @@ This project uses an AI assistant for parts of its research, code and writing. I
 
 ## Where it helps
 
-- Reading protocol sources (RT-OCF, iotivity-lite, mbedTLS) and citing them.
+- Reading protocol sources (IoTivity classic, RT-OCF, iotivity-lite, mbedTLS) and citing them.
 - Writing library code, tests and documentation.
 - Drafting issue replies, pull-request descriptions and release notes.
 - Analysing packet captures contributors attach to issues.
@@ -25,13 +25,13 @@ Shorter pays twice. A reader hunting one fact finds it faster and gets a direct 
 
 **Hardware claims.** A statement about what an appliance does comes from a measurement, or it does not ship. Assistant recall about Samsung firmware has been wrong too often to lean on.
 
-**Anything under `/oic/sec/*`.** Writes there risk wedging or bricking the appliance on Samsung's RT-OCF stack. No script in this repository touches them, and no assistant should propose it.
+**Anything under `/oic/sec/*`.** Writes there risk wedging or bricking the appliance. No script in this repository touches them, and no assistant should propose it.
 
 **Probing appliances freely.** These devices hold one DTLS session per peer, and at least one wedges for minutes once its session table fills. Probes are single-shot and paced, and the live bridge is checked before and after.
 
 ## Do
 
-- **Cite the source line.** `rt_ssl.c:124` beats "RT-OCF supports". Both vendor stacks are checked out locally for exactly this reason.
+- **Cite the source line, from the right tree.** `rt_ssl.c:124` beats "RT-OCF supports". Three OCF stacks are checked out locally and they disagree with each other, so a claim about an appliance has to come from the stack that appliance runs. [`docs/firmware-families.md`](firmware-families.md) covers how to tell which that is. A line cited from the wrong tree reads exactly like evidence, and one has already been published here as a finding.
 - **Bound every claim to its evidence.** Two appliances and one handshake each says nothing about a third model, and the text should say so.
 - **Report negative results.** "Unchanged across one reboot" is as useful as a change, and cheaper to obtain than to guess at.
 - **Verify across the support matrix.** Rendering, reprs and annotations differ by Python version, and a pinned dependency floor is not the same as the Python floor.
