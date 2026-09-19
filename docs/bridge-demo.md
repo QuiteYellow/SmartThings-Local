@@ -27,7 +27,7 @@ in the README.
 
 ## Under the hood
 
-Each appliance runs an independent bridge built around three coordinated pieces over one persistent DTLS session: a `StateCache` (single source of truth for all reps), a `PollScheduler` (tiered adaptive polling: hot/warm/cold plus a periodic `/device/0` sweep), and a `KeepaliveTask` (CoAP empty-CON ping for DTLS-layer liveness, with consecutive-failure detection for MQTT availability). Tier cadences are descriptor-declared and were calibrated against the empirically-measured per-firmware ceilings: dryer ~14 req/s, oven ~8 req/s. OBSERVE registrations (RFC 7641) are kept as an opportunistic freshness accelerator: when the appliance has internet and emits notifications, the cache absorbs them and the next-poll timer is reset for that resource; when it's air-gapped, polling alone carries the UX with no other code change. Token-stable Block2 (RFC 7959) handles multi-block reads. Writes are optimistically merged into the cache the moment the device 2.04-confirms, with the scheduler deferring that resource's next poll past the fetchback-revert window. Reconnect with exponential backoff on session errors, gated by a stateless DTLS ClientHello pre-flight (`smartthings_local/protocol/dtls_probe.py`) so a silent/rebooting device or wrong port drops into backoff in ~1 RTT instead of eating the full handshake timeout; when `OCF_PORT` is unset the same probe auto-discovers the live port across the OCF band.
+Each appliance runs an independent bridge built around three coordinated pieces over one persistent DTLS session: a `StateCache` (single source of truth for all reps), a `PollScheduler` (tiered adaptive polling: hot/warm/cold plus a periodic `/device/0` sweep), and a `KeepaliveTask` (CoAP empty-CON ping for DTLS-layer liveness, with consecutive-failure detection for MQTT availability). Tier cadences are descriptor-declared and were calibrated against the empirically-measured per-firmware ceilings: dryer ~14 req/s, oven ~8 req/s. OBSERVE registrations (RFC 7641) are kept as an opportunistic freshness accelerator: when the appliance has internet and emits notifications, the cache absorbs them and the next-poll timer is reset for that resource; when it's air-gapped, polling alone carries the UX with no other code change. Token-stable Block2 (RFC 7959) handles multi-block reads. Writes are optimistically merged into the cache the moment the device 2.04-confirms, with the scheduler deferring that resource's next poll past the fetchback-revert window. Reconnect with exponential backoff on session errors, gated by a stateless DTLS ClientHello pre-flight (`smartthings_local/protocol/dtls_probe.py`) so a silent/rebooting device or wrong port drops into backoff in ~1 RTT instead of eating the full handshake timeout; when `OCF_PORT` is unset the same probe gates every discovery tier: a cached port, then the secure port `/oic/res` advertises on 5683, then a sweep of the OCF band.
 
 On the currently supported firmware families, authentication uses a client cert keyed to the UUID published in Samsung's own wildcard cloud TLS cert. Their factory ACL grants that UUID `perm=31` (full CRUDN) on `href=*`. That certificate path is not universal: the WD53 profile in issue #16 and the washer in issue #20 reject it. For those newer OCF-PKI devices, the `SamsungServerProfile` and `ServerCertificateAuth` providers (see Quick start) pin and verify the device's hardware certificate, but getting an authorized client credential to reach protected resources is still an open problem.
 
@@ -128,15 +128,19 @@ python3 -m venv .venv
 14:08:42  INFO   mqtt_demo                  [1] dryer @ <dryer-ip>:49155? (DTLS, auto-discover) → topic samsung_dryer/*
 14:08:42  INFO   mqtt_demo                  [2] oven  @ <oven-ip>:49154? (DTLS, auto-discover) → topic samsung_oven/*
 14:08:42  INFO   mqtt_demo                MQTT connected → <broker-ip>:1883
-14:08:43  INFO   dryer                    discovered DTLS port 49155
-14:08:43  INFO   oven                     discovered DTLS port 49154
+14:08:43  INFO   dryer                    directory on 5683 advertises 49155
+14:08:43  INFO   oven                     directory on 5683 advertises 49154
+14:08:43  INFO   dryer                    DTLS port 49155 -- advertised by /oic/res on 5683
+14:08:43  INFO   oven                     DTLS port 49154 -- advertised by /oic/res on 5683
 14:08:43  INFO   dryer                    DTLS connected — subscribing 11 paths
 14:08:44  INFO   dryer.<dryer-serial>     identified — serial=…
 14:08:44  INFO   dryer.<dryer-serial>     seeded → 25 links; sensors live
 14:08:44  INFO   oven                     DTLS connected — subscribing 11 paths
 14:08:46  INFO   oven.<oven-serial>       identified — serial=…
-14:08:46  INFO   oven.<oven-serial>       seeded → 16 links; sensors live
+14:08:46  INFO   oven.<oven-serial>       seeded → 17 links; sensors live
 ```
+
+The line after each port names which tier chose it, because the number alone does not say whether the device answered for itself. Four are possible: `configured OCF_PORT`, `cached from an earlier connect`, `advertised by /oic/res on 5683`, and `found by sweeping the OCF band`. A swept port means the plaintext directory read got nothing out of that device, which is the detail to include in a bug report.
 
 In HA: **Settings → Devices & Services → MQTT** should show both devices populated.
 
@@ -206,7 +210,7 @@ Notes specific to this firmware family:
 | `APPLIANCE_COUNT` | Number of `APPLIANCE_<n>_*` blocks to read (1-indexed) |
 | `APPLIANCE_<n>_CLASS` | Descriptor name: `dryer`, `oven`, `fridge` |
 | `APPLIANCE_<n>_IP` | LAN IP of the appliance |
-| `APPLIANCE_<n>_OCF_PORT` | Optional. Blank → probe standard port 5684 and the dynamic range 49152–49160 with a stateless ClientHello; set it to pin and gate one specific port (dryer=49155, oven=49154, fridge=49155) |
+| `APPLIANCE_<n>_OCF_PORT` | Optional. Blank → ask `/oic/res` on 5683 for the secure port, then fall back to sweeping standard 5684 and the dynamic range 49152–49160; every candidate is gated by a stateless ClientHello either way. Set it to pin and gate one specific port (dryer=49155, oven=49154, fridge=49155) |
 | `APPLIANCE_<n>_TOPIC` | MQTT topic prefix (also the HA device identifier; changing it re-keys the device) |
 | `APPLIANCE_<n>_NAME` | Friendly name on the HA device card |
 | `MQTT_BROKER` / `MQTT_PORT` / `MQTT_USER` / `MQTT_PASS` | Broker config |

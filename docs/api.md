@@ -88,6 +88,10 @@ Public, redacted exception types for smartthings-local.
 
 *exception*: A CoAP Observe relation could not be established or maintained.
 
+#### `PeerInitiatedHandshakeError`
+
+*exception*: The peer was already handshaking toward this endpoint, so ours failed.
+
 #### `ProbeError`
 
 *exception*: A DTLS probe failed before producing a protocol result.
@@ -236,7 +240,7 @@ DTLS ClientHello probe — a cheap, deterministic liveness + diagnostic primitiv
 #### `DtlsLivenessResult`
 
 ```python
-DtlsLivenessResult(port: int, response_kind: str | None, attempts: int, rtt_s: float | None = None, alert: tuple[int, str] | None = None, error_code: str | None = None)
+DtlsLivenessResult(port: int, response_kind: str | None, attempts: int, rtt_s: float | None = None, alert: tuple[int, str] | None = None, error_code: str | None = None, responder_port: int | None = None)
 ```
 
 *class*: Bounded, non-sensitive result for one stateless port probe.

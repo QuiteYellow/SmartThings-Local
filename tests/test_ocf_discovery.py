@@ -74,7 +74,10 @@ def _ipv4_key(address='192.0.2.20'):
     return socket.inet_pton(socket.AF_INET, address), 0
 
 
-def test_primary_uses_source_bound_eps_from_all_links_and_ignores_legacy():
+def test_source_bound_eps_come_before_a_legacy_policy_port():
+    # Both forms are read from one representation, eps first: an eps URI is
+    # validated against the address the response came from, where a bare
+    # p.port is only narrowed to the doxm link.
     payload = _payload(
         _doxm_link(61002),
         _eps_link(
@@ -86,14 +89,51 @@ def test_primary_uses_source_bound_eps_from_all_links_and_ignores_legacy():
         ),
     )
 
-    status, ports = discovery._primary_secure_ports_from_payload(
+    status, ports = discovery._secure_ports_from_payload(
         payload, socket.AF_INET, _ipv4_key())
 
     assert status == discovery._PORTS_FOUND
-    assert ports == (61003, 5684)
+    assert ports == (61003, 5684, 61002)
 
 
-def test_fallback_uses_only_doxm_eps_and_legacy_ports_and_stays_bounded():
+def test_an_unfiltered_directory_with_no_eps_still_yields_the_doxm_port():
+    # What the hardware here actually serves. Both reference appliances are
+    # OIC 1.1 (icv core.1.1.0), answer 4.06 to an OCF 1.0 Accept, and carry
+    # no eps key anywhere in /oic/res -- the real DTLS port arrives only as
+    # p.sec/port on the doxm link of the unfiltered directory. Reading that
+    # form from the first answer is what removes a second round trip on
+    # every device tested here.
+    payload = _payload(
+        _eps_link('coap://192.0.2.20:61004', href='/oic/d'),
+        _doxm_link(49155),
+        {'href': '/oic/sec/pstat', 'rt': ['oic.r.pstat'],
+         'p': {'bm': 1, 'sec': True, 'port': 49155}},
+    )
+
+    assert discovery._secure_ports_from_payload(
+        payload, socket.AF_INET, _ipv4_key()) == (
+            discovery._PORTS_FOUND, (49155,))
+
+
+def test_a_legacy_policy_port_is_read_only_from_the_doxm_link():
+    # A p.port integer carries no address to bind to the responder, so the
+    # doxm narrowing is the whole of its trust basis. Every other link's
+    # sec-flagged port stays unread, in either representation.
+    for link in (
+        {'href': '/oic/sec/pstat', 'rt': ['oic.r.pstat'],
+         'p': {'sec': True, 'port': 61002}},
+        {'href': '/oic/sec/doxm', 'rt': ['oic.r.pstat'],
+         'p': {'sec': True, 'port': 61002}},
+        {'href': '/oic/sec/doxm/vs/0', 'rt': ['oic.r.doxm'],
+         'p': {'sec': True, 'port': 61002}},
+        {'href': '/oic/sec/doxm', 'p': {'sec': True, 'port': 61002}},
+    ):
+        assert discovery._secure_ports_from_payload(
+            _payload(link), socket.AF_INET, _ipv4_key()) == (
+                discovery._PORTS_ABSENT, ())
+
+
+def test_doxm_eps_and_legacy_ports_stay_bounded():
     links = [
         {'href': '/oic/d', 'rt': ['oic.wk.d'],
          'p': {'sec': True, 'port': 49000}},
@@ -107,11 +147,17 @@ def test_fallback_uses_only_doxm_eps_and_legacy_ports_and_stays_bounded():
         *[_doxm_link(port) for port in range(61002, 61012)],
     ]
 
-    status, ports = discovery._fallback_secure_ports_from_payload(
+    status, ports = discovery._secure_ports_from_payload(
         cbor2.dumps(links), socket.AF_INET, _ipv4_key())
 
     assert status == discovery._PORTS_FOUND
-    assert ports == tuple(range(61000, 61008))
+    # The source-bound eps port leads, the doxm policy ports follow in link
+    # order, _MAX_PORTS still caps the set, and the sec-flagged port on the
+    # non-doxm /oic/d link (49000) is absent from it.
+    assert ports == (61001, 61000, *range(61002, 61008))
+    assert len(ports) == discovery._MAX_PORTS
+    assert 49000 not in ports
+    assert 61999 not in ports
 
 
 @pytest.mark.parametrize(
@@ -123,21 +169,14 @@ def test_fallback_uses_only_doxm_eps_and_legacy_ports_and_stays_bounded():
         cbor2.dumps({'links': []}) + cbor2.dumps(1),
     ),
 )
-@pytest.mark.parametrize(
-    'extractor',
-    (
-        discovery._primary_secure_ports_from_payload,
-        discovery._fallback_secure_ports_from_payload,
-    ),
-)
-def test_malformed_or_trailing_cbor_is_rejected(payload, extractor):
-    assert extractor(
+def test_malformed_or_trailing_cbor_is_rejected(payload):
+    assert discovery._secure_ports_from_payload(
         payload, socket.AF_INET, _ipv4_key()) == (
             discovery._PORTS_MALFORMED, ())
 
 
-def test_primary_distinguishes_absence_from_untrusted_secure_eps():
-    absent = _payload(_doxm_link(), _eps_link('coap://192.0.2.20:61003'))
+def test_absence_is_distinguished_from_an_untrusted_secure_eps():
+    absent = _payload(_eps_link('coap://192.0.2.20:61003'))
     untrusted_values = (
         'coaps://192.0.2.21:61003',
         'coaps://appliance.invalid:61003',
@@ -146,11 +185,11 @@ def test_primary_distinguishes_absence_from_untrusted_secure_eps():
         'coaps://192.0.2.20:61003/path',
     )
 
-    assert discovery._primary_secure_ports_from_payload(
+    assert discovery._secure_ports_from_payload(
         absent, socket.AF_INET, _ipv4_key()) == (
             discovery._PORTS_ABSENT, ())
     for endpoint in untrusted_values:
-        assert discovery._primary_secure_ports_from_payload(
+        assert discovery._secure_ports_from_payload(
             _payload(_eps_link(endpoint)),
             socket.AF_INET,
             _ipv4_key(),
@@ -170,9 +209,8 @@ def test_an_unusable_policy_port_reads_as_absence_and_is_never_dialled(port):
     # bool is a subclass of int and would otherwise pass for port 1.
     payload = _payload(_doxm_link(port))
 
-    for extractor in (discovery._primary_secure_ports_from_payload,
-                      discovery._fallback_secure_ports_from_payload):
-        assert extractor(payload, socket.AF_INET, _ipv4_key()) == (
+    assert discovery._secure_ports_from_payload(
+        payload, socket.AF_INET, _ipv4_key()) == (
             discovery._PORTS_ABSENT, ())
 
 
@@ -181,7 +219,7 @@ def test_a_usable_port_alongside_an_unusable_one_is_still_found():
     # unusable port must not discard the rest of the response.
     payload = _payload(_doxm_link(0), _doxm_link(61002))
 
-    assert discovery._fallback_secure_ports_from_payload(
+    assert discovery._secure_ports_from_payload(
         payload, socket.AF_INET, _ipv4_key()) == (
             discovery._PORTS_FOUND, (61002,))
 
@@ -197,17 +235,17 @@ def test_ipv6_eps_binding_inherits_or_exactly_matches_response_scope():
         'coaps://[2001:db8::20%258]:62002',
     ))
 
-    status, ports = discovery._primary_secure_ports_from_payload(
+    status, ports = discovery._secure_ports_from_payload(
         matching, socket.AF_INET6, source_key)
 
     assert status == discovery._PORTS_FOUND
     assert ports == (62000, 62001)
-    assert discovery._primary_secure_ports_from_payload(
+    assert discovery._secure_ports_from_payload(
         _payload(_eps_link('coaps://[2001:db8::20%258]:62002')),
         socket.AF_INET6,
         source_key,
     ) == (discovery._PORTS_UNTRUSTED, ())
-    assert discovery._primary_secure_ports_from_payload(
+    assert discovery._secure_ports_from_payload(
         _payload(_eps_link('coaps://[2001:db8::21]:62003')),
         socket.AF_INET6,
         source_key,
@@ -313,6 +351,68 @@ def test_unfiltered_dynamic_source_and_two_block_response_are_supported():
     assert result.response_received
     assert result.error_code is None
     assert result.attempts == 2
+
+
+def test_an_oic_1_1_directory_resolves_in_one_exchange():
+    # The shape both reference appliances serve: an unfiltered /oic/res with
+    # no eps key anywhere and the real DTLS port on the doxm link's p.sec /
+    # port. It has to resolve without a filtered second lookup, which is the
+    # round trip this used to cost on every such device.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listener.bind(('127.0.0.1', 0))
+    listener.settimeout(2.0)
+    errors = []
+    extra_requests = []
+
+    def respond():
+        try:
+            primary, client = listener.recvfrom(8192)
+            primary_parsed = parse_coap(primary)
+            assert URI_QUERY not in _option_map(primary_parsed[4])
+            listener.sendto(
+                build_coap(
+                    TYPE_NON,
+                    0x45,
+                    0x7201,
+                    primary_parsed[3],
+                    [],
+                    _payload(
+                        {'href': '/oic/d', 'rt': ['oic.wk.d'],
+                         'p': {'bm': 1, 'sec': False}},
+                        _doxm_link(49155),
+                    ),
+                ),
+                client,
+            )
+            listener.settimeout(0.4)
+            try:
+                extra_requests.append(listener.recvfrom(8192)[0])
+            except TimeoutError:
+                pass
+        except Exception as exc:  # noqa: BLE001 - surfaced through errors below
+            errors.append(exc)
+
+    thread = threading.Thread(target=respond)
+    thread.start()
+    try:
+        result = discovery.discover_ocf_secure_ports(
+            '127.0.0.1',
+            discovery_port=listener.getsockname()[1],
+            timeout=1.5,
+            retries=0,
+            family=socket.AF_INET,
+        )
+    finally:
+        thread.join(timeout=3.0)
+        listener.close()
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert result.ports == (49155,)
+    assert result.response_received
+    assert result.error_code is None
+    assert result.attempts == 1
+    assert extra_requests == []
 
 
 def test_absent_primary_falls_back_with_fresh_token_on_original_route():
