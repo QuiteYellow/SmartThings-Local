@@ -31,7 +31,7 @@ Shorter pays twice. A reader hunting one fact finds it faster and gets a direct 
 
 ## Do
 
-- **Cite the source line, from the right tree.** `rt_ssl.c:124` beats "RT-OCF supports". Three OCF stacks are checked out locally and they disagree with each other, so a claim about an appliance has to come from the stack that appliance runs. [`docs/firmware-families.md`](firmware-families.md) covers how to tell which that is. A line cited from the wrong tree reads exactly like evidence, and one has already been published here as a finding.
+- **Cite the source line, from the right tree, at the right revision.** `rt_ssl.c:124` beats "RT-OCF supports". Several OCF stacks are checked out locally and they disagree with each other, so a claim about an appliance has to come from the stack that appliance runs — and from the fork it runs, since a vendor fork of the same stack can differ from upstream by more than a thousand lines in the file being cited. [`docs/firmware-families.md`](firmware-families.md) covers how to tell which stack and which revision. A line cited from the wrong tree reads exactly like evidence, and one has already been published here as a finding.
 - **Bound every claim to its evidence.** Two appliances and one handshake each says nothing about a third model, and the text should say so.
 - **Report negative results.** "Unchanged across one reboot" is as useful as a change, and cheaper to obtain than to guess at.
 - **Verify across the support matrix.** Rendering, reprs and annotations differ by Python version, and a pinned dependency floor is not the same as the Python floor.

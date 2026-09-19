@@ -9,7 +9,7 @@ For a compatible firmware family, the bridge authenticates with a **client cert*
 ## Why this works
 
 - The compatible appliances tested carry a **factory-baked ACE** in `/oic/sec/acl` granting this UUID `perm=31` on `href=*`.
-- IoTivity classic derives peerId by scanning the raw subject for `"uuid:"` (`ca_adapter_net_ssl.c:75,1769`), which is RDN-agnostic. A cert with the UUID in CN authenticates the same as one with it in OU.
+- IoTivity classic derives peerId by scanning the raw subject for `"uuid:"` (`ca_adapter_net_ssl.c:78,2268` in Samsung's fork, `:75,1769` upstream, where the code is the same), which is RDN-agnostic. A cert with the UUID in CN authenticates the same as one with it in OU.
 - The signature is not a gate on the appliances tested. A self-signed leaf, and a leaf signed by a CA the appliance has never seen, read the same resources as an `AC14K_M`-signed one, over both DTLS and TCP-TLS, and a leaf carrying an un-ACL'd UUID is refused `4.01` on every resource. Signer, chain, digest and key are all cosmetic there.
 - No original private key comes into it either way: `setup_cert.py` mints a fresh key of your own. Different key, same identity, same access.
 
