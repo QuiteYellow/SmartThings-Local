@@ -25,15 +25,27 @@ The floor job is the one that catches a new call into a newer dependency's API.
 Two rules, both with reasons on the pages that carry them:
 
 - A statement about what an appliance does comes from a measurement. See [`docs/use-of-ai.md`](docs/use-of-ai.md).
-- A statement about *why* it does it needs a citation from the stack that appliance actually runs, which is rarely obvious. See [`docs/firmware-families.md`](docs/firmware-families.md) for how to identify it, and for what the three stacks do differently.
+- A statement about *why* it does it needs a citation from the stack that appliance actually runs, which is rarely obvious. See [`docs/firmware-families.md`](docs/firmware-families.md) for how to identify it, and for what the stacks do differently.
 
-Those three reference stacks are public. None is checked into this repository, and none is a substitute for hardware:
+Those reference stacks are public. None is checked into this repository, and none is a substitute for hardware:
 
 | Stack | Source | Pin used here |
 | --- | --- | --- |
-| IoTivity classic | `github.com/iotivity/iotivity` | `1.2.1`, with `1.3.1` for comparison |
+| **IoTivity classic, Samsung's fork** | `github.com/Samsung/TizenRT`, path `external/iotivity/` | `e590f30ab` |
+| mbedTLS, as that fork links it | `github.com/Samsung/TizenRT`, paths `external/mbedtls/` and `external/include/mbedtls/` | `e590f30ab` (2.7.8) |
+| IoTivity classic, upstream | `github.com/iotivity/iotivity` | `1.2.1`, with `1.3.1`, for contrast only |
 | RT-OCF | `github.com/Samsung/RT-OCF` | `fd41fc4` |
 | iotivity-lite | `github.com/iotivity/iotivity-lite` | `49441ba` |
+
+The first row is the one to cite for the appliances here, because Samsung's fork is what they run. The file this project reasons about most, `ca_adapter_net_ssl.c`, differs between fork and upstream by 1295 lines, enough that a line number from one lands somewhere unrelated in the other. Upstream earns its place by showing what Samsung changed, and that is the whole of its use here. Sparse-checkout the path; the repository is large:
+
+```sh
+git clone --filter=blob:none --no-checkout https://github.com/Samsung/TizenRT.git
+cd TizenRT && git sparse-checkout set --no-cone external/iotivity external/mbedtls external/include/mbedtls
+git checkout e590f30ab
+```
+
+Fetch mbedTLS alongside it: authmode, cookies and the reconnect path all live there, so the DTLS behaviour these appliances show has to be read across both trees. `build_iotivity.sh:34` symlinks the iotivity build's include path at TizenRT's own `external/include/mbedtls`, so **2.7.8** is what a TizenRT build compiles against; the 2.4.0 that `iotivity_1.2-rel/extlibs/mbedtls/prep.sh` pins is vestigial.
 
 ## Driving the library against hardware by hand
 
