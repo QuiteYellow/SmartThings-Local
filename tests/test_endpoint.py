@@ -427,10 +427,13 @@ def test_session_send_failure_has_no_raw_exception_context():
 
 # --- issue #66: an appliance answering from a port it was not dialled on ----
 #
-# RT-OCF binds its DTLS socket to port 0 (rt_udp.c rt_udp_open_server), so the
-# secure port is kernel-assigned and a reply legitimately arrives from a source
-# port other than the one addressed. A connected UDP socket drops those, which
-# made a live appliance report as dead.
+# An appliance's secure port is kernel-assigned, so a reply legitimately
+# arrives from a source port other than the one addressed. A connected UDP
+# socket drops those, which made a live appliance report as dead. The two
+# appliances here run IoTivity classic, which initialises its unicast secure
+# socket's port to 0 (caipadapter.c:219) and learns the assignment back from
+# getsockname (caipserver.c:826) — see docs/firmware-families.md for the tree
+# and pin those lines are from.
 
 
 class _RecordingUdpSocket:

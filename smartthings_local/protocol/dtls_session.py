@@ -568,6 +568,20 @@ class DtlsCoapSession:
         # OBSERVE tokens are 1-byte (Samsung silently drops TKL>1
         # OBSERVE registrations). Pick a random starting byte in the
         # 0x40..0xff range so each session uses fresh values.
+        #
+        # The TKL>1 claim has no source behind it and the likely source
+        # files contradict it: IoTivity classic accepts tokens up to
+        # CA_MAX_TOKEN_LEN 8 (cacommon.h:95), and its receive path just
+        # records the parsed length (caprotocolmessage.c:939,1030) with no
+        # width check anywhere. Its observer lookup compares only the
+        # *incoming* token's length (ocobserve.c:518), so a short token
+        # matching a held token's first bytes collides with it — and a
+        # collision is answered with silence, which reads as a dead
+        # device. One byte is therefore the width most likely to collide,
+        # against exactly 192 distinct values here. Widening it is a wire
+        # change on hardware that cannot be replaced, so it wants testing
+        # across models first, not a quiet edit. See
+        # docs/firmware-families.md for the tree and pin.
         self._observe_tok_counter = 0x40 + (os.urandom(1)[0] & 0xBF)
         # token (bytes) → (Event, container_dict)
         self._pending = {}

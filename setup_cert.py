@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 setup_cert.py — One-shot client cert generator for local DTLS-CoAP
-access to Tizen/RT-OCF appliances on your LAN.
+access to Samsung appliances on your LAN.
 
 Builds a client cert keyed to the identity that each appliance's factory
 ACL already grants `perm=31` on `href=*`.
