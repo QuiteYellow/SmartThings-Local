@@ -24,7 +24,7 @@ def _clear_env(monkeypatch):
 def test_default_is_one_send():
     # The default has to stay today's behaviour: retransmitting into an
     # appliance already dropping under load turns one lost write into
-    # several, and §4.5 dedupe is unverified on RT-OCF.
+    # several, and §4.5 dedupe is unverified on the appliances here.
     assert SharedConfig.from_env().WRITE_MAX_ATTEMPTS == 1
 
 

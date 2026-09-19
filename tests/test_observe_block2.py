@@ -9,8 +9,8 @@ token, and only the reassembled representation reaches the callback.
 
 The re-read starts at block 0 rather than continuing at NUM=1 for two
 reasons, both recorded on #39: RFC 7959 §3.4 forbids continuing on the
-observation's token, and Samsung's RT-OCF drops a transfer that opens
-at NUM>0 under a token it has not seen.
+observation's token, and the appliance tested there dropped a transfer
+that opened at NUM>0 under a token it had not seen.
 """
 import logging
 import socket

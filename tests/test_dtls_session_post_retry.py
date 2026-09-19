@@ -8,8 +8,9 @@ failing with `SessionTimeoutError` is what surfaced it.
 
 Retransmission ships off by default (`write_max_attempts=1`): a device
 already dropping under load turns one lost write into several, and MID
-dedupe is unverified on RT-OCF. These tests pin both the default's
-unchanged single send and the behaviour the flag buys when it is on.
+dedupe is unverified on the appliances here. These tests pin both the
+default's unchanged single send and the behaviour the flag buys when it
+is on.
 
 The MID registry these lean on is #57's, shared with the read path; #58
 gave `_exchange_block` the same one-datagram-per-exchange shape. What is

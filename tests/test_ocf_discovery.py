@@ -159,8 +159,8 @@ def test_primary_distinguishes_absence_from_untrusted_secure_eps():
 
 @pytest.mark.parametrize('port', (0, -1, 65536, True, 1.0, '61002', None))
 def test_an_unusable_policy_port_reads_as_absence_and_is_never_dialled(port):
-    # Zero is the case the hardware actually produces: RT-OCF binds the
-    # DTLS socket with port 0 and learns the assignment through
+    # Zero is the case the hardware actually produces: the stack binds its
+    # secure socket with port 0 and learns the assignment through
     # getsockname, so a directory serialised before that bind advertises
     # `sec: true, port: 0`. A live plaintext read on the reference dryer
     # here has returned exactly that while a later read of the same
