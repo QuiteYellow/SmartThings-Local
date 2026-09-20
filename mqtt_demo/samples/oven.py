@@ -474,7 +474,7 @@ def on_observation(state, href, rep):
         sam = rep.get('x.com.samsung.da.state')
         if _SAMSUNG_STATE_TO_OCF.get(sam, sam) != 'active':
             for k in ('remaining_anchor', 'progress_anchor',
-                      '_rem_last', '_prog_last'):
+                      '_rem_last', '_prog_last', '_finish_published'):
                 state.pop(k, None)
         return
     # Door + lamp tracking feeds the lamp/door coupling in project().
@@ -498,7 +498,7 @@ def on_observation(state, href, rep):
 
 
 def estimate_remaining(state, now):
-    """(seconds_remaining, source) for the cook clock, or (None, None).
+    """(seconds_remaining, source, finish_epoch), or three Nones.
 
     Two fields describe the same clock at different resolutions:
 
@@ -524,26 +524,32 @@ def estimate_remaining(state, now):
     total = state.get('_total_s')
     cands = []
 
+    # Each candidate carries the absolute epoch the cook ends at,
+    # derived only from its anchor. That is the value that must not
+    # move: computing it as `now + remaining` instead lets the rounding
+    # of remaining to a whole second drift against a continuously
+    # advancing `now`, which crosses a second boundary about once a
+    # second and republishes the whole state topic each time.
     pa = state.get('progress_anchor')
     if total and pa is not None:
         ts, pct = pa
         if pct is not None:
             cands.append(('progress', total / 100.0,
-                          total * (100 - pct) / 100.0 - (now - ts)))
+                          ts + total * (100 - pct) / 100.0))
 
     ra = state.get('remaining_anchor')
     if ra is not None:
         ts, secs = ra
         if secs is not None:
-            cands.append(('remaining', 60.0, secs - (now - ts)))
+            cands.append(('remaining', 60.0, ts + secs))
 
     if not cands:
-        return None, None
-    source, _granule, value = min(cands, key=lambda c: c[1])
-    value = max(0, int(round(value)))
+        return None, None, None
+    source, _granule, finish_epoch = min(cands, key=lambda c: c[1])
+    remaining = max(0, int(round(finish_epoch - now)))
     if total:
-        value = min(value, total)
-    return value, source
+        remaining = min(remaining, total)
+    return remaining, source, finish_epoch
 
 
 def project(state, sensors):
@@ -553,12 +559,17 @@ def project(state, sensors):
     # from the most recent anchor while the machine is active.
     if sensors.get('machine_state') == 'active':
         now = time.time()
-        remaining, source = estimate_remaining(state, now)
+        remaining, source, finish_epoch = estimate_remaining(state, now)
         if remaining is not None:
-            h, rest = divmod(remaining, 3600)
-            m, s = divmod(rest, 60)
-            sensors['completion_time'] = f"{h}:{m:02d}:{s:02d}"
-            sensors['completion_minutes'] = h * 60 + m + (1 if s > 0 else 0)
+            # Minute resolution deliberately. The bridge republishes the
+            # whole state topic whenever any field changes, so a field
+            # carrying seconds here ticks once a second for the length
+            # of every cook and writes a recorder row per sensor each
+            # time. finish_at below carries the precision instead.
+            mins = (remaining + 59) // 60
+            h, m = divmod(mins, 60)
+            sensors['completion_time'] = f"{h}:{m:02d}:00"
+            sensors['completion_minutes'] = mins
             sensors['clock_source'] = source
             # An absolute finish time rather than a ticking countdown.
             # HA renders a `timestamp` sensor as a live relative time,
@@ -572,9 +583,14 @@ def project(state, sensors):
             # countdown here would republish twice a second for the
             # length of every cook and write a recorder row per sensor
             # each time, to show what the frontend can derive for free.
+            # Hold the previously published finish time unless the new
+            # estimate has moved further than sampling jitter explains.
+            held = state.get('_finish_published')
+            if held is None or abs(finish_epoch - held) > FINISH_DEADBAND_S:
+                state['_finish_published'] = finish_epoch
+                held = finish_epoch
             sensors['finish_at'] = datetime.fromtimestamp(
-                now + remaining, tz=timezone.utc).isoformat(
-                    timespec='seconds')
+                held, tz=timezone.utc).isoformat(timespec='seconds')
     # Lamp / door coupling. The oven hardware auto-drives the lamp from
     # the door state, but /mode/vs/0 only polls every 30s. When a door
     # TRANSITION is more recent than the last lamp VALUE change, derive
@@ -1031,6 +1047,24 @@ def build_discovery(topic_prefix, ha_prefix, device_name):
 # dict threaded into on_observation and project, so project() can
 # publish the staged values back for the entities to display.
 # ---------------------------------------------------------------------
+#: How far the recomputed finish time must move before it is republished.
+#: A correctly-running cook predicts the same finish epoch every time it
+#: is recomputed -- anchor + remaining-at-that-anchor is invariant while
+#: the appliance's clock tracks wall time -- so the only thing that moves
+#: it by a second or two is our own sampling: we see each decrement up to
+#: one poll interval late. Publishing that is measurement noise dressed
+#: as news, and it republishes the whole state topic.
+#:
+#: Above this, something real happened: the cycle was paused, the
+#: duration was changed at the panel, or the appliance's clock diverged
+#: from ours. Those should reach HA immediately, which is why this is a
+#: deadband rather than a slow republish timer -- a timer would delay
+#: real news as well as suppressing noise.
+#:
+#: 15s is comfortably above the poll interval (0.5s hot tier) and well
+#: below any change to a cook that a person would care about.
+FINISH_DEADBAND_S = 15
+
 PROGRAM_KEY = 'program'
 
 #: flatten() stashes the parsed modeSpec here so project() can reach it

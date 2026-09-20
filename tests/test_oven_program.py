@@ -340,8 +340,8 @@ def test_clock_advances_between_device_updates():
     st = {}
     oven.on_observation(st, '/operational/state/vs/0', op_rep())
     ts = st['remaining_anchor'][0]
-    a, _ = oven.estimate_remaining(st, ts)
-    b, _ = oven.estimate_remaining(st, ts + 30)
+    a, _, _ = oven.estimate_remaining(st, ts)
+    b, _, _ = oven.estimate_remaining(st, ts + 30)
     assert a - b == 30, 'clock did not advance with wall time'
 
 
@@ -351,7 +351,7 @@ def test_progress_drives_a_short_cook():
     st = {}
     oven.on_observation(st, '/operational/state/vs/0',
                         op_rep(total='00:10:00', progress='20'))
-    remaining, source = oven.estimate_remaining(st, st['progress_anchor'][0])
+    remaining, source, _ = oven.estimate_remaining(st, st['progress_anchor'][0])
     assert source == 'progress'
     assert remaining == 480          # 80% of 600s
 
@@ -363,21 +363,51 @@ def test_remaining_drives_a_long_cook():
     oven.on_observation(st, '/operational/state/vs/0',
                         op_rep(total='03:00:00', remaining='02:30:00',
                                progress='17'))
-    _, source = oven.estimate_remaining(st, st['remaining_anchor'][0])
+    _, source, _ = oven.estimate_remaining(st, st['remaining_anchor'][0])
     assert source == 'remaining'
 
 
-def test_finish_at_is_stable_between_anchor_changes():
-    """It has to be: the bridge republishes the whole state topic on any
-    change, so a moving finish time would republish twice a second for
-    the length of every cook."""
+def test_finish_epoch_does_not_move_with_now():
+    """The invariant the published finish time rests on.
+
+    Regression: it was computed as `now + remaining`, and because
+    remaining is rounded to a whole second while `now` advances
+    continuously, the sum crossed a second boundary roughly once a
+    second. The whole state topic was republished each time, which is
+    exactly what the timestamp sensor exists to avoid. Deriving it from
+    the anchor makes it independent of `now` by construction, which a
+    sleep-based test cannot show -- the old one slept 1.1s and passed on
+    a 0.1s drift that happened not to cross a boundary."""
+    st = {}
+    oven.on_observation(st, '/operational/state/vs/0', op_rep())
+    ts = st['remaining_anchor'][0]
+    epochs = {oven.estimate_remaining(st, ts + d)[2]
+              for d in (0, 0.3, 1, 7.5, 59, 120)}
+    assert len(epochs) == 1, f'finish epoch moved with now: {epochs}'
+
+
+def test_published_clock_fields_do_not_tick():
+    """No field may change more than once a minute, or every poll
+    republishes the state topic for the length of every cook."""
     st = {}
     oven.on_observation(st, '/operational/state/vs/0', op_rep())
     base = oven.flatten(links(state='Run'))
     base['machine_state'] = 'active'
-    first = oven.project(st, dict(base))['finish_at']
-    time.sleep(1.1)
-    assert oven.project(st, dict(base))['finish_at'] == first
+    seen = set()
+    for _ in range(4):
+        s = oven.project(st, dict(base))
+        seen.add((s['finish_at'], s['completion_time'],
+                  s['completion_minutes']))
+        time.sleep(0.4)
+    assert len(seen) == 1, f'clock fields changed within a second: {seen}'
+
+
+def test_completion_time_carries_no_seconds():
+    st = {}
+    oven.on_observation(st, '/operational/state/vs/0', op_rep())
+    base = oven.flatten(links(state='Run'))
+    base['machine_state'] = 'active'
+    assert oven.project(st, dict(base))['completion_time'].endswith(':00')
 
 
 def test_clock_resets_when_the_cycle_ends():
@@ -395,3 +425,38 @@ def test_clock_is_absent_while_idle():
     sensors = oven.project({}, oven.flatten(links()))
     assert 'finish_at' not in sensors
     assert sensors.get('clock_source') is None
+
+
+def test_finish_at_survives_sampling_jitter():
+    """A correctly-running cook should publish a finish time once.
+
+    Each decrement is seen up to one poll interval late, so the
+    recomputed epoch wobbles by a fraction of a second. Publishing that
+    republishes the whole state topic for no information.
+    """
+    st = {}
+    base = oven.flatten(links(state='Run'))
+    base['machine_state'] = 'active'
+    seen = set()
+    t0 = time.time()
+    for i in range(6):
+        # Same cook, each decrement observed a little late.
+        st['_total_s'] = 600
+        st['remaining_anchor'] = (t0 + i * 60 + (i % 3) * 0.4, 600 - i * 60)
+        st['progress_anchor'] = None
+        seen.add(oven.project(st, dict(base))['finish_at'])
+    assert len(seen) == 1, f'jitter republished the finish time: {seen}'
+
+
+def test_a_real_change_still_gets_through():
+    """The deadband must not swallow news: a paused or extended cycle
+    moves the finish time by far more than sampling ever could."""
+    st = {}
+    base = oven.flatten(links(state='Run'))
+    base['machine_state'] = 'active'
+    t0 = time.time()
+    st['_total_s'] = 600
+    st['remaining_anchor'] = (t0, 600)
+    first = oven.project(st, dict(base))['finish_at']
+    st['remaining_anchor'] = (t0 + 120, 600)      # 2 min of pause
+    assert oven.project(st, dict(base))['finish_at'] != first

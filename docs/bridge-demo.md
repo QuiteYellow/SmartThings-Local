@@ -200,6 +200,10 @@ Both run from the moment of Start, through preheat, rather than from reaching te
 
 The finish time is published as `finish_at`, an absolute timestamp rather than a ticking countdown. Home Assistant renders a `timestamp` sensor as a live relative time, so the UI counts down every second while the published value stays constant between updates from the appliance. A ticking field would instead republish the whole state topic twice a second for the length of every cook, and write a recorder row per sensor each time, to show what the frontend derives for free.
 
+`finish_at` is a prediction, not a countdown: the anchor timestamp plus the remaining time at that anchor. While the appliance's clock tracks wall time that arithmetic returns the same number every time it is recomputed, so a correctly-running cook publishes it once and then says nothing. It moves only when reality departs from the model — a pause, a duration changed at the panel, a clock diverging from ours.
+
+What remains is sampling noise: each decrement is seen up to one poll interval late, so the recomputed epoch wobbles by a fraction of a second. A 15-second deadband suppresses that while letting real changes through immediately, which a slow republish timer would not — a timer delays news as well as noise. Measured mid-cook: 0.11 state-topic publishes per second, with `finish_at` and `clock_source` unchanged across 90 seconds, against roughly 2/s before.
+
 Start is a momentary button, gated on Remote Control being on at the appliance and on no cycle running. It makes an appliance heat: for a confirmation step, set `confirmation` on the Lovelace button card, which MQTT discovery has no equivalent for.
 
 **The oven doesn't push OBSERVE on `/mode/vs/0` writes** (the dryer does). The bridge handles this transparently because state freshness comes from polling rather than from OBSERVE:
