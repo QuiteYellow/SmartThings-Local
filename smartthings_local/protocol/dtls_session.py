@@ -443,13 +443,20 @@ class ConnectCancellation:
 
 # A DTLS client never legitimately receives a ClientHello. An OCF server with
 # a message for an endpoint it holds no session for opens one itself
-# (IoTivity classic ca_adapter_net_ssl.c:1520 CAencryptSsl ->
-# InitiateTlsHandshake), and because its peer table is keyed on address and
-# port with no role (GetSslPeer), our own ClientHello is then stepped into
-# that client-role context and rejected. Its failure path skips the alert for
-# MBEDTLS_ERR_SSL_BAD_HS_CLIENT_HELLO and removes the peer, so the server goes
-# silent and the next handshake wins. Detect the collision so the caller can
-# retry at once instead of reading it as a session fault.
+# (CAencryptSsl -> InitiateTlsHandshake, ca_adapter_net_ssl.c:2010,2040), and
+# because its peer table is keyed on address and port with no role (GetSslPeer,
+# :1074), our own ClientHello is then stepped into that client-role context and
+# rejected. Its failure path skips the alert for
+# MBEDTLS_ERR_SSL_BAD_HS_CLIENT_HELLO and removes the peer (SSL_CHECK_FAIL,
+# :215,247 calling RemovePeerFromList), so the server goes silent and the next
+# handshake wins. Detect the collision so the caller can retry at once instead
+# of reading it as a session fault.
+#
+# Line numbers are TizenRT's iotivity_1.2-rel fork at e590f30ab, which is what
+# the appliances tested here run. Upstream IoTivity classic numbers differ by
+# hundreds of lines (CAencryptSsl is at 1520 there), and upstream also predicts
+# handshake behaviour these appliances do not show, so the fork is the tree to
+# read.
 _CONTENT_TYPE_HANDSHAKE = 22
 _HANDSHAKE_CLIENT_HELLO = 1
 _DTLS_RECORD_HEADER_LEN = 13
