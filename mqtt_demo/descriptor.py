@@ -9,7 +9,7 @@ class (dryer, oven, …) provides a descriptor that supplies:
                           /device/0) to populate the link dict
   * flatten(links)      — links → flat-dict that lands on MQTT
   * build_discovery(…)  — list of (HA-discovery topic, payload)
-  * command_handlers()  — MQTT command-suffix → (path_segs, body_dict)
+  * command_handlers(state) — MQTT command-suffix → (path_segs, body)
 
 An optional `clock_sync` spec declares the resource that sets the
 appliance's own wall clock, which the bridge then keeps in step with the
@@ -32,6 +32,14 @@ from typing import Callable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from smartthings_local.ocf.poll_scheduler import PollTier
+
+
+#: Returned by a command handler that changed only bridge-local state
+#: and has nothing to send to the appliance — a staged program value,
+#: for instance. Distinct from None, which means the command was
+#: rejected and is logged as such. On seeing it the bridge republishes
+#: the state topic so HA reflects the new value straight away.
+LOCAL_ONLY = object()
 
 
 @dataclass(frozen=True)
@@ -68,11 +76,23 @@ class ApplianceDescriptor:
 
     flatten: Callable[[dict], dict]
     build_discovery: Callable[[str, str, str], list[tuple[str, bytes]]]
-    # command_handlers() returns {topic_suffix: fn(payload_str, links_snapshot)}
-    # where the fn returns (path_segs, body_dict) | None. Handlers receive
-    # a snapshot of the bridge's link dict so they can do read-modify-write
-    # on resources like `/mode/vs/0` options or `/temperatures/vs/0` items.
-    command_handlers: Callable[[], dict[str, Callable[[str, dict], Optional[tuple]]]]
+    # command_handlers(state) returns {topic_suffix: fn(payload_str,
+    # links_snapshot)} where the fn returns (path_segs, body) | None.
+    # Handlers receive a snapshot of the bridge's link dict so they can do
+    # read-modify-write on resources like `/mode/vs/0` options or
+    # `/temperatures/vs/0` items.
+    #
+    # `body` is normally a dict — one resource, one representation. A
+    # descriptor may instead return a LIST to write an OCF batch to a
+    # collection href, where each element is {'href': ..., 'rep': {...}}.
+    # The bridge fans its optimistic cache merge out across the elements
+    # rather than merging the whole list onto the collection href.
+    #
+    # `state` is the same mutable dict threaded into on_observation and
+    # project, so a descriptor can hold cross-command state (e.g. a
+    # staged program) that project() then publishes. Descriptors that
+    # need none of it take the argument and ignore it.
+    command_handlers: Callable[..., dict[str, Callable[[str, dict], Optional[tuple]]]]
 
     # Optional behavioural hooks. state is a mutable dict the bridge
     # threads in; the descriptor decides what keys to put in it.
@@ -172,6 +192,29 @@ def avail_with_remote_and_cycle(avail_topic: str,
         {'topic': cycle_topic,
          'payload_available':     'online',
          'payload_not_available': 'offline'},
+    ]
+
+
+def avail_with_remote_and_idle(avail_topic: str,
+                               remote_topic: str,
+                               cycle_topic: str) -> list[dict]:
+    """Available while the bridge is up, Remote Control is on, and no
+    cycle is running.
+
+    The idle term reuses the cycle_active topic with its payloads
+    swapped rather than adding a fourth topic: 'offline' on that topic
+    means no cycle, which is exactly when a program may be staged and
+    started."""
+    return [
+        {'topic': avail_topic,
+         'payload_available':     'online',
+         'payload_not_available': 'offline'},
+        {'topic': remote_topic,
+         'payload_available':     'online',
+         'payload_not_available': 'offline'},
+        {'topic': cycle_topic,
+         'payload_available':     'offline',
+         'payload_not_available': 'online'},
     ]
 
 

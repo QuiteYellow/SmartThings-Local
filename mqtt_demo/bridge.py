@@ -38,6 +38,7 @@ from smartthings_local.protocol.dtls_session import DtlsCoapSession
 from .clock_sync import ClockSyncTask
 from .config import ApplianceConfig, SharedConfig
 from .descriptor import (
+    LOCAL_ONLY,
     ApplianceDescriptor,
     bridge_diagnostic_discovery,
     clock_sync_discovery,
@@ -100,6 +101,23 @@ OCF_STANDARD_SECURE_PORT = 5684
 _GATE_RETRIES = 1
 _GATE_TIMEOUT_S = 4.0
 _WORKER_JOIN_TIMEOUT_S = 2.0
+
+
+def _batch_targets(body: list) -> dict:
+    """{href: rep} for the elements of an OCF batch write.
+
+    Elements carrying no `rep` are skipped: the leading
+    {'href': '/devices/N'} marker is addressing, not a representation,
+    and has nothing to merge into the cache."""
+    out: dict = {}
+    for el in body:
+        if not isinstance(el, dict):
+            continue
+        href = el.get('href')
+        rep = el.get('rep')
+        if isinstance(href, str) and isinstance(rep, dict):
+            out[href] = rep
+    return out
 
 
 class PushBridge:
@@ -188,7 +206,8 @@ class PushBridge:
         self.cycle_topic    = f"{p}/cycle_active"
         self.health_topic   = f"{p}/bridge/health"
         self.push_active_topic = f"{p}/bridge/push_active"
-        self.cmd_handlers   = descriptor.command_handlers()
+        self.cmd_handlers   = descriptor.command_handlers(
+            self.cache.descriptor_state)
         self.cmd_topic_prefix = f"{p}/cmd/"
 
         self.discovery_payloads = (
@@ -753,6 +772,12 @@ class PushBridge:
         # Handler gets a links snapshot so its read-modify-write sees a
         # consistent view across the multi-field operation.
         result = handler(payload, self.cache.snapshot())
+        if result is LOCAL_ONLY:
+            # Bridge-local state only (a staged program value). Publish
+            # so HA sees it, and send nothing to the appliance.
+            self.log.info("command %s payload=%r → staged", suffix, payload)
+            self.maybe_publish_state(force=True)
+            return
         if result is None:
             self.log.warning("rejected command %s payload=%r",
                              topic, payload)
@@ -763,16 +788,24 @@ class PushBridge:
             self.log.warning("command %s: no DTLS session", topic)
             return
         href = '/' + '/'.join(path_segs)
+        # A list body is an OCF batch written to a collection href. The
+        # hrefs it actually touches are its elements', not the
+        # collection's, so both the poll-defer and the optimistic merge
+        # below work off that list.
+        batch = _batch_targets(body) if isinstance(body, list) else None
         sched = self.scheduler
         defer_s = 4.0
         if sched is not None:
-            sched.write_in_progress(href, settle_s=defer_s)
+            for h in (batch or {href: None}):
+                sched.write_in_progress(h, settle_s=defer_s)
         try:
             code, _ = sess.post(path_segs, cbor2.dumps(body), timeout=8.0)
         except Exception as e:
             self.log.warning("command %s POST failed: %s", topic, e)
             return
-        defer_note = f" (poll-defer {href} {defer_s:.0f}s)" if sched is not None else ''
+        deferred = ' '.join(batch) if batch else href
+        defer_note = (f" (poll-defer {deferred} {defer_s:.0f}s)"
+                      if sched is not None else '')
         self.log.info("command %s payload=%r → %s%s",
                       suffix, payload, fmt_code(code), defer_note)
         if code >> 5 == 2:
@@ -781,7 +814,11 @@ class PushBridge:
             # 3-second revert (project_fetchback_revert_root_cause.md).
             # The PollScheduler will reconcile on its next tier tick
             # after the write_in_progress settle window expires.
-            self.cache.apply_optimistic(href, body)
+            if batch is not None:
+                for h, rep in batch.items():
+                    self.cache.apply_optimistic(h, rep)
+            else:
+                self.cache.apply_optimistic(href, body)
 
     def _handle_sync_clock(self) -> None:
         """On-demand clock write from the HA button.

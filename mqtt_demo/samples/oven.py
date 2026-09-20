@@ -9,30 +9,49 @@ Write surfaces this descriptor exposes:
     * UpperLamp via /mode/vs/0 options RMW (probe_oven_lamp_toggle.py)
       — works even with Remote Control off.
 
+    * Cycle start via an OCF batch write to /device/0 carrying mode,
+      setpoint, cook time and the run command together
+      (docs/oven-cook-start.md). Measured 2026-09-20; separate writes
+      to each resource do not start a cycle from idle, which is why
+      the three parameters are staged here and sent as one batch.
+    * Stop via /operational/state/vs/0 state='Ready' — a plain
+      single-resource write, measured in the same run.
+
   unproven (first HA use is also the test):
     * Sound, FastPreheat — same RMW pattern as lamp.
     * Setpoint via /temperatures/vs/0 items RMW. Mid-cook write may
       or may not retune the element (plan §K-U #2).
-    * Mode select via /mode/vs/0 .modes — mid-cook acceptance unknown
-      (plan §K-U #3).
     * Power on/off via /power/vs/0.
-    * Stop via /operational/state/vs/0 (dryer convention; oven may
-      use a different state value).
 
 Untested writes are gated behind <prefix>/remote_available so HA
-disables them in the UI when the oven's Remote Control switch is off."""
+disables them in the UI when the oven's Remote Control switch is off.
+
+The HA surface splits by cycle state so no control ever changes
+meaning: Setpoint and Cook time are live and cycle-gated, while
+Program / Program temperature / Program duration / Start are
+idle-gated and stage a cook the appliance has not been told about
+yet."""
+import json
+import logging
 import time
 
 from ..descriptor import (
+    LOCAL_ONLY,
     ApplianceDescriptor,
     ClockSync,
     avail_base,
     avail_with_cycle,
     avail_with_remote_and_cycle,
+    avail_with_remote_and_idle,
     device_block,
     encode,
 )
 from smartthings_local.ocf.poll_scheduler import PollTier
+
+# Module-level child of the `mqtt_demo` tree — see mqtt_demo/logger.py.
+# Command handlers refuse a start with a reason, and the reason is
+# only useful if it reaches the log.
+log = logging.getLogger('mqtt_demo.oven')
 
 
 # ---------------------------------------------------------------------
@@ -65,6 +84,29 @@ OBSERVE_PATHS = [
 SETPOINT_MIN_C = 30
 SETPOINT_MAX_C = 270
 SETPOINT_STEP_C = 5
+
+
+# Options offered by the Program select. Discovery payloads are built
+# before any resource has been read, so this cannot be the board's live
+# answer — it is the startable set this appliance class publishes. The
+# live set is republished each state update as `program_startable`, and
+# Start validates against that, so selecting a mode a given unit does
+# not declare startable fails with a reason rather than reaching the
+# appliance. Order follows the board's own modeSpec order.
+PROGRAM_MODES = (
+    'Convection',
+    'TopHeatPluseConvection',
+    'Conventional',
+    'LargeGrill',
+    'SmallGrill',
+    'BottomHeatPluseConvection',
+    'PlateWarm',
+    'KeepWarm',
+    'Bottom',
+    'EcoConvection',
+    'FanGrill',
+    'Defrost',
+)
 
 
 # Samsung's operational state strings → OCF currentMachineState shape.
@@ -105,6 +147,23 @@ def _replace_in_options(options, prefix, new_value):
             for o in options]
 
 
+def _hms_wire(minutes):
+    """`HH:MM:SS` with a ZERO-PADDED hour — the appliance's wire format.
+
+    Deliberately separate from _fmt_hms below, which formats display
+    strings for the kitchen-timer sensors and leaves the hour unpadded.
+    The two look interchangeable and are not: a single-digit hour is
+    mis-parsed by the firmware, and writing '0:10:00' for a ten-minute
+    cook produced a ten-hour one on hardware (2026-09-20). The measured
+    start payload in docs/oven-cook-start.md is '00:01:00'.
+
+    Anything writing operationTime or remainingTime must come through
+    here; that these were two independent format expressions is how the
+    divergence happened in the first place."""
+    h, m = divmod(int(minutes), 60)
+    return f"{h:02d}:{m:02d}:00"
+
+
 def _fmt_hms(seconds):
     """Format an integer second count as `H:MM:SS`. Returns None on
     bad input so callers can leave the field null rather than emitting
@@ -118,6 +177,81 @@ def _fmt_hms(seconds):
     h, rest = divmod(s, 3600)
     m, sec = divmod(rest, 60)
     return f"{h}:{m:02d}:{sec:02d}"
+
+
+# ---------------------------------------------------------------------
+# modeSpec — the board's own statement of what each mode will accept.
+# `/mode/vs/0` carries it as a JSON *string*, one entry per mode, whose
+# `control` field is the gate on remote start:
+#
+#   Start&Setting  remote start accepted
+#   Setting        adjustable while running, not startable
+#   NotSupported   neither
+#
+# See docs/oven-cook-start.md. Every bound below is read from the board
+# rather than assumed, so a model with a different mode table gates
+# itself correctly.
+# ---------------------------------------------------------------------
+_NOT_SUPPORTED = 'NotSupported'
+
+
+def _spec_int(entry, key):
+    v = entry.get(key)
+    if v is None or v == _NOT_SUPPORTED:
+        return None
+    return _int(v)
+
+
+def _hms_to_minutes(v):
+    """'HH:MM:SS' → integer minutes, or None."""
+    if not isinstance(v, str) or v == _NOT_SUPPORTED:
+        return None
+    try:
+        h, m, s = v.split(':')
+        return int(h) * 60 + int(m) + (1 if int(s) > 0 else 0)
+    except (ValueError, AttributeError):
+        return None
+
+
+def parse_mode_spec(links):
+    """{mode: {...bounds...}} from `/mode/vs/0`'s modeSpec.
+
+    Returns {} when the resource is unseeded or the field is missing or
+    unparseable, which callers must treat as "cannot start anything"
+    rather than "no restrictions"."""
+    raw = (links.get('/mode/vs/0') or {}).get('x.com.samsung.da.modeSpec')
+    if not isinstance(raw, str):
+        return {}
+    try:
+        entries = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(entries, list):
+        return {}
+    out = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        mode = e.get('mode')
+        if not isinstance(mode, str):
+            continue
+        out[mode] = {
+            'control':      e.get('control'),
+            'startable':    e.get('control') == 'Start&Setting',
+            'temp_min_c':   _spec_int(e, 'tempMinC'),
+            'temp_max_c':   _spec_int(e, 'tempMaxC'),
+            'temp_default_c': _spec_int(e, 'tempDefaultC'),
+            'temp_step_c':  _spec_int(e, 'tempIntervalC') or SETPOINT_STEP_C,
+            'time_min':     _hms_to_minutes(e.get('timeMin')),
+            'time_max':     _hms_to_minutes(e.get('timeMax')),
+            'time_default': _hms_to_minutes(e.get('timeDefault')),
+        }
+    return out
+
+
+def startable_modes(links):
+    """Modes the board says it will start, in the order it lists them."""
+    return [m for m, s in parse_mode_spec(links).items() if s['startable']]
 
 
 # ---------------------------------------------------------------------
@@ -238,6 +372,10 @@ def flatten(links):
                      if fw_update_available is not None else None)
 
     return {
+        # Popped by project_program() before publish — the parsed
+        # modeSpec is how the staged program gets its bounds, and
+        # project() has no link dict of its own.
+        SPEC_KEY:                  parse_mode_spec(links),
         'machine_state':           machine_state,
         # `cycle_active` gates the writable controls in HA. The oven
         # only honours setpoint / cook-time / option writes (and Stop)
@@ -251,6 +389,13 @@ def flatten(links):
         'operation_time_minutes':  op_min,
         'completion_time':         remaining,
         'completion_minutes':      rem_min,
+        # The appliance's own remainingTime, published unmodified.
+        # `completion_*` above is overwritten by project() with an
+        # extrapolation while a cycle runs, which is right for a UI and
+        # wrong for measuring what the appliance actually does — e.g.
+        # whether the countdown holds during preheat. Keep both.
+        'remaining_time':          remaining,
+        'remaining_minutes':       rem_min,
         'current_temp_c':          cur_c,
         'target_temp_c':           des_c,
         'door':                    door,
@@ -346,7 +491,7 @@ def project(state, sensors):
             sensors['lamp'] = 'On'
         elif door_open is False:
             sensors['lamp'] = 'Off'
-    return sensors
+    return project_program(state, sensors)
 
 
 def log_state_change(sensors):
@@ -450,6 +595,11 @@ CMD_POWER        = 'cmd/power'
 CMD_STOP         = 'cmd/stop'
 CMD_SETPOINT     = 'cmd/setpoint'
 CMD_COOK_TIME    = 'cmd/cook_time'
+CMD_PROG_MODE    = 'cmd/program_mode'
+CMD_PROG_TEMP    = 'cmd/program_temp'
+CMD_PROG_TIME    = 'cmd/program_time'
+CMD_START        = 'cmd/start'
+CMD_START_PROGRAM = 'cmd/start_program'
 # NOTE — no CMD_START or CMD_MODE. Reverse-engineered 2026-05-31:
 #   * `state='Run'` writes to /operational/state/vs/0 are accepted
 #     (2.04) and machine briefly goes active, but the oven cavity
@@ -653,14 +803,256 @@ def build_discovery(topic_prefix, ha_prefix, device_name):
     out.append((f"{ha_prefix}/number/{topic_prefix}/cook_time/config",
                 encode(cfg)))
 
+    # --- staged cook program (idle-only) ----------------------------
+    # A cook start is one batch write carrying mode, setpoint and cook
+    # time together, so these three entities stage a program in the
+    # bridge and the Start button sends it. They are the mirror image
+    # of Setpoint / Cook time above: those are live and cycle-gated,
+    # these are idle-gated, so exactly one pair is ever actionable and
+    # neither control ever changes meaning under the user.
+    prog_avail = avail_with_remote_and_idle(
+        avail_topic, remote_topic, cycle_topic)
+
+    cfg = {
+        'name':              'Program',
+        'unique_id':         f"{topic_prefix}_program",
+        'object_id':         f"{topic_prefix}_program",
+        'state_topic':       state_topic,
+        'value_template':    "{{ value_json.program_mode if value_json.program_mode else 'None' }}",
+        'command_topic':     f"{topic_prefix}/{CMD_PROG_MODE}",
+        # Fixed at discovery time, before any resource has been read, so
+        # this is the class-wide list. The board's live answer is
+        # published as `program_startable` and is what Start validates
+        # against, so an option this unit cannot start is refused with a
+        # reason rather than sent.
+        'options':           ['None'] + list(PROGRAM_MODES),
+        'icon':              'mdi:chef-hat',
+        'availability':      prog_avail,
+        'availability_mode': 'all',
+        'device':            dev,
+    }
+    out.append((f"{ha_prefix}/select/{topic_prefix}/program/config",
+                encode(cfg)))
+
+    cfg = {
+        'name':              'Program temperature',
+        'unique_id':         f"{topic_prefix}_program_temp",
+        'object_id':         f"{topic_prefix}_program_temp",
+        'state_topic':       state_topic,
+        'value_template':    '{{ value_json.program_temp_c if value_json.program_temp_c is not none else 0 }}',
+        'command_topic':     f"{topic_prefix}/{CMD_PROG_TEMP}",
+        # Union bounds across the class; the selected mode's own
+        # tempMinC/tempMaxC are the real check and are applied at Start.
+        'min':               SETPOINT_MIN_C,
+        'max':               SETPOINT_MAX_C,
+        'step':              SETPOINT_STEP_C,
+        'unit_of_measurement': '°C',
+        'device_class':      'temperature',
+        'mode':              'box',
+        'icon':              'mdi:thermometer',
+        'availability':      prog_avail,
+        'availability_mode': 'all',
+        'device':            dev,
+    }
+    out.append((f"{ha_prefix}/number/{topic_prefix}/program_temp/config",
+                encode(cfg)))
+
+    cfg = {
+        'name':              'Program duration',
+        'unique_id':         f"{topic_prefix}_program_time",
+        'object_id':         f"{topic_prefix}_program_time",
+        'state_topic':       state_topic,
+        'value_template':    '{{ value_json.program_minutes if value_json.program_minutes is not none else 0 }}',
+        'command_topic':     f"{topic_prefix}/{CMD_PROG_TIME}",
+        'min':               1,
+        'max':               1439,
+        'step':              1,
+        'unit_of_measurement': 'min',
+        'mode':              'box',
+        'icon':              'mdi:timer-outline',
+        'availability':      prog_avail,
+        'availability_mode': 'all',
+        'device':            dev,
+    }
+    out.append((f"{ha_prefix}/number/{topic_prefix}/program_time/config",
+                encode(cfg)))
+
+    # --- button: Start ----------------------------------------------
+    # Momentary by design: a switch could be left latched, and this one
+    # makes an appliance heat. Availability covers bridge up, Remote
+    # Control on and no cycle running; the staged program is checked
+    # against the board's own modeSpec when pressed, so a program the
+    # board will not start is refused with a logged reason.
+    #
+    # For a confirmation step, set `confirmation` on the Lovelace
+    # button card — MQTT discovery has no equivalent.
+    cfg = {
+        'name':              'Start',
+        'unique_id':         f"{topic_prefix}_start",
+        'object_id':         f"{topic_prefix}_start",
+        'command_topic':     f"{topic_prefix}/{CMD_START}",
+        'payload_press':     'Start',
+        'icon':              'mdi:play',
+        'availability':      prog_avail,
+        'availability_mode': 'all',
+        'device':            dev,
+    }
+    out.append((f"{ha_prefix}/button/{topic_prefix}/start/config",
+                encode(cfg)))
+
     # --- removal: publish empty payload to the discovery topics of
     # entities we used to expose. HA treats an empty retained payload
-    # on a discovery topic as "delete this entity", so previously-set
-    # up Start buttons and Cooking-mode selects disappear cleanly.
-    out.append((f"{ha_prefix}/button/{topic_prefix}/start/config", b''))
+    # on a discovery topic as "delete this entity", so the old
+    # read-only Cooking-mode select disappears cleanly.
     out.append((f"{ha_prefix}/select/{topic_prefix}/mode/config",  b''))
 
     return out
+
+
+# ---------------------------------------------------------------------
+# Staged cook program.
+#
+# A cook start is one OCF batch write carrying mode, setpoint and cook
+# time together — the appliance will not assemble a job from separate
+# writes while it is idle (docs/oven-cook-start.md). HA entities write
+# independently, so the three parameters are staged in bridge-local
+# state and the Start button assembles the batch.
+#
+# The program lives in the descriptor state dict, which is the same
+# dict threaded into on_observation and project, so project() can
+# publish the staged values back for the entities to display.
+# ---------------------------------------------------------------------
+PROGRAM_KEY = 'program'
+
+#: flatten() stashes the parsed modeSpec here so project() can reach it
+#: without needing the link dict; project_program() pops it before the
+#: sensor dict is published, so it never reaches MQTT.
+SPEC_KEY = '_mode_spec'
+
+
+def _program(state):
+    prog = state.get(PROGRAM_KEY)
+    if prog is None:
+        prog = state[PROGRAM_KEY] = {'mode': None, 'temp_c': None,
+                                     'minutes': None}
+    return prog
+
+
+def _apply_mode_defaults(prog, spec):
+    """Adopt a mode's own default temperature and duration.
+
+    Called when the staged mode changes, so picking a program lands the
+    board's defaults the way selecting it on the panel does, instead of
+    carrying the previous mode's numbers into one whose range may not
+    even contain them."""
+    prog['temp_c'] = spec.get('temp_default_c')
+    prog['minutes'] = spec.get('time_default')
+
+
+def project_program(state, sensors):
+    """Publish the staged program plus the bounds it is checked against.
+
+    `program_startable` is what the board declares right now, which is
+    what the Start button actually validates against. The select's
+    options are fixed at discovery time and cannot track it, so
+    publishing it gives an automation — and anyone reading the state
+    topic — the real answer."""
+    prog = _program(state)
+    spec_all = sensors.pop(SPEC_KEY, None) or {}
+    spec = spec_all.get(prog['mode'] or '', {})
+    sensors['program_mode'] = prog['mode']
+    sensors['program_temp_c'] = prog['temp_c']
+    sensors['program_minutes'] = prog['minutes']
+    sensors['program_startable'] = sorted(
+        m for m, s in spec_all.items() if s['startable'])
+    sensors['program_temp_min_c'] = spec.get('temp_min_c')
+    sensors['program_temp_max_c'] = spec.get('temp_max_c')
+    sensors['program_time_min'] = spec.get('time_min')
+    sensors['program_time_max'] = spec.get('time_max')
+    sensors['program_ready'] = _program_error(
+        prog, spec_all, sensors) is None
+    return sensors
+
+
+def _program_error(prog, spec_all, sensors):
+    """None when the staged program can be sent, else why not.
+
+    Every bound is the board's own. Checking here rather than letting
+    the firmware refuse means the reason reaches the log as a sentence
+    instead of a bare 4.xx."""
+    mode = prog.get('mode')
+    if not mode:
+        return 'no program selected'
+    if not spec_all:
+        return ('the board publishes no modeSpec, so it declares no '
+                'startable mode')
+    spec = spec_all.get(mode)
+    if spec is None:
+        return f'{mode} is not a mode this board reports'
+    if not spec['startable']:
+        return (f"the board declares {mode} as {spec['control']!r}, "
+                f"not Start&Setting")
+
+    temp = prog.get('temp_c')
+    lo, hi = spec['temp_min_c'], spec['temp_max_c']
+    if lo is not None or hi is not None:
+        if temp is None:
+            return f'{mode} needs a temperature'
+        if lo is not None and temp < lo:
+            return f'{temp}C is below {mode} minimum {lo}C'
+        if hi is not None and temp > hi:
+            return f'{temp}C is above {mode} maximum {hi}C'
+
+    mins = prog.get('minutes')
+    tlo, thi = spec['time_min'], spec['time_max']
+    if tlo is not None or thi is not None:
+        if mins is None:
+            return f'{mode} needs a duration'
+        if tlo is not None and mins < tlo:
+            return f'{mins}min is below {mode} minimum {tlo}min'
+        if thi is not None and mins > thi:
+            return f'{mins}min is above {mode} maximum {thi}min'
+
+    if not sensors.get('remote_control_binary'):
+        return 'Remote Control is off at the appliance'
+    if sensors.get('machine_state') == 'active':
+        return 'a cycle is already running'
+    return None
+
+
+def build_start_batch(prog, spec_all, links):
+    """The OCF batch that starts a cook.
+
+    Shape and field names are the measured ones from
+    docs/oven-cook-start.md: a bare `/devices/0` marker first, then one
+    element per resource, with the run command carried inside the
+    `/operational/state/vs/0` element rather than sent separately."""
+    mode = prog['mode']
+    spec = spec_all.get(mode, {})
+    batch = [
+        {'href': '/devices/0'},
+        {'href': '/mode/vs/0',
+         'rep': {'x.com.samsung.da.modes': [mode]}},
+    ]
+    # Modes whose spec reports no temperature range take no setpoint
+    # element; sending one would be inventing a field the board did not
+    # advertise for that mode.
+    if spec.get('temp_min_c') is not None or spec.get('temp_max_c') is not None:
+        items = _temps_items(links) or [{}]
+        unit = items[0].get('x.com.samsung.da.unit') or 'Celsius'
+        batch.append({
+            'href': '/temperatures/vs/0',
+            'rep': {'x.com.samsung.da.items': [{
+                'x.com.samsung.da.desired': str(prog['temp_c']),
+                'x.com.samsung.da.id':      '0',
+                'x.com.samsung.da.unit':    unit,
+            }]},
+        })
+    op_rep = {'x.com.samsung.da.state': 'Run'}
+    if prog.get('minutes') is not None:
+        op_rep['x.com.samsung.da.operationTime'] = _hms_wire(prog['minutes'])
+    batch.append({'href': '/operational/state/vs/0', 'rep': op_rep})
+    return batch
 
 
 # ---------------------------------------------------------------------
@@ -687,7 +1079,101 @@ def _temps_items(links):
     return [dict(it) for it in items] if items else None
 
 
-def command_handlers():
+def command_handlers(state=None):
+    """Handlers for this appliance class.
+
+    `state` is the descriptor state dict; the staged cook program lives
+    in it so project() can publish it. It defaults to None so a test can
+    build the read-modify-write handlers without one."""
+    state = {} if state is None else state
+
+    # --- staged program -------------------------------------------
+    # These four change bridge-local state only and send nothing, so
+    # they return LOCAL_ONLY rather than None; None means rejected.
+
+    def _program_mode(p, links):
+        prog = _program(state)
+        if p in ('None', '', 'none'):
+            prog.update(mode=None, temp_c=None, minutes=None)
+            return LOCAL_ONLY
+        if p not in PROGRAM_MODES:
+            return None
+        prog['mode'] = p
+        # Adopt the board's own defaults for the new mode where it
+        # publishes them, so the staged numbers are always inside the
+        # range they will be checked against.
+        spec = parse_mode_spec(links).get(p)
+        if spec is not None:
+            _apply_mode_defaults(prog, spec)
+        return LOCAL_ONLY
+
+    def _program_temp(p, _links):
+        v = _int(_num(p))
+        if v is None:
+            return None
+        _program(state)['temp_c'] = v
+        return LOCAL_ONLY
+
+    def _program_time(p, _links):
+        v = _int(_num(p))
+        if v is None or v < 0:
+            return None
+        _program(state)['minutes'] = v
+        return LOCAL_ONLY
+
+    def _start(_p, links):
+        prog = _program(state)
+        spec_all = parse_mode_spec(links)
+        why = _program_error(prog, spec_all, flatten(links))
+        if why is not None:
+            log.warning("start refused: %s", why)
+            return None
+        log.info("starting cook: %s %sC %smin",
+                 prog['mode'], prog['temp_c'], prog['minutes'])
+        return ['device', '0'], build_start_batch(prog, spec_all, links)
+
+    def _start_program(p, links):
+        """Stage and start in one message, for automations.
+
+        The entity path needs four interactions to start a cook, which
+        is right for a person and wrong for an automation. This takes
+        {"mode": ..., "temp_c": ..., "minutes": ...} and does the lot,
+        the same shape HA core's Miele integration uses for
+        miele.set_program_oven. Omitted temperature or duration fall
+        back to the mode's own defaults."""
+        try:
+            req = json.loads(p)
+        except (ValueError, TypeError):
+            log.warning("start_program: payload is not JSON: %r", p)
+            return None
+        if not isinstance(req, dict):
+            log.warning("start_program: payload is not an object: %r", p)
+            return None
+        mode = req.get('mode')
+        if mode not in PROGRAM_MODES:
+            log.warning("start_program: unknown mode %r", mode)
+            return None
+        spec_all = parse_mode_spec(links)
+        prog = dict(_program(state))
+        prog['mode'] = mode
+        spec = spec_all.get(mode)
+        if spec is not None:
+            _apply_mode_defaults(prog, spec)
+        if 'temp_c' in req:
+            prog['temp_c'] = _int(_num(req.get('temp_c')))
+        if 'minutes' in req:
+            prog['minutes'] = _int(_num(req.get('minutes')))
+        why = _program_error(prog, spec_all, flatten(links))
+        if why is not None:
+            log.warning("start_program refused: %s", why)
+            return None
+        # Only adopt it as the staged program once it has passed, so a
+        # rejected automation does not leave a bad program in the UI.
+        _program(state).update(prog)
+        log.info("start_program: %s %sC %smin",
+                 prog['mode'], prog['temp_c'], prog['minutes'])
+        return ['device', '0'], build_start_batch(prog, spec_all, links)
+
     def _lamp(p, links):
         if p not in ('On', 'Off'):
             return None
@@ -775,8 +1261,7 @@ def command_handlers():
             return None
         if not (0 <= minutes <= 1439):
             return None
-        h, m = divmod(minutes, 60)
-        hms = f"{h:02d}:{m:02d}:00"
+        hms = _hms_wire(minutes)
         return ['operational', 'state', 'vs', '0'], {
             'x.com.samsung.da.operationTime': hms,
             'x.com.samsung.da.remainingTime': hms,
@@ -791,6 +1276,11 @@ def command_handlers():
         CMD_STOP:         _stop,
         CMD_SETPOINT:     _setpoint,
         CMD_COOK_TIME:    _cook_time,
+        CMD_PROG_MODE:    _program_mode,
+        CMD_PROG_TEMP:    _program_temp,
+        CMD_PROG_TIME:    _program_time,
+        CMD_START:        _start,
+        CMD_START_PROGRAM: _start_program,
     }
 
 
