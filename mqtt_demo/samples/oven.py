@@ -34,6 +34,7 @@ yet."""
 import json
 import logging
 import time
+from datetime import datetime, timezone
 
 from ..descriptor import (
     LOCAL_ONLY,
@@ -431,17 +432,50 @@ def flatten(links):
 # dryer behaviour). Capture (ts, total_seconds) at each push and
 # extrapolate downward while machine_state == active.
 # ---------------------------------------------------------------------
+def _hms_to_seconds(v):
+    if not isinstance(v, str):
+        return None
+    try:
+        h, m, s = v.split(':')
+        return int(h) * 3600 + int(m) * 60 + int(s)
+    except (ValueError, AttributeError):
+        return None
+
+
 def on_observation(state, href, rep):
     now = time.time()
     if href == '/operational/state/vs/0':
-        rem = rep.get('x.com.samsung.da.remainingTime')
-        if isinstance(rem, str):
-            try:
-                h, m, s = rem.split(':')
-                state['remaining_anchor'] = (now,
-                                             int(h) * 3600 + int(m) * 60 + int(s))
-            except (ValueError, AttributeError):
-                pass
+        total = _hms_to_seconds(rep.get('x.com.samsung.da.operationTime'))
+        rem = _hms_to_seconds(rep.get('x.com.samsung.da.remainingTime'))
+        prog = _int(rep.get('x.com.samsung.da.progressPercentage'))
+        state['_total_s'] = total
+
+        # Anchor only on a CHANGE, for the same reason the door and lamp
+        # timestamps below do: this resource is polled twice a second
+        # during a cycle, so re-anchoring on every update pins the
+        # extrapolation to the value it was just given. The clock then
+        # sits still for a whole granule and jumps — which is what it
+        # did, because this used to anchor unconditionally.
+        #
+        # Anchoring on the transition also removes the quantisation: at
+        # the instant remaining steps 600 → 540, remaining really is
+        # 540, so the only error left is the polling interval.
+        if rem != state.get('_rem_last'):
+            state['_rem_last'] = rem
+            if rem is not None:
+                state['remaining_anchor'] = (now, rem)
+        if prog != state.get('_prog_last'):
+            state['_prog_last'] = prog
+            if prog is not None:
+                state['progress_anchor'] = (now, prog)
+
+        # Drop the anchors when the cycle ends so the next one cannot
+        # inherit them.
+        sam = rep.get('x.com.samsung.da.state')
+        if _SAMSUNG_STATE_TO_OCF.get(sam, sam) != 'active':
+            for k in ('remaining_anchor', 'progress_anchor',
+                      '_rem_last', '_prog_last'):
+                state.pop(k, None)
         return
     # Door + lamp tracking feeds the lamp/door coupling in project().
     # Both timestamps bump only on value CHANGES so the comparison
@@ -463,19 +497,84 @@ def on_observation(state, href, rep):
             state['_lamp_change_ts'] = now
 
 
+def estimate_remaining(state, now):
+    """(seconds_remaining, source) for the cook clock, or (None, None).
+
+    Two fields describe the same clock at different resolutions:
+
+      remainingTime        steps once a minute, so 60s granularity
+      progressPercentage   steps once per 1% of the cook, so the
+                           granularity is total/100
+
+    Progress is the finer of the two for any cook under 100 minutes,
+    which is most of them: 6s on a ten-minute bake against 60s. Past
+    that the arithmetic inverts and remainingTime wins, so this picks
+    whichever is actually finer for the duration in hand rather than
+    always preferring one. `clock_source` says which was used.
+
+    Both were measured to be the same clock, running from the moment of
+    Start and through preheat rather than from reaching temperature
+    (local-tools/watch_preheat.py, 2026-09-20): a 10-minute cook ticked
+    remaining down 60s per wall minute while progress moved 1% per 6s,
+    implying the same 10-minute total.
+
+    Whichever source is chosen, the value is extrapolated by wall clock
+    from its last change, so the published clock advances every second
+    instead of once per granule."""
+    total = state.get('_total_s')
+    cands = []
+
+    pa = state.get('progress_anchor')
+    if total and pa is not None:
+        ts, pct = pa
+        if pct is not None:
+            cands.append(('progress', total / 100.0,
+                          total * (100 - pct) / 100.0 - (now - ts)))
+
+    ra = state.get('remaining_anchor')
+    if ra is not None:
+        ts, secs = ra
+        if secs is not None:
+            cands.append(('remaining', 60.0, secs - (now - ts)))
+
+    if not cands:
+        return None, None
+    source, _granule, value = min(cands, key=lambda c: c[1])
+    value = max(0, int(round(value)))
+    if total:
+        value = min(value, total)
+    return value, source
+
+
 def project(state, sensors):
     sensors = dict(sensors)
     # Remaining-time projection: the oven pushes /operational/state on
     # state transitions but not on remainingTime ticks. Extrapolate
     # from the most recent anchor while the machine is active.
-    anchor = state.get('remaining_anchor')
-    if sensors.get('machine_state') == 'active' and anchor is not None:
-        ts, total = anchor
-        remaining = max(0, int(total - (time.time() - ts)))
-        h, rest = divmod(remaining, 3600)
-        m, s = divmod(rest, 60)
-        sensors['completion_time'] = f"{h}:{m:02d}:{s:02d}"
-        sensors['completion_minutes'] = h * 60 + m + (1 if s > 0 else 0)
+    if sensors.get('machine_state') == 'active':
+        now = time.time()
+        remaining, source = estimate_remaining(state, now)
+        if remaining is not None:
+            h, rest = divmod(remaining, 3600)
+            m, s = divmod(rest, 60)
+            sensors['completion_time'] = f"{h}:{m:02d}:{s:02d}"
+            sensors['completion_minutes'] = h * 60 + m + (1 if s > 0 else 0)
+            sensors['clock_source'] = source
+            # An absolute finish time rather than a ticking countdown.
+            # HA renders a `timestamp` sensor as a live relative time,
+            # so the UI counts down every second on its own while this
+            # value stays CONSTANT between anchor changes — it is
+            # anchor_ts + anchored_remaining, which does not move as
+            # `now` advances.
+            #
+            # That matters because the bridge republishes the whole
+            # state topic whenever any field changes. A per-second
+            # countdown here would republish twice a second for the
+            # length of every cook and write a recorder row per sensor
+            # each time, to show what the frontend can derive for free.
+            sensors['finish_at'] = datetime.fromtimestamp(
+                now + remaining, tz=timezone.utc).isoformat(
+                    timespec='seconds')
     # Lamp / door coupling. The oven hardware auto-drives the lamp from
     # the door state, but /mode/vs/0 only polls every 30s. When a door
     # TRANSITION is more recent than the last lamp VALUE change, derive
@@ -530,6 +629,16 @@ _SENSORS = [
     ('completion_minutes',  'Remaining minutes',
         {'unit_of_measurement': 'min', 'device_class': 'duration',
          'state_class': 'measurement'}),
+    # Absolute finish time. HA turns a timestamp sensor into a live
+    # relative countdown, which is the smooth clock; the fields above
+    # stay minute-resolution so they do not churn the recorder.
+    ('finish_at',           'Finishes at',
+        {'device_class': 'timestamp'}),
+    # Which field drove the clock — progress on a short cook, remaining
+    # on a long one. Diagnostic: it answers "why did the estimate jump"
+    # without needing the bridge log.
+    ('clock_source',        'Clock source',
+        {'icon': 'mdi:timer-cog-outline', 'entity_category': 'diagnostic'}),
     ('current_temp_c',      'Temperature',
         {'unit_of_measurement': '°C', 'device_class': 'temperature',
          'state_class': 'measurement'}),

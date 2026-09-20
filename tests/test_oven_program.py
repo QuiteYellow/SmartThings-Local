@@ -6,6 +6,7 @@ If that test changes, the wire format changed, and it needs a hardware
 run rather than an edit.
 """
 import json
+import time
 
 import pytest
 
@@ -310,3 +311,87 @@ def test_internal_spec_key_never_reaches_mqtt():
     sensors = oven.project(state, oven.flatten(links()))
     assert oven.SPEC_KEY not in sensors
     json.dumps(sensors)     # must be serialisable for the state topic
+
+
+# --- the cook clock ---------------------------------------------------
+
+def op_rep(state='Run', total='00:10:00', remaining='00:10:00', progress='1'):
+    return {'x.com.samsung.da.state': state,
+            'x.com.samsung.da.operationTime': total,
+            'x.com.samsung.da.remainingTime': remaining,
+            'x.com.samsung.da.progressPercentage': progress}
+
+
+def test_anchor_only_moves_when_the_value_changes():
+    """The bug this replaced: /operational/state/vs/0 is polled twice a
+    second, so re-anchoring on every update pinned the extrapolation to
+    the quantised value and the clock never advanced between granules."""
+    st = {}
+    oven.on_observation(st, '/operational/state/vs/0', op_rep())
+    first = st['remaining_anchor']
+    oven.on_observation(st, '/operational/state/vs/0', op_rep())   # unchanged
+    assert st['remaining_anchor'] == first, 'anchor moved on an unchanged value'
+    oven.on_observation(st, '/operational/state/vs/0',
+                        op_rep(remaining='00:09:00'))
+    assert st['remaining_anchor'] != first
+
+
+def test_clock_advances_between_device_updates():
+    st = {}
+    oven.on_observation(st, '/operational/state/vs/0', op_rep())
+    ts = st['remaining_anchor'][0]
+    a, _ = oven.estimate_remaining(st, ts)
+    b, _ = oven.estimate_remaining(st, ts + 30)
+    assert a - b == 30, 'clock did not advance with wall time'
+
+
+def test_progress_drives_a_short_cook():
+    """Granularity is total/100 for progress against 60s for remaining,
+    so progress is finer for anything under 100 minutes."""
+    st = {}
+    oven.on_observation(st, '/operational/state/vs/0',
+                        op_rep(total='00:10:00', progress='20'))
+    remaining, source = oven.estimate_remaining(st, st['progress_anchor'][0])
+    assert source == 'progress'
+    assert remaining == 480          # 80% of 600s
+
+
+def test_remaining_drives_a_long_cook():
+    """Past 100 minutes the arithmetic inverts: 1% of a 3-hour cook is
+    108s, coarser than remainingTime's 60s."""
+    st = {}
+    oven.on_observation(st, '/operational/state/vs/0',
+                        op_rep(total='03:00:00', remaining='02:30:00',
+                               progress='17'))
+    _, source = oven.estimate_remaining(st, st['remaining_anchor'][0])
+    assert source == 'remaining'
+
+
+def test_finish_at_is_stable_between_anchor_changes():
+    """It has to be: the bridge republishes the whole state topic on any
+    change, so a moving finish time would republish twice a second for
+    the length of every cook."""
+    st = {}
+    oven.on_observation(st, '/operational/state/vs/0', op_rep())
+    base = oven.flatten(links(state='Run'))
+    base['machine_state'] = 'active'
+    first = oven.project(st, dict(base))['finish_at']
+    time.sleep(1.1)
+    assert oven.project(st, dict(base))['finish_at'] == first
+
+
+def test_clock_resets_when_the_cycle_ends():
+    st = {}
+    oven.on_observation(st, '/operational/state/vs/0', op_rep())
+    assert 'remaining_anchor' in st
+    oven.on_observation(st, '/operational/state/vs/0',
+                        op_rep(state='Ready', remaining='00:00:00',
+                               total='00:00:00', progress='0'))
+    assert 'remaining_anchor' not in st
+    assert 'progress_anchor' not in st
+
+
+def test_clock_is_absent_while_idle():
+    sensors = oven.project({}, oven.flatten(links()))
+    assert 'finish_at' not in sensors
+    assert sensors.get('clock_source') is None

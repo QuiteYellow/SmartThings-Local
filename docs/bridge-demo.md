@@ -192,6 +192,14 @@ data:
 
 `temp_c` and `minutes` are optional and fall back to that mode's own defaults. The same validation applies, and a rejected message leaves whatever was staged in the UI untouched.
 
+#### The cook clock
+
+`remainingTime` and `progressPercentage` are the same clock at different resolutions. `remainingTime` steps once a minute; `progressPercentage` steps once per 1% of the cook, so its granularity is the duration over 100 — 6 s on a ten-minute bake. The bridge uses whichever is finer for the duration in hand, which is progress for any cook under 100 minutes and `remainingTime` above that, and publishes the choice as `clock_source`.
+
+Both run from the moment of Start, through preheat, rather than from reaching temperature. Measured 2026-09-20: on a 10-minute Convection at 250 °C, `remaining` fell 60 s per wall minute while progress moved 1% per 6 s, implying the same 10-minute total. So **a set duration includes preheat** — a short cook at a high setpoint is mostly preheat — and a finish time of `now + remaining` needs no correction.
+
+The finish time is published as `finish_at`, an absolute timestamp rather than a ticking countdown. Home Assistant renders a `timestamp` sensor as a live relative time, so the UI counts down every second while the published value stays constant between updates from the appliance. A ticking field would instead republish the whole state topic twice a second for the length of every cook, and write a recorder row per sensor each time, to show what the frontend derives for free.
+
 Start is a momentary button, gated on Remote Control being on at the appliance and on no cycle running. It makes an appliance heat: for a confirmation step, set `confirmation` on the Lovelace button card, which MQTT discovery has no equivalent for.
 
 **The oven doesn't push OBSERVE on `/mode/vs/0` writes** (the dryer does). The bridge handles this transparently because state freshness comes from polling rather than from OBSERVE:
