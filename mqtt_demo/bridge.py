@@ -79,12 +79,24 @@ OBSERVE_REFRESH_INTERVAL_S = 6 * 3600.0
 CMD_SYNC_CLOCK = 'cmd/sync_clock'
 
 # Base for the fixed DTLS source port; each appliance binds base+index so
-# every reconnect uses the same 5-tuple. If the bridge dies without
-# close_notify (crash, SIGKILL), the device holds an orphaned association
-# keyed to the old 5-tuple; re-handshaking from the SAME port makes the
-# device evict the orphan (RFC 6347 §4.2.8) instead of wedging on it —
-# the root cause behind stale sessions on always-on appliances, where the
-# orphan otherwise lingers 5-15 min.
+# every reconnect uses the same 5-tuple. The reason is peer accumulation,
+# not eviction. In the firmware these appliances run the peer table is
+# unbounded -- no cap, no idle timeout, no LRU -- and an entry is keyed on
+# address and port, so a client that reconnects from a fresh ephemeral port
+# every time leaves the old entry live and piles up mbedTLS contexts on an
+# embedded device. One port means one entry per appliance.
+#
+# Reconnecting over an entry the device still holds is cheap and clears
+# itself. A ClientHello is not application data, so it destroys the stale
+# peer; measured, that costs the dryer one extra ClientHello and about 1.1s
+# (4/4 trials) and the oven nothing.
+#
+# Earlier comments here credited RFC 6347 §4.2.8 eviction. That belongs to
+# the tinydtls lineage, and the stack these appliances run has no such path
+# and no timer that reaps an abandoned association. An unclean exit has
+# been reported leaving a device unreachable for minutes, which is real;
+# a reaping timer as the cause is not.
+#
 # Deliberately below 32768. Linux's default net.ipv4.ip_local_port_range is
 # 32768-60999, and the bridge now runs with host networking, so a base inside
 # that range competes with every ephemeral allocation on the host and bind()

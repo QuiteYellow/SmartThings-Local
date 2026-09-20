@@ -557,15 +557,20 @@ class DtlsCoapSession:
         self._min_req_interval = 1.0 / rate_limit_rps
         self._write_max_attempts = max(1, int(write_max_attempts))
         # Optional fixed UDP source port. A client that dies without
-        # close_notify leaves an orphaned DTLS association on the device,
-        # keyed to the old 5-tuple; reconnecting from a fresh ephemeral
-        # port presents as a *new* peer and the orphan lingers until the
-        # device's own timer reaps it (observed 5-15 min on always-on
-        # appliances). Binding the same source port on every connect makes
-        # a restart re-handshake over the SAME 5-tuple, which RFC 6347
-        # §4.2.8 requires the server to treat as a rebooted peer: complete
-        # the new handshake and discard the old association. Verified
-        # accepted on the oven, 2026-07-26.
+        # close_notify leaves its peer entry live on the device, keyed to
+        # the old 5-tuple. Reconnecting from a fresh ephemeral port presents
+        # as a new peer and leaves that entry in place; where the peer table
+        # has no cap, no idle timeout and no LRU, as in the firmware these
+        # appliances run, those entries accumulate. Binding the same source
+        # port on every connect re-handshakes over the SAME 5-tuple, which
+        # the device answers by destroying the stale peer, since a
+        # ClientHello is not application data it can read. Verified accepted
+        # on the oven, 2026-07-26, and measured to cost the dryer one extra
+        # ClientHello and the oven nothing.
+        #
+        # One correction to what this comment used to say. It is not RFC
+        # 6347 §4.2.8: that lineage is tinydtls, and nothing here waits on a
+        # device-side timer to reap the old association.
         self.local_port = local_port
         self.family = family
 
