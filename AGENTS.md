@@ -31,13 +31,13 @@ Those reference stacks are public. None is checked into this repository, and non
 
 | Stack | Source | Pin used here |
 | --- | --- | --- |
-| **IoTivity classic, Samsung's fork** | `github.com/Samsung/TizenRT`, path `external/iotivity/` | `e590f30ab` |
+| **TizenRT's `iotivity_1.2-rel` fork** | `github.com/Samsung/TizenRT`, path `external/iotivity/iotivity_1.2-rel/` | `e590f30ab` |
 | mbedTLS, as that fork links it | `github.com/Samsung/TizenRT`, paths `external/mbedtls/` and `external/include/mbedtls/` | `e590f30ab` (2.7.8) |
 | IoTivity classic, upstream | `github.com/iotivity/iotivity` | `1.2.1`, with `1.3.1`, for contrast only |
 | RT-OCF | `github.com/Samsung/RT-OCF` | `fd41fc4` |
 | iotivity-lite | `github.com/iotivity/iotivity-lite` | `49441ba` |
 
-The first row is the one to cite for the appliances here, because Samsung's fork is what they run. The file this project reasons about most, `ca_adapter_net_ssl.c`, differs between fork and upstream by well over a thousand lines, enough that a line number from one lands somewhere unrelated in the other. Upstream earns its place by showing what Samsung changed, and that is the whole of its use here. Sparse-checkout the path; the repository is large:
+The first row is the one to cite for the appliances here, and cite it by name: **TizenRT's `iotivity_1.2-rel` fork**, not "IoTivity classic". The family label reads as upstream, and upstream predicts handshake behaviour these appliances do not show, so a reader who follows the label reaches a tree that gives the wrong answer. The file this project reasons about most, `ca_adapter_net_ssl.c`, differs between fork and upstream by well over a thousand lines, enough that a line number from one lands somewhere unrelated in the other. Upstream earns its place by showing what Samsung changed, and that is the whole of its use here. Sparse-checkout the path; the repository is large:
 
 ```sh
 git clone --filter=blob:none --no-checkout https://github.com/Samsung/TizenRT.git
