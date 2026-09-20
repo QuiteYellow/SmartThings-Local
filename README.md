@@ -21,6 +21,7 @@ The repo also ships a self-contained **reference bridge demo** (`mqtt_demo/`) th
 - [`docs/firmware-families.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/firmware-families.md) — identifying which OCF stack and directory dialect an appliance runs, and what each stack binds.
 - **[`docs/certificates.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/certificates.md)** — obtaining the client certificate compatible firmware accepts.
 - [`docs/ocf-pki-laundry.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/ocf-pki-laundry.md) — the newer OCF-PKI appliance generation, and why an AC14K_M certificate is refused there.
+- [`docs/oven-cook-start.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/oven-cook-start.md) — starting an oven cycle from a local session: the single collection write that carries the cook parameters and the run command.
 - [`docs/ocf-vd-devices.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/ocf-vd-devices.md) — server-authenticated findings from Samsung VD hardware.
 - [`docs/use-of-ai.md`](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/use-of-ai.md) — how an AI assistant is used here, and the review the output goes through.
 
