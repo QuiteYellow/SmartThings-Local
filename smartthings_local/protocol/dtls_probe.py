@@ -127,10 +127,17 @@ class DtlsLivenessResult:
     rtt_s: float | None = None
     alert: tuple[int, str] | None = None
     error_code: str | None = None
+    #: Source port the reply actually came from, which an OCF stack does not
+    #: guarantee to be ``port`` -- see :func:`probe_dtls_ports`.
+    responder_port: int | None = None
 
     @property
     def is_dtls_server(self):
-        """Return whether a structurally valid first-flight reply arrived."""
+        """Return whether a structurally valid first-flight reply arrived.
+
+        This proves a DTLS server answered, not that it listens on ``port``.
+        Use :attr:`responder_port` for the endpoint to dial.
+        """
         return self.response_kind is not None
 
 
@@ -144,9 +151,21 @@ class DtlsPortProbeResult:
 
     @property
     def live_ports(self):
-        """Return proven listeners in caller-supplied order."""
+        """Return the dialled ports that drew a reply, in caller order.
+
+        A reply is not proof that the server listens on the port dialled;
+        :attr:`responder_ports` is. Kept for diagnostics.
+        """
         return tuple(
             result.port for result in self.results if result.is_dtls_server)
+
+    @property
+    def responder_ports(self):
+        """Return the distinct ports replies actually came from."""
+        return tuple(dict.fromkeys(
+            result.responder_port
+            for result in self.results
+            if result.is_dtls_server and result.responder_port is not None))
 
 
 def _validate_liveness_options(port, retries, timeout, mtu):
@@ -320,6 +339,8 @@ def _probe_dtls_port_with_flight(
                     attempts=attempts,
                     rtt_s=time.monotonic() - started,
                     alert=alert,
+                    responder_port=getattr(
+                        sock, 'observed_reply_port', None),
                 )
         return DtlsLivenessResult(
             port=port,
@@ -380,10 +401,17 @@ def probe_dtls_ports(
         mtu=1200, family=socket.AF_UNSPEC):
     """Probe a bounded port set concurrently and select without guessing.
 
-    One proven listener is selected. If multiple listeners answer, a proven
-    ``preferred_port`` wins; otherwise the explicit outcome is ``ambiguous``.
-    Results preserve the caller's de-duplicated port order. Each worker's
-    ``timeout`` starts after synchronous platform name resolution.
+    Selection is made on the port each reply arrived *from*, not the port it
+    was sent to: an OCF stack answers a first flight from its own ephemeral
+    DTLS socket regardless of the port addressed, so the port dialled proves
+    nothing about where the server listens. One proven responder is selected.
+    If replies come from several distinct ports, a matching ``preferred_port``
+    wins; otherwise the explicit outcome is ``ambiguous``. Results preserve
+    the caller's de-duplicated port order, and each entry carries both the
+    port dialled and the ``responder_port`` that answered. A reply whose
+    source port went unrecorded cannot be selected on and yields
+    ``unreachable`` rather than falling back to the port dialled. Each
+    worker's ``timeout`` starts after synchronous platform name resolution.
     """
     _validate_probe_family(family)
     ordered_ports = tuple(dict.fromkeys(ports))
@@ -439,14 +467,36 @@ def probe_dtls_ports(
                 )
 
     results = tuple(by_port[port] for port in ordered_ports)
-    live_ports = tuple(
-        result.port for result in results if result.is_dtls_server)
-    if preferred_port is not None and preferred_port in live_ports:
-        return DtlsPortProbeResult(SELECTED, preferred_port, results)
-    if len(live_ports) == 1:
-        return DtlsPortProbeResult(SELECTED, live_ports[0], results)
-    if live_ports:
+    proven = tuple(result for result in results if result.is_dtls_server)
+
+    # Select on the port the device answered *from*, not the one dialled. An
+    # OCF stack binds its DTLS socket to port 0 and serves discovery from a
+    # separate well-known socket, so it answers a first flight from that one
+    # ephemeral port whatever port was addressed, and our socket filters
+    # inbound on host only. Counting dialled ports therefore reports every
+    # probed port as a listener -- observed against two appliances once the
+    # bridge ran with host networking, where a NAT was no longer discarding
+    # the mismatched replies for us.
+    responder_ports = tuple(dict.fromkeys(
+        result.responder_port
+        for result in proven
+        if result.responder_port is not None))
+    if responder_ports:
+        if preferred_port is not None and preferred_port in responder_ports:
+            return DtlsPortProbeResult(SELECTED, preferred_port, results)
+        if len(responder_ports) == 1:
+            return DtlsPortProbeResult(SELECTED, responder_ports[0], results)
         return DtlsPortProbeResult(AMBIGUOUS, None, results)
+
+    # Nothing answered, or something answered and the socket did not report
+    # the port it answered from. The second case is a broken invariant, not a
+    # device condition: a proven reply always carries that port, because the
+    # socket records it as it accepts the datagram. There is no safe way to
+    # select without it -- the one other rule available, the port dialled, is
+    # the bug this replaced, since an OCF stack answers from its own port
+    # whatever was addressed. So report no port either way, and a regression
+    # in the socket layer shows up as a failure to connect rather than as a
+    # session opened confidently against the wrong endpoint.
     return DtlsPortProbeResult(UNREACHABLE, None, results)
 
 

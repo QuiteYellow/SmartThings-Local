@@ -301,12 +301,13 @@ def test_liveness_alert_detail_comes_from_valid_epoch_zero_record(monkeypatch):
     assert result.alert == (2, 'unknown_ca')
 
 
-def _liveness(port, *, live=True, error_code=None):
+def _liveness(port, *, live=True, error_code=None, responder_port=None):
     return p.DtlsLivenessResult(
         port=port,
         response_kind=p.HELLO_VERIFY_REQUEST if live else None,
         attempts=1,
         error_code=error_code,
+        responder_port=responder_port,
     )
 
 
@@ -316,7 +317,8 @@ def test_multi_port_probe_runs_concurrently_and_preserves_order(monkeypatch):
 
     def fake_probe(_host, port, **_kwargs):
         barrier.wait(timeout=2.0)
-        return _liveness(port, live=port == 5684)
+        live = port == 5684
+        return _liveness(port, live=live, responder_port=port if live else None)
 
     monkeypatch.setattr(p, '_client_hello_flight', lambda **_kwargs: (b'hello',))
     monkeypatch.setattr(p, '_probe_dtls_port_with_flight', fake_probe)
@@ -332,27 +334,51 @@ def test_multi_port_probe_runs_concurrently_and_preserves_order(monkeypatch):
     )
 
 
-def test_multi_port_probe_reports_ambiguity_without_guessing(monkeypatch):
+def test_one_server_reachable_two_ways_is_not_ambiguous(monkeypatch):
+    # One DTLS server, reachable on the standard CoAPS port and on the
+    # ephemeral port it actually bound, answering both from the ephemeral
+    # one. Measured on two appliances: 5684 and 49155 reply, 5683/5685/40000
+    # and the unused band ports do not. Selecting on the port dialled counted
+    # that as two listeners -- "multiple DTLS listeners answered", then a
+    # confident but wrong 5684 for a device serving 49155.
+    ports = (5684, 49152, 49153, 49154, 49155)
     monkeypatch.setattr(p, '_client_hello_flight', lambda **_kwargs: (b'hello',))
     monkeypatch.setattr(
         p,
         '_probe_dtls_port_with_flight',
-        lambda _host, port, **_kwargs: _liveness(port),
+        lambda _host, port, **_kwargs: _liveness(port, responder_port=49155),
+    )
+
+    result = p.probe_dtls_ports('appliance.invalid', ports)
+
+    assert result.outcome == p.SELECTED
+    assert result.selected_port == 49155
+    assert result.responder_ports == (49155,)
+    # Every dialled port drew a reply; that is diagnostic, not proof.
+    assert result.live_ports == ports
+
+
+def test_distinct_responders_stay_ambiguous(monkeypatch):
+    monkeypatch.setattr(p, '_client_hello_flight', lambda **_kwargs: (b'hello',))
+    monkeypatch.setattr(
+        p,
+        '_probe_dtls_port_with_flight',
+        lambda _host, port, **_kwargs: _liveness(port, responder_port=port),
     )
 
     result = p.probe_dtls_ports('appliance.invalid', (5684, 49154))
 
     assert result.outcome == p.AMBIGUOUS
     assert result.selected_port is None
-    assert result.live_ports == (5684, 49154)
+    assert result.responder_ports == (5684, 49154)
 
 
-def test_multi_port_probe_prefers_previously_proven_listener(monkeypatch):
+def test_preferred_port_is_matched_against_the_responder(monkeypatch):
     monkeypatch.setattr(p, '_client_hello_flight', lambda **_kwargs: (b'hello',))
     monkeypatch.setattr(
         p,
         '_probe_dtls_port_with_flight',
-        lambda _host, port, **_kwargs: _liveness(port),
+        lambda _host, port, **_kwargs: _liveness(port, responder_port=port),
     )
 
     result = p.probe_dtls_ports(
@@ -363,6 +389,44 @@ def test_multi_port_probe_prefers_previously_proven_listener(monkeypatch):
 
     assert result.outcome == p.SELECTED
     assert result.selected_port == 49154
+
+
+def test_probe_records_the_source_port_a_reply_came_from(monkeypatch):
+    fake = _FakeSock(lambda _fake: _hvr())
+    fake.observed_reply_port = 49155
+
+    def open_socket(host, port, *, family, timeout):
+        fake.settimeout(timeout)
+        return fake, object()
+
+    monkeypatch.setattr(p, 'open_host_filtered_udp_socket', open_socket)
+
+    result = p.probe_dtls_port('appliance.invalid', 5684, timeout=0.2)
+
+    assert result.is_dtls_server
+    assert result.port == 5684
+    assert result.responder_port == 49155
+
+
+def test_a_reply_without_a_source_port_is_not_selected_on(monkeypatch):
+    # The socket records the source port as it accepts a datagram, so a proven
+    # reply always has one. If that ever stops being true, the only other rule
+    # available is the port dialled, which is the bug this selection replaced.
+    # Refusing to answer makes the regression a failed connect rather than a
+    # session opened against the wrong endpoint.
+    monkeypatch.setattr(p, '_client_hello_flight', lambda **_kwargs: (b'hello',))
+    monkeypatch.setattr(
+        p,
+        '_probe_dtls_port_with_flight',
+        lambda _host, port, **_kwargs: _liveness(port, responder_port=None),
+    )
+
+    result = p.probe_dtls_ports('appliance.invalid', (5684,), preferred_port=5684)
+
+    assert result.outcome == p.UNREACHABLE
+    assert result.selected_port is None
+    assert result.live_ports == (5684,)
+    assert result.responder_ports == ()
 
 
 def test_multi_port_probe_folds_worker_failure_into_redacted_result(monkeypatch):

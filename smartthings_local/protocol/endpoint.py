@@ -210,8 +210,10 @@ class HostFilteredUdpSocket:
         self._dest = endpoint.sockaddr
         self._host_key = _host_key(endpoint.family, endpoint.sockaddr)
         self._timeout = None
-        #: Source port of the most recent accepted datagram. Diagnostic only;
-        #: replies keep going to the port originally dialled.
+        #: Source port of the most recent accepted datagram.
+        #: ``probe_dtls_ports`` selects on this to find the port a DTLS
+        #: server answers from, so it is read, not merely reported. Sends
+        #: are unaffected: they keep going to the port dialled.
         self.observed_reply_port = None
 
     @property
