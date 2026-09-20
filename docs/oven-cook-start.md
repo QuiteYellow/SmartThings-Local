@@ -32,7 +32,7 @@ t+4s    /mode/vs/0                modes   = ["Defrost"]
         /temperatures/vs/0        desired = "30"    current = "28"
 ```
 
-Two details of that payload are worth stating because they are easy to get wrong. The run command is not a separate step: `x.com.samsung.da.state: "Run"` rides inside the payload's own `/operational/state/vs/0` element alongside the cook time. And no option tokens were sent at all, because `Defrost` on this board supports neither fast preheat nor steam.
+A few details of that payload are worth stating because they are easy to get wrong. The run command is not a separate step: `x.com.samsung.da.state: "Run"` rides inside the payload's own `/operational/state/vs/0` element alongside the cook time. And no option tokens were sent at all, because `Defrost` on this board supports neither fast preheat nor steam.
 
 ### The `/devices/0` element
 
@@ -41,6 +41,8 @@ The write goes to `/device/0`, singular. The first element of the payload is `{"
 **This oven does not need it.** Measured 2026-09-20: the identical batch with the element deleted started the cook first time, reaching `Run` and `Cooking` within four seconds.
 
 **Send it anyway.** That result is one oven, of one model, with one cavity. Nothing here establishes that another board is as relaxed about its absence, and it costs nothing to include, so the version that has been measured working is the one worth sending. The bridge sends it, and this page keeps it in the payload above for the same reason.
+
+**Possibly a legacy name.** A publicly posted dump of the older HTTP API these machines exposed on port 8888, before OCF, has a top-level `Devices` array whose members link to their sub-resources at `/devices/0/information` and `/devices/0/configuration`. The OCF batch has that same shape, one element per sub-resource and all written together, so the marker reads like the older resource name carried across the generation change. Treat that as inference from the shape of two APIs: the evidence is someone else's capture of different hardware, and both firmwares are silent on the question. It bears on the paragraph above in one way. A name with a history behind it is likelier to still be wired to something on some board than a stray character would be.
 
 It is untested on a multi-cavity board, where both the write target and this element would carry a cavity index.
 
