@@ -570,7 +570,9 @@ class DtlsCoapSession:
         # 0x40..0xff range so each session uses fresh values.
         #
         # The TKL>1 claim has no source behind it and the likely source
-        # files contradict it: IoTivity classic accepts tokens up to
+        # files contradict it: the fork these appliances run (TizenRT's
+        # iotivity_1.2-rel, see docs/firmware-families.md for the pin these
+        # lines are from) accepts tokens up to
         # CA_MAX_TOKEN_LEN 8 (cacommon.h:95), and its receive path just
         # records the parsed length (caprotocolmessage.c:939,1030) with no
         # width check anywhere. Its observer lookup compares only the

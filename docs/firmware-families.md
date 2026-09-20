@@ -2,11 +2,13 @@
 
 Two identifications decide whether a claim about an appliance is sound: which OCF stack it runs, and which directory dialect it speaks. Both are read-only, and getting either wrong has published a false finding here before.
 
-This page exists because of one of those. The library's comments named RT-OCF as the appliances' stack throughout, a claim about port binding was then reasoned from RT-OCF's source, and it was wrong: the two appliances I own run IoTivity *classic*, which binds a port RT-OCF leaves alone. The observation behind the comment was fine. The mechanism attached to it came from a codebase those devices do not run.
+This page exists because of one of those. The library's comments named RT-OCF as the appliances' stack throughout, a claim about port binding was then reasoned from RT-OCF's source, and it was wrong: the two appliances I own run TizenRT's `iotivity_1.2-rel` fork, a classic derivative, which binds a port RT-OCF leaves alone. The observation behind the comment was fine. The mechanism attached to it came from a codebase those devices do not run.
 
 ## What the evidence here covers
 
-My own hardware is two appliances, a dryer and an oven, both running IoTivity classic of the 1.2.x era. Every claim on this page that names a stack is sourced to that stack's code, and every claim about device behaviour comes from those two unless it says otherwise.
+My own hardware is two appliances, a dryer and an oven, both running TizenRT's `iotivity_1.2-rel` fork, pinned here at `e590f30ab`. Every claim on this page that names a stack is sourced to that stack's code, and every claim about device behaviour comes from those two unless it says otherwise.
+
+That name is deliberately the fork's and not the family's. "IoTivity classic" points at upstream, which answers some of these questions differently: it sets `MBEDTLS_SSL_VERIFY_REQUIRED` and carries no `ECDHE-ECDSA-AES128-GCM-SHA256`, while these appliances complete a session on an empty client certificate using exactly that suite. Read upstream for that mechanism and it predicts a failed handshake. So the family label is for identifying a board, and the fork is what a claim about one cites.
 
 The library is also what [localthings](https://github.com/mbillow/localthings) runs against a far wider spread: its fixture corpus is 92 device dumps covering ARTIK051-, TP1x- and TP2x-era boards, and its users run newer generations still. So the wire behaviours this library encodes are exercised well beyond two appliances. Those dumps record device capabilities and carry no `/oic/d` or `/oic/p` block, so they fix no spec version and no stack for any of those boards. The breadth of testing is real; the attribution is not, and a comment should not invent one.
 
@@ -21,6 +23,8 @@ The appliance's own log names its modules, and the three stacks have disjoint fi
 | `oc_ri.c`, `oc_endpoint.c`, `port/linux/ipadapter.c` | **iotivity-lite** |
 
 Samsung's own layer sits alongside whichever one it is: `connectivity_apis.c`, `cloud_manager.c`, `auto_reconnection_manager.c`, `micom_manager.c`, `dawit_net_util.c`.
+
+Those names identify a *family*, which is as far as a log gets you. A classic match on a TizenRT board (look for `tizenrt_*` or `ble_tizenrt_*` in the same log) means the vendor fork below, not upstream, and the next section is how to pin it.
 
 ## Anchoring the version, and finding the fork
 
@@ -46,7 +50,7 @@ Three separate facts, often conflated:
 
 Relevant because it decides which ports answer, and because two of these three disagree with the appliances here.
 
-| | IoTivity classic, Samsung's fork | RT-OCF | iotivity-lite |
+| | TizenRT's `iotivity_1.2-rel` fork | RT-OCF | iotivity-lite |
 | --- | --- | --- | --- |
 | multicast plaintext | `m4` on 5683 | `mcast_v4` on 5683 | `mcast4` on 5683 |
 | multicast secure | `m4s` on **5684** | none | none |
@@ -54,7 +58,7 @@ Relevant because it decides which ports answer, and because two of these three d
 | unicast secure | `u4s`, kernel-assigned | `dtls_v4`, kernel-assigned | `secure_port4`, dynamic |
 | source | `caipadapter.c:218-223`, `caipinterface.h:165`, `caipserver.c:732,847,997-1000` | `rt_udp.c:152,164` | `port/linux/ipadapter.c:79,1491` |
 
-"Kernel-assigned" is literal in classic: the unicast pair's ports are initialised to 0 (`caipadapter.c:218-219`), `CACreateSocket` binds that (`caipserver.c:732`), and `getsockname` reads back what the kernel chose (`:826`). Only the multicast pair gets fixed numbers (`:222-223`). A reply from an appliance therefore comes from a port nothing advertised, and it changes across reboots.
+"Kernel-assigned" is literal in the fork, at the pin above: the unicast pair's ports are initialised to 0 (`caipadapter.c:218-219`), `CACreateSocket` binds that (`caipserver.c:732`), and `getsockname` reads back what the kernel chose (`:826`). Only the multicast pair gets fixed numbers (`:222-223`). A reply from an appliance therefore comes from a port nothing advertised, and it changes across reboots.
 
 All three bind their multicast sockets to `INADDR_ANY`, so a *unicast* datagram to 5683 lands on one and is served. That is why plaintext `/oic/res` answers on 5683 across stacks. The convention has a mechanism behind it and no clause: OCF Core fixes 5683 as the multicast listen port and requires the discovery resources on an unsecured endpoint, while leaving the unsecured unicast endpoint on any port the implementer likes.
 
