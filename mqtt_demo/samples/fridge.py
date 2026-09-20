@@ -352,7 +352,12 @@ def build_discovery(topic_prefix, ha_prefix, device_name):
 
 
 # --- MQTT command handlers -----------------------------------------------
-def command_handlers():
+def command_handlers(state=None):
+    """Handlers for this appliance class.
+
+    `state` is the descriptor state dict the bridge threads in; this
+    class keeps no cross-command state, so it is accepted and ignored.
+    See ApplianceDescriptor.command_handlers."""
 
     def _rapid_fridge(p, _links):
         if p not in ('On', 'Off'):

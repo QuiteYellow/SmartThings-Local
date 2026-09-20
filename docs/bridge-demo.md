@@ -17,7 +17,7 @@ in the README.
 
 - **Multi-appliance, one container:** single Docker service holds N DTLS sessions in parallel, one per appliance, sharing one MQTT client. Adding an appliance class is ~150 lines and one descriptor file.
 - **Bounded state latency:** hot-tier resources (job state, door, operational state) refresh on a sub-second cadence regardless of whether the appliance has internet. Worst-case lag is the tier interval (≤1s idle, ≤500ms during an active cycle on the dryer).
-- **Writes that work:** dryer Start/Pause/Stop, course selection, wrinkle prevent; oven lamp (light entity), sound, fast preheat, setpoint slider, mode select, stop.
+- **Writes that work:** dryer Start/Pause/Stop, course selection, wrinkle prevent; oven cycle start (mode, temperature and duration in one batch write), lamp (light entity), sound, fast preheat, setpoint slider, stop.
 - **Optimistic publish + verify:** HA sees the new value the instant the device 2.04-confirms the write; the PollScheduler verifies on its next tier tick (after a 4s defer past Samsung's fetchback-revert window).
 - **HA Energy Dashboard ready** (dryer): live watts + cumulative kWh as `total_increasing`.
 - **Bridge logs tagged per-appliance** with `<class>.<serial>` once each device's serial is read on connect: `dryer.<serial>` and `oven.<serial>` interleave in the same log stream, easy to grep.
@@ -164,10 +164,47 @@ The dryer's `/operational/state/vs/0` sits on the hot poll tier (1s idle, 0.5s d
 | Read state | ✅ | Cavity state, current/target temp, door, mode, alarms, firmware-update-available |
 | Lamp (light entity) | ✅ | Binary On/Off only; High/Low/Dim values are accepted (2.04) but silently coerced back. Works regardless of Remote Control. |
 | Sound, Fast preheat | ⚠️ | Wired but untested RC-gated. |
-| Setpoint slider | ⚠️ | Wired but untested RC-gated. |
-| Mode select | ⚠️ | Wired but untested RC-gated. |
+| Setpoint slider | ⚠️ | Wired but untested RC-gated. Live control, available only while a cycle runs. |
+| **Start a cycle** | ✅ | Program / Program temperature / Program duration stage a cook, and Start sends it as one batch write. Measured on hardware 2026-09-20; see [oven-cook-start.md](oven-cook-start.md). |
 | Stop button | ✅ |  |
 | **Kitchen timer (`⏲` icon)** | ❌ | **The oven's panel kitchen timer is not exposed via CoAP at all.** Confirmed by full `/device/0` dump: `UpperTimer*` fields in `/mode/vs/0` only populate when set via the API, not from the panel. |
+
+#### Starting a cycle
+
+The oven will not assemble a job from separate writes while it is idle: mode, setpoint and cook time have to arrive together, with the run command inside the same message. HA entities write independently, so the bridge stages the three parameters and the Start button assembles the batch.
+
+That splits the oven's controls by cycle state, and nothing is shown in both:
+
+| While idle | While a cycle runs |
+|---|---|
+| Program, Program temperature, Program duration, Start | Setpoint, Cook time, Stop cycle |
+
+Program lists the modes this appliance class can start. Which ones a *given* oven will start is its own answer, published on the state topic as `program_startable` and read from the board's `modeSpec`; Start checks the staged program against it, along with the mode's own temperature and duration bounds, and refuses with a logged reason rather than sending something the firmware would reject. `program_ready` says whether it would currently go through.
+
+For automations, `<topic>/cmd/start_program` takes the whole thing in one message and skips the four interactions:
+
+```yaml
+action: mqtt.publish
+data:
+  topic: samsung_oven/cmd/start_program
+  payload: '{"mode": "Convection", "temp_c": 180, "minutes": 25}'
+```
+
+`temp_c` and `minutes` are optional and fall back to that mode's own defaults. The same validation applies, and a rejected message leaves whatever was staged in the UI untouched.
+
+#### The cook clock
+
+`remainingTime` and `progressPercentage` are the same clock at different resolutions. `remainingTime` steps once a minute; `progressPercentage` steps once per 1% of the cook, so its granularity is the duration over 100 — 6 s on a ten-minute bake. The bridge uses whichever is finer for the duration in hand, which is progress for any cook under 100 minutes and `remainingTime` above that, and publishes the choice as `clock_source`.
+
+Both run from the moment of Start, through preheat, rather than from reaching temperature. Measured 2026-09-20: on a 10-minute Convection at 250 °C, `remaining` fell 60 s per wall minute while progress moved 1% per 6 s, implying the same 10-minute total. So **a set duration includes preheat** — a short cook at a high setpoint is mostly preheat — and a finish time of `now + remaining` needs no correction.
+
+The finish time is published as `finish_at`, an absolute timestamp rather than a ticking countdown. Home Assistant renders a `timestamp` sensor as a live relative time, so the UI counts down every second while the published value stays constant between updates from the appliance. A ticking field would instead republish the whole state topic twice a second for the length of every cook, and write a recorder row per sensor each time, to show what the frontend derives for free.
+
+`finish_at` is a prediction, not a countdown: the anchor timestamp plus the remaining time at that anchor. While the appliance's clock tracks wall time that arithmetic returns the same number every time it is recomputed, so a correctly-running cook publishes it once and then says nothing. It moves only when reality departs from the model — a pause, a duration changed at the panel, a clock diverging from ours.
+
+What remains is sampling noise: each decrement is seen up to one poll interval late, so the recomputed epoch wobbles by a fraction of a second. A 15-second deadband suppresses that while letting real changes through immediately, which a slow republish timer would not — a timer delays news as well as noise. Measured mid-cook: 0.11 state-topic publishes per second, with `finish_at` and `clock_source` unchanged across 90 seconds, against roughly 2/s before.
+
+Start is a momentary button, gated on Remote Control being on at the appliance and on no cycle running. It makes an appliance heat: for a confirmation step, set `confirmation` on the Lovelace button card, which MQTT discovery has no equivalent for.
 
 **The oven doesn't push OBSERVE on `/mode/vs/0` writes** (the dryer does). The bridge handles this transparently because state freshness comes from polling rather than from OBSERVE:
 1. **Optimistic publish** — the moment a POST returns 2.04, the bridge merges the write body into the cache and publishes to MQTT. HA reflects the new value instantly.
