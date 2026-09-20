@@ -460,6 +460,13 @@ def _carries_peer_client_hello(datagram):
 
     Only epoch 0 is inspected: a later epoch is encrypted, so its handshake
     type cannot be read and a peer-initiated first flight never appears there.
+
+    Only the *first* handshake message in each record is examined, so a
+    ClientHello coalesced behind another handshake message in one record is
+    not detected. A peer opening its own session sends that ClientHello as
+    the first message of its first flight, which is the case this classifies;
+    missing the coalesced form costs the fast retry, not correctness, since
+    the caller then reports an ordinary session fault.
     """
     offset = 0
     while offset + _DTLS_RECORD_HEADER_LEN <= len(datagram):

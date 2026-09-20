@@ -85,7 +85,16 @@ CMD_SYNC_CLOCK = 'cmd/sync_clock'
 # device evict the orphan (RFC 6347 §4.2.8) instead of wedging on it —
 # the root cause behind stale sessions on always-on appliances, where the
 # orphan otherwise lingers 5-15 min.
-DTLS_LOCAL_PORT_BASE = 49700
+# Deliberately below 32768. Linux's default net.ipv4.ip_local_port_range is
+# 32768-60999, and the bridge now runs with host networking, so a base inside
+# that range competes with every ephemeral allocation on the host and bind()
+# can fail EADDRINUSE for one appliance after a restart. Under the old bridge
+# networking the bind was isolated in the container's namespace, which is why
+# a base of 49700 was safe before and is not now. The block 26849-26864 was
+# picked at random from the registered range and carries no name in
+# /etc/services; it is clear of the common dev and IoT ports, and of the
+# Steam (27000+) and MongoDB (27017) neighbourhoods.
+DTLS_LOCAL_PORT_BASE = 26849
 
 # Samsung appliances are commonly found with CoAP-DTLS in this dynamic band,
 # while full-Tizen OCF-PKI appliances also use the standard secure CoAP port.
@@ -123,6 +132,16 @@ _SOURCE_SWEPT = 'found by sweeping the OCF band'
 # repeat from becoming a tight loop. It deliberately does not grow the
 # backoff, since nothing is wrong with the device or the network.
 _PEER_HANDSHAKE_RETRY_S = 0.5
+
+# Consecutive collisions retried at that delay before the loop stops calling
+# them expected. One collision clears in about two seconds, so a run this long
+# is no longer the behaviour the fast path was written for, and retrying at
+# 2 Hz forever is the pattern that has been observed to precede an appliance
+# going silent for minutes. Past the cap a collision counts as a fault: it
+# raises error_count so the health topic says so, and takes the jittered
+# backoff. A successful session resets the count, so an appliance that
+# collides once per outage keeps the fast path indefinitely.
+_PEER_HANDSHAKE_MAX_IMMEDIATE = 4
 
 # The pre-flight liveness gate tolerates one dropped ClientHello (retries=1
 # → ~1 RTT when the device answers, ~4 s to call a silent port DEAD),
@@ -1013,21 +1032,35 @@ class PushBridge:
 
     def run_forever(self):
         backoff = 1.0
+        collisions = 0
         while not self.stop.is_set():
             immediate = False
             try:
                 self.session_once()
                 backoff = 1.0
+                collisions = 0
             except PeerInitiatedHandshakeError:
                 # The appliance was already handshaking toward our fixed
-                # local port, so ours was refused. Expected peer behaviour:
-                # retry at once, and leave error_count for real faults so
-                # the health topic keeps meaning what it says.
-                immediate = True
-                self.log.info(
-                    "appliance was opening its own session; retrying")
+                # local port, so ours was refused. Expected peer behaviour
+                # while it stays occasional: retry at once, and leave
+                # error_count for real faults so the health topic keeps
+                # meaning what it says. A run of them is not expected, and
+                # is bounded here rather than left to cycle at 2 Hz.
+                collisions += 1
+                if collisions <= _PEER_HANDSHAKE_MAX_IMMEDIATE:
+                    immediate = True
+                    self.log.info(
+                        "appliance was opening its own session; "
+                        "retrying (%d/%d)",
+                        collisions, _PEER_HANDSHAKE_MAX_IMMEDIATE)
+                else:
+                    self.error_count += 1
+                    self.log.warning(
+                        "appliance refused the handshake %d times in a row; "
+                        "treating it as a fault and backing off", collisions)
             except Exception as e:
                 self.error_count += 1
+                collisions = 0
                 self.log.warning("session error: %s", e)
             sess = self.session
             self.session = None

@@ -464,6 +464,13 @@ def _ports_from_links(links, family, source_key):
     ``eps`` ports come first: each is validated against the address the
     response arrived from, where a ``p.port`` is only narrowed to the doxm
     link.
+
+    One consequence of reading both forms here: ``eps`` is now accepted from
+    any link in the filtered ``?rt=oic.r.doxm`` lookup too, where that lookup
+    previously considered doxm links alone. The filtered representation holds
+    only doxm links in practice, and an ``eps`` entry is bound to the
+    responding address wherever it is read, so this widens the source without
+    widening what is trusted.
     """
     ports = []
     seen = set()

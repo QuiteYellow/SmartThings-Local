@@ -408,8 +408,10 @@ def probe_dtls_ports(
     If replies come from several distinct ports, a matching ``preferred_port``
     wins; otherwise the explicit outcome is ``ambiguous``. Results preserve
     the caller's de-duplicated port order, and each entry carries both the
-    port dialled and the ``responder_port`` that answered. Each worker's
-    ``timeout`` starts after synchronous platform name resolution.
+    port dialled and the ``responder_port`` that answered. A reply whose
+    source port went unrecorded cannot be selected on and yields
+    ``unreachable`` rather than falling back to the port dialled. Each
+    worker's ``timeout`` starts after synchronous platform name resolution.
     """
     _validate_probe_family(family)
     ordered_ports = tuple(dict.fromkeys(ports))
@@ -486,15 +488,15 @@ def probe_dtls_ports(
             return DtlsPortProbeResult(SELECTED, responder_ports[0], results)
         return DtlsPortProbeResult(AMBIGUOUS, None, results)
 
-    # No source port was observed for any reply. Fall back to the dialled
-    # ports rather than discarding a proven listener.
-    live_ports = tuple(result.port for result in proven)
-    if preferred_port is not None and preferred_port in live_ports:
-        return DtlsPortProbeResult(SELECTED, preferred_port, results)
-    if len(live_ports) == 1:
-        return DtlsPortProbeResult(SELECTED, live_ports[0], results)
-    if live_ports:
-        return DtlsPortProbeResult(AMBIGUOUS, None, results)
+    # Nothing answered, or something answered and the socket did not report
+    # the port it answered from. The second case is a broken invariant, not a
+    # device condition: a proven reply always carries that port, because the
+    # socket records it as it accepts the datagram. There is no safe way to
+    # select without it -- the one other rule available, the port dialled, is
+    # the bug this replaced, since an OCF stack answers from its own port
+    # whatever was addressed. So report no port either way, and a regression
+    # in the socket layer shows up as a failure to connect rather than as a
+    # session opened confidently against the wrong endpoint.
     return DtlsPortProbeResult(UNREACHABLE, None, results)
 
 

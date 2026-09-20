@@ -134,7 +134,9 @@ def test_a_handshake_failure_without_a_peer_hello_is_unchanged(
 
 
 def _loop_bridge(errors):
-    """A PushBridge shell whose session_once raises `errors` in turn."""
+    """A PushBridge shell whose session_once raises `errors` in turn.
+
+    A ``None`` entry stands for a session that ran and ended normally."""
     b = bridge.PushBridge.__new__(bridge.PushBridge)
     b.app = types.SimpleNamespace(ip='192.0.2.9', ocf_port=49155, index=0)
     b.log = logging.getLogger('test-bridge-loop')
@@ -149,7 +151,10 @@ def _loop_bridge(errors):
         if not remaining:
             b.stop.set()
             return
-        raise remaining.pop(0)
+        error = remaining.pop(0)
+        if error is None:
+            return
+        raise error
 
     def wait(seconds):
         b.waits.append(seconds)
@@ -199,3 +204,38 @@ def test_a_collision_does_not_grow_the_backoff_for_a_later_fault(monkeypatch):
     plain.run_forever()
 
     assert collided.waits[1] == plain.waits[0]
+
+
+def test_a_run_of_collisions_stops_being_treated_as_expected(caplog, monkeypatch):
+    # Retrying at 2 Hz forever is the pattern that precedes an appliance going
+    # silent for minutes, and error_count staying at zero through it means the
+    # health topic reports a bridge that is doing nothing but colliding.
+    monkeypatch.setattr(bridge.random, 'uniform', lambda _low, _high: 1.0)
+    cap = bridge._PEER_HANDSHAKE_MAX_IMMEDIATE
+    b = _loop_bridge([PeerInitiatedHandshakeError() for _ in range(cap + 2)])
+
+    with caplog.at_level(logging.INFO, logger='test-bridge-loop'):
+        b.run_forever()
+
+    fast = [w for w in b.waits if w == bridge._PEER_HANDSHAKE_RETRY_S]
+    assert len(fast) == cap
+    assert b.error_count == 2
+    assert 'treating it as a fault' in caplog.text
+    assert 'reconnect in' in caplog.text
+
+
+def test_a_working_session_clears_the_collision_run(caplog):
+    # An appliance that collides once per outage must keep the fast path for
+    # as long as it keeps reconnecting, however many outages it sees.
+    cap = bridge._PEER_HANDSHAKE_MAX_IMMEDIATE
+    pattern = []
+    for _ in range(3):
+        pattern += [PeerInitiatedHandshakeError()] * cap + [None]
+    b = _loop_bridge(pattern)
+
+    with caplog.at_level(logging.INFO, logger='test-bridge-loop'):
+        b.run_forever()
+
+    assert b.error_count == 0
+    assert b.waits.count(bridge._PEER_HANDSHAKE_RETRY_S) == cap * 3
+    assert 'treating it as a fault' not in caplog.text

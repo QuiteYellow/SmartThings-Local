@@ -317,7 +317,8 @@ def test_multi_port_probe_runs_concurrently_and_preserves_order(monkeypatch):
 
     def fake_probe(_host, port, **_kwargs):
         barrier.wait(timeout=2.0)
-        return _liveness(port, live=port == 5684)
+        live = port == 5684
+        return _liveness(port, live=live, responder_port=port if live else None)
 
     monkeypatch.setattr(p, '_client_hello_flight', lambda **_kwargs: (b'hello',))
     monkeypatch.setattr(p, '_probe_dtls_port_with_flight', fake_probe)
@@ -331,39 +332,6 @@ def test_multi_port_probe_runs_concurrently_and_preserves_order(monkeypatch):
         thread.name.startswith('smartthings-dtls-probe')
         for thread in threading.enumerate()
     )
-
-
-def test_multi_port_probe_reports_ambiguity_without_guessing(monkeypatch):
-    monkeypatch.setattr(p, '_client_hello_flight', lambda **_kwargs: (b'hello',))
-    monkeypatch.setattr(
-        p,
-        '_probe_dtls_port_with_flight',
-        lambda _host, port, **_kwargs: _liveness(port),
-    )
-
-    result = p.probe_dtls_ports('appliance.invalid', (5684, 49154))
-
-    assert result.outcome == p.AMBIGUOUS
-    assert result.selected_port is None
-    assert result.live_ports == (5684, 49154)
-
-
-def test_multi_port_probe_prefers_previously_proven_listener(monkeypatch):
-    monkeypatch.setattr(p, '_client_hello_flight', lambda **_kwargs: (b'hello',))
-    monkeypatch.setattr(
-        p,
-        '_probe_dtls_port_with_flight',
-        lambda _host, port, **_kwargs: _liveness(port),
-    )
-
-    result = p.probe_dtls_ports(
-        'appliance.invalid',
-        (5684, 49154),
-        preferred_port=49154,
-    )
-
-    assert result.outcome == p.SELECTED
-    assert result.selected_port == 49154
 
 
 def test_one_server_reachable_two_ways_is_not_ambiguous(monkeypatch):
@@ -438,6 +406,27 @@ def test_probe_records_the_source_port_a_reply_came_from(monkeypatch):
     assert result.is_dtls_server
     assert result.port == 5684
     assert result.responder_port == 49155
+
+
+def test_a_reply_without_a_source_port_is_not_selected_on(monkeypatch):
+    # The socket records the source port as it accepts a datagram, so a proven
+    # reply always has one. If that ever stops being true, the only other rule
+    # available is the port dialled, which is the bug this selection replaced.
+    # Refusing to answer makes the regression a failed connect rather than a
+    # session opened against the wrong endpoint.
+    monkeypatch.setattr(p, '_client_hello_flight', lambda **_kwargs: (b'hello',))
+    monkeypatch.setattr(
+        p,
+        '_probe_dtls_port_with_flight',
+        lambda _host, port, **_kwargs: _liveness(port, responder_port=None),
+    )
+
+    result = p.probe_dtls_ports('appliance.invalid', (5684,), preferred_port=5684)
+
+    assert result.outcome == p.UNREACHABLE
+    assert result.selected_port is None
+    assert result.live_ports == (5684,)
+    assert result.responder_ports == ()
 
 
 def test_multi_port_probe_folds_worker_failure_into_redacted_result(monkeypatch):

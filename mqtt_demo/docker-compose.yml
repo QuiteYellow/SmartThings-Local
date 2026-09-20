@@ -30,6 +30,13 @@ services:
     # in for a correctness check the probe did not have. probe_dtls_ports
     # now selects on the port a reply came *from*, so host mode is safe.
     #
+    # One consequence to know about: the bridge's fixed DTLS source port is
+    # now bound on the host, so it has to sit outside the host's ephemeral
+    # range or it can lose the bind to an unrelated process. See
+    # DTLS_LOCAL_PORT_BASE in bridge.py. If MQTT_HOST names a Docker service
+    # rather than an address, it also stops resolving here, since host mode
+    # leaves Docker's embedded DNS behind.
+    #
     # No ports are published: the bridge opens every connection itself
     # (DTLS UDP per appliance, MQTT to the broker on 1883).
     network_mode: host
