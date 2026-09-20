@@ -32,7 +32,19 @@ t+4s    /mode/vs/0                modes   = ["Defrost"]
         /temperatures/vs/0        desired = "30"    current = "28"
 ```
 
-Three details of that payload are worth stating because they are easy to get wrong. The write goes to `/device/0`, singular, while the first element of the payload is a bare `{"href": "/devices/0"}` marker, plural, carrying no `rep`. The run command is not a separate step: `x.com.samsung.da.state: "Run"` rides inside the payload's own `/operational/state/vs/0` element alongside the cook time. And no option tokens were sent at all, because `Defrost` on this board supports neither fast preheat nor steam.
+A few details of that payload are worth stating because they are easy to get wrong. The run command is not a separate step: `x.com.samsung.da.state: "Run"` rides inside the payload's own `/operational/state/vs/0` element alongside the cook time. And no option tokens were sent at all, because `Defrost` on this board supports neither fast preheat nor steam.
+
+### The `/devices/0` element
+
+The write goes to `/device/0`, singular. The first element of the payload is `{"href": "/devices/0"}`, plural. That is not a transcription error. It carries no `rep`, so it sets nothing by itself.
+
+**This oven does not need it.** Measured 2026-09-20: the identical batch with the element deleted started the cook first time, reaching `Run` and `Cooking` within four seconds.
+
+**Send it anyway.** That result is one oven, of one model, with one cavity. Nothing here establishes that another board is as relaxed about its absence, and it costs nothing to include, so the version that has been measured working is the one worth sending. The bridge sends it, and this page keeps it in the payload above for the same reason.
+
+**Possibly a legacy name.** A publicly posted dump of the older HTTP API these machines exposed on port 8888, before OCF, has a top-level `Devices` array whose members link to their sub-resources at `/devices/0/information` and `/devices/0/configuration`. The OCF batch has that same shape, one element per sub-resource and all written together, so the marker reads like the older resource name carried across the generation change. Treat that as inference from the shape of two APIs: the evidence is someone else's capture of different hardware, and both firmwares are silent on the question. It bears on the paragraph above in one way. A name with a history behind it is likelier to still be wired to something on some board than a stray character would be.
+
+It is untested on a multi-cavity board, where both the write target and this element would carry a cavity index.
 
 Cancelling, by contrast, is an ordinary single-resource write, and it worked first time:
 
@@ -78,7 +90,7 @@ Follow each board's own declaration rather than offering start for every mode it
 
 A cycle start makes an appliance heat. Everything below is ordinary care rather than anything specific to this protocol:
 
-- Enable remote control at the panel. It is checkable from the session: `/remotectrl/vs/0` reports `x.com.samsung.da.remoteControlEnabled`, which read `true` on this oven throughout. Necessary but not sufficient: one board in the corpus had it on and still would not start.
+- **Enable Remote Control at the panel, and check it before reading anything into a result.** `/remotectrl/vs/0` reports `x.com.samsung.da.remoteControlEnabled`; it must read `true`. With it off, the cook parameters are still accepted and held (mode, setpoint and cook time all stick) and only `state: "Run"` is silently dropped, so a batch that "does not start" tells you nothing about the payload. Measured here 2026-09-20, after a whole test run was wasted on it. It does not survive a power cycle. Necessary but not sufficient: one board in the corpus had it on and still would not start.
 - Empty the cavity and stand in front of the appliance.
 - Read `modeSpec` first and pick a `Start&Setting` mode. Choose the gentlest one the board offers, at its own minimum temperature and time. Not a preheat, not a broil.
 - Stop any bridge or integration holding a session first. One session per appliance.

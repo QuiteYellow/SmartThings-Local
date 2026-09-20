@@ -106,9 +106,12 @@ _WORKER_JOIN_TIMEOUT_S = 2.0
 def _batch_targets(body: list) -> dict:
     """{href: rep} for the elements of an OCF batch write.
 
-    Elements carrying no `rep` are skipped: the leading
-    {'href': '/devices/N'} marker is addressing, not a representation,
-    and has nothing to merge into the cache."""
+    Elements carrying no `rep` are skipped. That covers the leading
+    {'href': '/devices/N'} marker, which carries no representation and
+    so has nothing to merge into the cache. It is not required either:
+    a batch with it deleted started a cook first time (2026-09-20). It
+    is still sent, because it costs nothing and only one board has been
+    tested. See docs/oven-cook-start.md."""
     out: dict = {}
     for el in body:
         if not isinstance(el, dict):
