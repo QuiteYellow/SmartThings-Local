@@ -16,6 +16,13 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+# uv writes uv.lock whenever `uv run` is used in the project directory, which
+# is how tests get run against a pinned interpreter. Nothing here reads it:
+# dependencies are declared as ranges, and CI installs the floor and the latest
+# explicitly, so one locked resolution sits between the two ends that are
+# actually tested and would rot unnoticed. Consumers cannot use it either,
+# since only uv reads a uv.lock.
+uv.lock
 
 # Packaging / build artifacts
 /smartthings_local/_version.py
