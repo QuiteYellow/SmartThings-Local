@@ -10,11 +10,14 @@ sockets, validates the resolved target address and CoAP token, then pins the
 first valid response endpoint for the remainder of each bounded Block2
 transfer.
 
-Discovery first reads the unfiltered ``/oic/res`` directory and accepts only
-secure ``eps`` entries bound to that response source. If the representation
-contains no secure endpoint, a second, separately correlated
-``/oic/res?rt=oic.r.doxm`` lookup supports legacy ``p.sec``/``port`` forms.
-Both lookups share one monotonic socket-I/O deadline.
+Discovery reads the unfiltered ``/oic/res`` directory and accepts two
+advertised forms from it: a secure ``eps`` entry bound to that response
+source, and a ``p.sec``/``port`` pair on the device's own ``/oic/sec/doxm``
+link. Which form a device emits follows its spec generation, so both are read
+from the first answer. If that representation advertises no secure port at
+all, a second, separately correlated ``/oic/res?rt=oic.r.doxm`` lookup
+retries against a smaller representation. Both lookups share one monotonic
+socket-I/O deadline.
 
 Directory discovery learns advertised candidates, including ports outside a
 caller's conventional scan set. It does not prove that a DTLS service is
@@ -431,25 +434,54 @@ def _add_port(ports, seen, port):
         ports.append(port)
 
 
-def _ports_from_links(links, family, source_key, *, fallback):
+def _is_doxm_link(link):
+    """Return whether a link is the device's own doxm resource.
+
+    A bare ``p.port`` integer carries no address, so unlike an ``eps`` URI
+    there is nothing in it to bind to the responding host. It is read only
+    from the one link that structurally has to describe this device's own
+    secure endpoint, which is the narrowing that makes it safe to trust.
+    """
+    if link.get('href') != '/oic/sec/doxm':
+        return False
+    resource_types = link.get('rt')
+    if isinstance(resource_types, str):
+        resource_types = [resource_types]
+    return (isinstance(resource_types, list)
+            and 'oic.r.doxm' in resource_types)
+
+
+def _ports_from_links(links, family, source_key):
+    """Extract advertised secure ports in descending order of validation.
+
+    Both advertised forms are read from whichever directory representation
+    arrives, because which one a device emits is decided by its spec
+    generation rather than by the query: OCF 1.0 and later carry ``eps``,
+    while an OIC 1.1 device carries ``p.sec``/``port`` and has no ``eps``
+    key in its directory at all. Reading one form per lookup cost such a
+    device a second round trip to learn what its first answer already said.
+
+    ``eps`` ports come first: each is validated against the address the
+    response arrived from, where a ``p.port`` is only narrowed to the doxm
+    link.
+
+    One consequence of reading both forms here: ``eps`` is now accepted from
+    any link in the filtered ``?rt=oic.r.doxm`` lookup too, where that lookup
+    previously considered doxm links alone. The filtered representation holds
+    only doxm links in practice, and an ``eps`` entry is bound to the
+    responding address wherever it is read, so this widens the source without
+    widening what is trusted.
+    """
     ports = []
     seen = set()
     saw_untrusted = False
+    policy_ports = []
 
     for link in links:
-        if fallback:
-            if link.get('href') != '/oic/sec/doxm':
-                continue
-            resource_types = link.get('rt')
-            if isinstance(resource_types, str):
-                resource_types = [resource_types]
-            if (not isinstance(resource_types, list)
-                    or 'oic.r.doxm' not in resource_types):
-                continue
-
+        if _is_doxm_link(link):
             policy = link.get('p')
             if isinstance(policy, dict) and policy.get('sec') is True:
-                _add_port(ports, seen, policy.get('port'))
+                policy_ports.append(policy.get('port'))
 
         endpoints = link.get('eps')
         if not isinstance(endpoints, list):
@@ -464,6 +496,9 @@ def _ports_from_links(links, family, source_key, *, fallback):
             elif status == _ENDPOINT_UNTRUSTED:
                 saw_untrusted = True
 
+    for port in policy_ports:
+        _add_port(ports, seen, port)
+
     if ports:
         return _PORTS_FOUND, tuple(ports)
     if saw_untrusted:
@@ -471,24 +506,14 @@ def _ports_from_links(links, family, source_key, *, fallback):
     return _PORTS_ABSENT, ()
 
 
-def _primary_secure_ports_from_payload(payload, family, source_key):
+def _secure_ports_from_payload(payload, family, source_key):
     value = _decode_cbor(payload)
     if value is _UNSET:
         return _PORTS_MALFORMED, ()
     links = _resource_links(value)
     if links is None:
         return _PORTS_MALFORMED, ()
-    return _ports_from_links(links, family, source_key, fallback=False)
-
-
-def _fallback_secure_ports_from_payload(payload, family, source_key):
-    value = _decode_cbor(payload)
-    if value is _UNSET:
-        return _PORTS_MALFORMED, ()
-    links = _resource_links(value)
-    if links is None:
-        return _PORTS_MALFORMED, ()
-    return _ports_from_links(links, family, source_key, fallback=True)
+    return _ports_from_links(links, family, source_key)
 
 
 def _transfer_result(
@@ -692,16 +717,13 @@ def _result(ports, attempts, response_received, error_code=None):
     )
 
 
-def _extraction_for_transfer(transfer, *, fallback):
+def _extraction_for_transfer(transfer):
     if transfer.status != _TRANSFER_COMPLETE:
         return None
     if transfer.code != _CONTENT:
         return _PORTS_ABSENT, ()
-    extractor = (
-        _fallback_secure_ports_from_payload
-        if fallback else _primary_secure_ports_from_payload
-    )
-    return extractor(transfer.payload, transfer.family, transfer.source_key)
+    return _secure_ports_from_payload(
+        transfer.payload, transfer.family, transfer.source_key)
 
 
 def _resource_result(transfer):
@@ -840,8 +862,7 @@ def discover_ocf_secure_ports(
             return _result(
                 (), attempts, response_received, 'malformed_ocf_response')
         if primary.status == _TRANSFER_COMPLETE:
-            extraction = _extraction_for_transfer(primary, fallback=False)
-            status, ports = extraction
+            status, ports = _extraction_for_transfer(primary)
             if status == _PORTS_FOUND:
                 return _result(ports, attempts, response_received)
             if status in (_PORTS_MALFORMED, _PORTS_UNTRUSTED):
@@ -876,8 +897,7 @@ def discover_ocf_secure_ports(
             return _result(
                 (), attempts, response_received, 'no_ocf_response')
 
-        status, ports = _extraction_for_transfer(
-            fallback_result, fallback=True)
+        status, ports = _extraction_for_transfer(fallback_result)
         if status == _PORTS_FOUND:
             return _result(ports, attempts, response_received)
         if status in (_PORTS_MALFORMED, _PORTS_UNTRUSTED):

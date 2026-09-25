@@ -27,12 +27,14 @@ from smartthings_local.ocf.keepalive import KeepaliveTask
 from smartthings_local.ocf.observe_refresh import ObserveRefreshTask
 from smartthings_local.ocf.poll_scheduler import PollScheduler
 from smartthings_local.ocf.state_cache import StateCache
+from smartthings_local.errors import PeerInitiatedHandshakeError
 from smartthings_local.protocol.dtls_probe import (
     AMBIGUOUS,
     probe_dtls_port,
     probe_dtls_ports,
 )
 from smartthings_local.protocol.coap import fmt_code
+from smartthings_local.protocol.ocf_discovery import discover_ocf_secure_ports
 from smartthings_local.protocol.dtls_session import DtlsCoapSession
 
 from .clock_sync import ClockSyncTask
@@ -77,13 +79,34 @@ OBSERVE_REFRESH_INTERVAL_S = 6 * 3600.0
 CMD_SYNC_CLOCK = 'cmd/sync_clock'
 
 # Base for the fixed DTLS source port; each appliance binds base+index so
-# every reconnect uses the same 5-tuple. If the bridge dies without
-# close_notify (crash, SIGKILL), the device holds an orphaned association
-# keyed to the old 5-tuple; re-handshaking from the SAME port makes the
-# device evict the orphan (RFC 6347 §4.2.8) instead of wedging on it —
-# the root cause behind stale sessions on always-on appliances, where the
-# orphan otherwise lingers 5-15 min.
-DTLS_LOCAL_PORT_BASE = 49700
+# every reconnect uses the same 5-tuple. The reason is peer accumulation,
+# not eviction. In the firmware these appliances run the peer table is
+# unbounded -- no cap, no idle timeout, no LRU -- and an entry is keyed on
+# address and port, so a client that reconnects from a fresh ephemeral port
+# every time leaves the old entry live and piles up mbedTLS contexts on an
+# embedded device. One port means one entry per appliance.
+#
+# Reconnecting over an entry the device still holds is cheap and clears
+# itself. A ClientHello is not application data, so it destroys the stale
+# peer; measured, that costs the dryer one extra ClientHello and about 1.1s
+# (4/4 trials) and the oven nothing.
+#
+# Earlier comments here credited RFC 6347 §4.2.8 eviction. That belongs to
+# the tinydtls lineage, and the stack these appliances run has no such path
+# and no timer that reaps an abandoned association. An unclean exit has
+# been reported leaving a device unreachable for minutes, which is real;
+# a reaping timer as the cause is not.
+#
+# Deliberately below 32768. Linux's default net.ipv4.ip_local_port_range is
+# 32768-60999, and the bridge now runs with host networking, so a base inside
+# that range competes with every ephemeral allocation on the host and bind()
+# can fail EADDRINUSE for one appliance after a restart. Under the old bridge
+# networking the bind was isolated in the container's namespace, which is why
+# a base of 49700 was safe before and is not now. The block 26849-26864 was
+# picked at random from the registered range and carries no name in
+# /etc/services; it is clear of the common dev and IoT ports, and of the
+# Steam (27000+) and MongoDB (27017) neighbourhoods.
+DTLS_LOCAL_PORT_BASE = 26849
 
 # Samsung appliances are commonly found with CoAP-DTLS in this dynamic band,
 # while full-Tizen OCF-PKI appliances also use the standard secure CoAP port.
@@ -91,6 +114,46 @@ DTLS_LOCAL_PORT_BASE = 49700
 # wide port layout.
 OCF_PORT_BAND = range(49152, 49161)
 OCF_STANDARD_SECURE_PORT = 5684
+
+# Ask the device before guessing. /oic/res on the plaintext CoAP port is the
+# unauthenticated path every OCF device has to expose, and it names the
+# secure port outright -- so it answers the question a port sweep can only
+# approximate, in one exchange, for ports the band never covers. The band
+# stays as the fallback for a device whose plaintext port is not 5683 or
+# whose directory says nothing usable. Note 5683 is mandated only as the
+# multicast listen port; it answers unicast because both reference stacks
+# wildcard-bind that socket, which is a strong convention rather than a
+# guarantee, and the reason the fallback is kept.
+OCF_DISCOVERY_PORT = 5683
+_DIRECTORY_TIMEOUT_S = 3.0
+_DIRECTORY_RETRIES = 1
+
+# Which tier produced the port in use. Four paths can pick it, and they carry
+# very different diagnostic weight: a swept port means the directory tier got
+# nothing out of this device, which is the reading a bug report needs and the
+# port number alone does not carry.
+_SOURCE_CONFIGURED = 'configured OCF_PORT'
+_SOURCE_CACHED = 'cached from an earlier connect'
+_SOURCE_ADVERTISED = f'advertised by /oic/res on {OCF_DISCOVERY_PORT}'
+_SOURCE_SWEPT = 'found by sweeping the OCF band'
+
+# Delay before retrying a handshake the appliance refused because it was
+# opening its own toward our fixed local port. Its stack drops that peer as
+# it rejects our ClientHello, so the endpoint is free immediately and the
+# next attempt succeeds; this is only long enough to keep a pathological
+# repeat from becoming a tight loop. It deliberately does not grow the
+# backoff, since nothing is wrong with the device or the network.
+_PEER_HANDSHAKE_RETRY_S = 0.5
+
+# Consecutive collisions retried at that delay before the loop stops calling
+# them expected. One collision clears in about two seconds, so a run this long
+# is no longer the behaviour the fast path was written for, and retrying at
+# 2 Hz forever is the pattern that has been observed to precede an appliance
+# going silent for minutes. Past the cap a collision counts as a fault: it
+# raises error_count so the health topic says so, and takes the jittered
+# backoff. A successful session resets the count, so an appliance that
+# collides once per outage keeps the fast path indefinitely.
+_PEER_HANDSHAKE_MAX_IMMEDIATE = 4
 
 # The pre-flight liveness gate tolerates one dropped ClientHello (retries=1
 # → ~1 RTT when the device answers, ~4 s to call a silent port DEAD),
@@ -343,6 +406,37 @@ class PushBridge:
 
     # ---- session lifecycle ------------------------------------------
 
+    def _advertised_ports(self) -> list[int]:
+        """Return secure ports this device advertises, or [] if it says none.
+
+        One plaintext /oic/res read. An advertisement is a candidate and no
+        more, so the caller still proves it with a ClientHello.
+        """
+        try:
+            result = discover_ocf_secure_ports(
+                self.app.ip,
+                discovery_port=OCF_DISCOVERY_PORT,
+                timeout=_DIRECTORY_TIMEOUT_S,
+                retries=_DIRECTORY_RETRIES,
+            )
+        except OSError as exc:
+            self.log.info(
+                "no directory read from %d: %s", OCF_DISCOVERY_PORT, exc)
+            return []
+        if not result.found:
+            # The redacted repr carries the error code and attempt count,
+            # which is what separates a silent plaintext port from a device
+            # that answered and advertised nothing usable.
+            self.log.info(
+                "directory on %d advertised no secure port -- %s",
+                OCF_DISCOVERY_PORT, result)
+            return []
+        self.log.info(
+            "directory on %d advertises %s",
+            OCF_DISCOVERY_PORT,
+            ', '.join(str(port) for port in result.ports))
+        return list(result.ports)
+
     def _candidate_ports(self) -> list[int]:
         """Known OCF secure ports plus the descriptor default, in order."""
         return sorted(
@@ -369,8 +463,9 @@ class PushBridge:
         reconnect.
 
         A pinned OCF_PORT is gated but never overridden. An unset port is
-        auto-discovered across the band and cached; the cache is tried
-        first on the next reconnect and rediscovered only if it goes DEAD."""
+        auto-discovered -- from the device's own plaintext directory first,
+        then across the band -- and cached; the cache is tried first on the
+        next reconnect and rediscovered only if it goes DEAD."""
         pinned = self.app.ocf_port
         if pinned is not None:
             r = probe_dtls_port(
@@ -381,7 +476,7 @@ class PushBridge:
             )
             if not r.is_dtls_server:
                 raise ConnectionError('configured port is not a DTLS server')
-            return pinned
+            return self._accept_port(pinned, _SOURCE_CONFIGURED, cache=False)
 
         # A previously discovered port is almost certainly still the one —
         # try it alone first and only fall back to the full candidate set if
@@ -394,19 +489,43 @@ class PushBridge:
                 timeout=_GATE_TIMEOUT_S,
             )
             if r.is_dtls_server:
-                return self._discovered_port
+                return self._accept_port(
+                    self._discovered_port, _SOURCE_CACHED)
+            self.log.info(
+                "cached DTLS port %d has gone silent -- rediscovering",
+                self._discovered_port)
             self._discovered_port = None
 
-        candidates = self._candidate_ports()
-        selection = self._probe_candidates(candidates)
-        if selection.outcome == AMBIGUOUS:
-            raise ConnectionError(
-                'multiple DTLS listeners answered; configure OCF_PORT')
-        if selection.selected_port is None:
-            raise ConnectionError('no live DTLS server found')
-        self.log.info("discovered DTLS port %d", selection.selected_port)
-        self._discovered_port = selection.selected_port
-        return selection.selected_port
+        # Ask, then sweep. An advertised port is proven by the same probe
+        # as a guessed one, so a device that lies or has moved on since it
+        # serialised its directory still falls through to the band.
+        tiers = (
+            (self._advertised_ports(), _SOURCE_ADVERTISED),
+            (self._candidate_ports(), _SOURCE_SWEPT),
+        )
+        for candidates, source in tiers:
+            if not candidates:
+                continue
+            selection = self._probe_candidates(candidates)
+            if selection.outcome == AMBIGUOUS:
+                raise ConnectionError(
+                    'multiple DTLS listeners answered; configure OCF_PORT')
+            if selection.selected_port is None:
+                self.log.info("no DTLS server among ports %s", source)
+                continue
+            return self._accept_port(selection.selected_port, source)
+        raise ConnectionError('no live DTLS server found')
+
+    def _accept_port(self, port: int, source: str, *, cache=True) -> int:
+        """Report which tier produced a proven port, and cache what was
+        discovered. A pinned port is not cached: it is re-read from config
+        on every connect and the cache is only ever consulted when no port
+        is pinned, so storing it would leave _discovered_port meaning two
+        different things."""
+        self.log.info("DTLS port %d -- %s", port, source)
+        if cache:
+            self._discovered_port = port
+        return port
 
     def session_once(self):
         port = self._resolve_port()
@@ -933,12 +1052,35 @@ class PushBridge:
 
     def run_forever(self):
         backoff = 1.0
+        collisions = 0
         while not self.stop.is_set():
+            immediate = False
             try:
                 self.session_once()
                 backoff = 1.0
+                collisions = 0
+            except PeerInitiatedHandshakeError:
+                # The appliance was already handshaking toward our fixed
+                # local port, so ours was refused. Expected peer behaviour
+                # while it stays occasional: retry at once, and leave
+                # error_count for real faults so the health topic keeps
+                # meaning what it says. A run of them is not expected, and
+                # is bounded here rather than left to cycle at 2 Hz.
+                collisions += 1
+                if collisions <= _PEER_HANDSHAKE_MAX_IMMEDIATE:
+                    immediate = True
+                    self.log.info(
+                        "appliance was opening its own session; "
+                        "retrying (%d/%d)",
+                        collisions, _PEER_HANDSHAKE_MAX_IMMEDIATE)
+                else:
+                    self.error_count += 1
+                    self.log.warning(
+                        "appliance refused the handshake %d times in a row; "
+                        "treating it as a fault and backing off", collisions)
             except Exception as e:
                 self.error_count += 1
+                collisions = 0
                 self.log.warning("session error: %s", e)
             sess = self.session
             self.session = None
@@ -949,6 +1091,10 @@ class PushBridge:
             self.session_started_ts = None
             if self.stop.is_set():
                 break
+            if immediate:
+                if self.stop.wait(_PEER_HANDSHAKE_RETRY_S):
+                    break
+                continue
             # Jitter the backoff so multiple bridges (dryer + oven) don't
             # reconnect in lockstep after a router blip — synchronized
             # storms make the broker / DTLS layer flap harder than need

@@ -8,6 +8,7 @@ __all__ = [
     'HandshakePeerCleanupError',
     'MalformedMessageError',
     'ObserveError',
+    'PeerInitiatedHandshakeError',
     'ProbeError',
     'SessionClosedError',
     'SessionError',
@@ -76,6 +77,22 @@ class SessionTimeoutError(SmartThingsLocalError, TimeoutError):
 
     code = 'timeout'
     message = 'session operation timed out'
+
+
+class PeerInitiatedHandshakeError(SessionError):
+    """The peer was already handshaking toward this endpoint, so ours failed.
+
+    A DTLS client never legitimately receives a ClientHello. An OCF server
+    with a message for an endpoint it holds no session for opens one itself,
+    and a stack that keys its peer table on address and port alone then feeds
+    our ClientHello into that client-role context, which rejects it. The
+    collision clears the peer, so an immediate retry normally succeeds. The
+    caller owns that retry policy; this is expected peer behaviour rather
+    than a fault.
+    """
+
+    code = 'peer_initiated_handshake'
+    message = 'peer initiated a concurrent handshake'
 
 
 class HandshakePeerCleanupError(SessionTimeoutError):

@@ -15,8 +15,8 @@ nmap -Pn -sU -p 5683,5684,49152-49160 "$APPLIANCE_IP"
 
 Read the result:
 
-- **`5684/udp` or a 4915x port with a DTLS first-flight response** → an OCF DTLS listener. Standard-port OCF-PKI firmware needs the Samsung server-certificate profile (`SamsungServerProfile` / `ServerCertificateAuth`, see Quick start), and no working client credential for it exists yet.
-- **`5683/udp` responds to public OCF security/resource GETs** → use `/oic/res` to learn the device's advertised secure endpoint; do not assume that endpoint is fixed.
+- **`5684/udp` or a 4915x port with a DTLS first-flight response** → an OCF DTLS server answered. It does not follow that one listens on the port you dialled: on the appliances tested here a ClientHello sent to 5684 is answered from the device's own ephemeral DTLS port, so take the endpoint from the reply's source port. Standard-port OCF-PKI firmware needs the Samsung server-certificate profile (`SamsungServerProfile` / `ServerCertificateAuth`, see Quick start), and no working client credential for it exists yet.
+- **`5683/udp` responds to public OCF security/resource GETs** → use `/oic/res` to learn the device's advertised secure endpoint; do not assume that endpoint is fixed. A silent 5683 deserves a second look before you call the port closed: the answer comes from another source port, so a stateful firewall, an inter-VLAN policy or a Docker bridge NAT drops it while the device is answering normally.
 - **Only `8888/tcp` open (token-based HTTPS)** → older firmware (~2018–2022). **Not supported here.**
 
 nmap's `open|filtered` can't tell a real DTLS server from a silent UDP port. Confirm which of the candidate ports actually speaks DTLS with the ClientHello probe, which sends one ClientHello and reports back per port:
@@ -26,7 +26,7 @@ nmap's `open|filtered` can't tell a real DTLS server from a silent UDP port. Con
 python -m smartthings_local.protocol.dtls_probe "$APPLIANCE_IP" 5684 49153 49154 49155 49156 --stateless
 ```
 
-`live` means a DTLS server answered its first flight; `dead` means silent or not DTLS. Once you have the client cert (see [docs/certificates.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/certificates.md)), add the explicit `--diagnostic` flag to run the stateful diagnostic drive, which reports `completed` (cert accepted) or `rejected` with the server's fatal alert. Diagnostic mode can allocate appliance-side DTLS state and is never used by discovery or reconnect. An `unsupported_certificate` / `unknown_ca` alert means the endpoint is reachable but this certificate profile was rejected. It is not a reason to disable verification or keep retrying. The same bounded stateless API gates the bridge's reconnect loop and, when `OCF_PORT` is unset, probes both standard 5684 and ports 49152–49160.
+`live` means a DTLS server answered its first flight; `dead` means silent or not DTLS. A `live` result's `responder_port` names the port the answer came from, and that is the one to dial. Once you have the client cert (see [docs/certificates.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/certificates.md)), add the explicit `--diagnostic` flag to run the stateful diagnostic drive, which reports `completed` (cert accepted) or `rejected` with the server's fatal alert. Diagnostic mode can allocate appliance-side DTLS state and is never used by discovery or reconnect. An `unsupported_certificate` / `unknown_ca` alert means the endpoint is reachable but this certificate profile was rejected. It is not a reason to disable verification or keep retrying. The same bounded stateless API gates the bridge's reconnect loop and every tier of its port discovery: with `OCF_PORT` unset it tries a cached port, then the secure port `/oic/res` advertises on 5683, then a sweep of standard 5684 and ports 49152–49160.
 
 A device that rejects the certificate profile may still run a PSK endpoint, and `diagnose_dtls_handshake` takes any authentication provider through `auth=` so that carrier can be characterised the same way:
 
@@ -64,11 +64,14 @@ multicast to locate a different public port. If the appliance does not listen
 on 5683, locate that public port separately and pass it explicitly as
 `discovery_port=...`.
 
-`discover_ocf_secure_ports()` first reads the public `/oic/res` directory and
-uses only `coaps://` endpoints whose literal host matches the correlated
-response source. If that first lookup yields no correlated response or no
-usable secure endpoint, the same overall deadline also bounds a filtered
-`/oic/res?rt=oic.r.doxm` fallback for Samsung's legacy secure-port policy. It
+`discover_ocf_secure_ports()` reads the public `/oic/res` directory and takes
+both advertised forms from that one answer: `coaps://` `eps` endpoints whose
+literal host matches the correlated response source, and the `p.sec`/`port`
+pair on the device's own `/oic/sec/doxm` link. Which form a device emits
+follows its spec generation, so an OIC 1.1 device carrying no `eps` at all
+still resolves in one exchange. If that representation advertises no secure
+port, the same overall deadline also bounds a filtered
+`/oic/res?rt=oic.r.doxm` retry. It
 accepts a different dynamic response source port after the request reaches the
 known public port, while still requiring the resolved target address and CoAP
 token, and assembles Block2 responses within fixed time, block-count, and

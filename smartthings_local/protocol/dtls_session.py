@@ -44,6 +44,7 @@ from ..errors import (
     EndpointError,
     HandshakePeerCleanupError,
     MalformedMessageError,
+    PeerInitiatedHandshakeError,
     SessionClosedError,
     SessionError,
     SessionIdentifierError,
@@ -445,6 +446,55 @@ class ConnectCancellation:
         return interrupted
 
 
+# A DTLS client never legitimately receives a ClientHello. An OCF server with
+# a message for an endpoint it holds no session for opens one itself
+# (CAencryptSsl -> InitiateTlsHandshake, ca_adapter_net_ssl.c:2010,2040), and
+# because its peer table is keyed on address and port with no role (GetSslPeer,
+# :1074), our own ClientHello is then stepped into that client-role context and
+# rejected. Its failure path skips the alert for
+# MBEDTLS_ERR_SSL_BAD_HS_CLIENT_HELLO and removes the peer (SSL_CHECK_FAIL,
+# :215,247 calling RemovePeerFromList), so the server goes silent and the next
+# handshake wins. Detect the collision so the caller can retry at once instead
+# of reading it as a session fault.
+#
+# Line numbers are TizenRT's iotivity_1.2-rel fork at e590f30ab, which is what
+# the appliances tested here run. Upstream IoTivity classic numbers differ by
+# hundreds of lines (CAencryptSsl is at 1520 there), and upstream also predicts
+# handshake behaviour these appliances do not show, so the fork is the tree to
+# read.
+_CONTENT_TYPE_HANDSHAKE = 22
+_HANDSHAKE_CLIENT_HELLO = 1
+_DTLS_RECORD_HEADER_LEN = 13
+
+
+def _carries_peer_client_hello(datagram):
+    """Return whether a datagram holds an unencrypted ClientHello record.
+
+    Only epoch 0 is inspected: a later epoch is encrypted, so its handshake
+    type cannot be read and a peer-initiated first flight never appears there.
+
+    Only the *first* handshake message in each record is examined, so a
+    ClientHello coalesced behind another handshake message in one record is
+    not detected. A peer opening its own session sends that ClientHello as
+    the first message of its first flight, which is the case this classifies;
+    missing the coalesced form costs the fast retry, not correctness, since
+    the caller then reports an ordinary session fault.
+    """
+    offset = 0
+    while offset + _DTLS_RECORD_HEADER_LEN <= len(datagram):
+        length = int.from_bytes(datagram[offset + 11:offset + 13], 'big')
+        end = offset + _DTLS_RECORD_HEADER_LEN + length
+        if end > len(datagram):
+            return False
+        fragment = datagram[offset + _DTLS_RECORD_HEADER_LEN:end]
+        if (datagram[offset] == _CONTENT_TYPE_HANDSHAKE
+                and datagram[offset + 3:offset + 5] == b'\x00\x00'
+                and fragment[:1] == bytes([_HANDSHAKE_CLIENT_HELLO])):
+            return True
+        offset = end
+    return False
+
+
 class DtlsCoapSession:
     """Single sustained DTLS-CoAP session.
 
@@ -519,15 +569,20 @@ class DtlsCoapSession:
         self._min_req_interval = 1.0 / rate_limit_rps
         self._write_max_attempts = max(1, int(write_max_attempts))
         # Optional fixed UDP source port. A client that dies without
-        # close_notify leaves an orphaned DTLS association on the device,
-        # keyed to the old 5-tuple; reconnecting from a fresh ephemeral
-        # port presents as a *new* peer and the orphan lingers until the
-        # device's own timer reaps it (observed 5-15 min on always-on
-        # appliances). Binding the same source port on every connect makes
-        # a restart re-handshake over the SAME 5-tuple, which RFC 6347
-        # §4.2.8 requires the server to treat as a rebooted peer: complete
-        # the new handshake and discard the old association. Verified
-        # accepted on the oven, 2026-07-26.
+        # close_notify leaves its peer entry live on the device, keyed to
+        # the old 5-tuple. Reconnecting from a fresh ephemeral port presents
+        # as a new peer and leaves that entry in place; where the peer table
+        # has no cap, no idle timeout and no LRU, as in the firmware these
+        # appliances run, those entries accumulate. Binding the same source
+        # port on every connect re-handshakes over the SAME 5-tuple, which
+        # the device answers by destroying the stale peer, since a
+        # ClientHello is not application data it can read. Verified accepted
+        # on the oven, 2026-07-26, and measured to cost the dryer one extra
+        # ClientHello and the oven nothing.
+        #
+        # One correction to what this comment used to say. It is not RFC
+        # 6347 §4.2.8: that lineage is tinydtls, and nothing here waits on a
+        # device-side timer to reap the old association.
         self.local_port = local_port
         self.family = family
 
@@ -572,6 +627,10 @@ class DtlsCoapSession:
         self._tok_counter = int.from_bytes(os.urandom(4), 'big')
         # OBSERVE tokens are 8 bytes, the CoAP maximum (CA_MAX_TOKEN_LEN,
         # cacommon.h:95), drawn fresh at random per registration.
+        #
+        # The firmware line numbers below are from the fork these
+        # appliances run, TizenRT's iotivity_1.2-rel; docs/firmware-families.md
+        # carries the tree and the pin they were read at.
         #
         # They were one byte until 2026-09-25, on the reasoning in 8775f7a
         # (2026-05-31): "Samsung RT-OCF silently drops registrations with
@@ -777,6 +836,16 @@ class DtlsCoapSession:
         cleanup_transcript = (
             _HvrPeerCleanupTranscript() if cleanup_hvr_peer else None
         )
+        peer_client_hello = False
+        peer_initiated = False
+
+        def note_received(datagram):
+            nonlocal peer_client_hello
+            if not peer_client_hello and _carries_peer_client_hello(datagram):
+                peer_client_hello = True
+            if cleanup_transcript is not None:
+                cleanup_transcript.record_received(datagram)
+
         try:
             try:
                 completed = _drive_dtls_handshake(
@@ -788,11 +857,7 @@ class DtlsCoapSession:
                         if wake_subscription is not None
                         else None
                     ),
-                    on_datagram=(
-                        cleanup_transcript.record_received
-                        if cleanup_transcript is not None
-                        else None
-                    ),
+                    on_datagram=note_received,
                     on_record_sent=(
                         cleanup_transcript.record_sent
                         if cleanup_transcript is not None
@@ -803,10 +868,21 @@ class DtlsCoapSession:
                 cancelled = True
             except SSL.Error as e:
                 backend_failed = True
-                # The alert is the whole diagnosis and the raised error
-                # is redacted by contract, so record it here or lose it.
-                logger.warning("dtls handshake failed at the TLS layer: %s",
-                               _openssl_error_reasons(e))
+                if peer_client_hello:
+                    # Expected peer behaviour, not a fault: the server was
+                    # mid-handshake toward this endpoint. Reported at info so
+                    # a retry does not read as an error in the caller's log.
+                    peer_initiated = True
+                    logger.info(
+                        "dtls handshake refused: the peer was already "
+                        "handshaking toward this endpoint (%s)",
+                        _openssl_error_reasons(e))
+                else:
+                    # The alert is the whole diagnosis and the raised error
+                    # is redacted by contract, so record it here or lose it.
+                    logger.warning(
+                        "dtls handshake failed at the TLS layer: %s",
+                        _openssl_error_reasons(e))
             except OSError:
                 io_failed = True
         finally:
@@ -823,6 +899,9 @@ class DtlsCoapSession:
             raise SessionClosedError()
         if backend_failed:
             sock.close()
+            if peer_initiated:
+                raise PeerInitiatedHandshakeError() from ConnectionError(
+                    'peer initiated a concurrent handshake')
             raise SessionError() from ConnectionError('DTLS backend failed')
         if io_failed:
             sock.close()
