@@ -3,6 +3,22 @@
 All writers (OBSERVE notify, poll, seed, optimistic) call apply_rep().
 A registered on_change callback fires after any apply that mutated the
 cache, which the bridge wires to its MQTT publish gate.
+
+Writers pass ``merge=True`` when their representation is a partial one.
+An OBSERVE notification on these appliances can be a **sparse delta**: the
+dryer's ``/course/vs/0`` answers a GET with 944 B across three keys and
+notifies with ``{'x.com.samsung.da.options': ['Course_27']}`` alone, the
+other keys absent, while a GET taken afterwards is byte-identical to the
+first. Assigning such a payload over the cache drops everything it does
+not mention. Measured 2026-09-25, recorded in
+``local-tools/HARDWARE-RESULTS-2026-09-25-notification-deltas.md``.
+
+Only a genuine notification is partial. A poll, a sweep, a seed, a
+registration response and a Block2 fetchback all carry the complete
+representation, so they keep assigning and a key that disappears there is
+honoured as gone. The ``source`` label cannot be used to tell these apart:
+a fetchback triggered by a notification is reported with the notification's
+own source, so the caller states the shape explicitly.
 """
 from __future__ import annotations
 
@@ -29,19 +45,32 @@ class StateCache:
     def set_on_change(self, cb: Callable[[bool, str], None]) -> None:
         self._on_change = cb
 
-    def apply_rep(self, href: str, rep: dict, source: str) -> bool:
+    def apply_rep(self, href: str, rep: dict, source: str,
+                  *, merge: bool = False) -> bool:
+        """Apply one representation. ``merge`` folds a partial one into
+        what is already held; the default replaces.
+
+        The observation hook always receives the resulting representation
+        rather than the incoming fragment, so a descriptor reading a field
+        the fragment happens to omit sees the value that is actually
+        current.
+        """
         if not isinstance(rep, dict):
             return False
         with self._lock:
             prior = self.links.get(href)
-            changed = prior != rep
-            self.links[href] = rep
+            if merge and prior:
+                resulting = {**prior, **rep}
+            else:
+                resulting = rep
+            changed = prior != resulting
+            self.links[href] = resulting
             self.last_updated[href] = time.time()
             self.source[href] = source
         hook = self.descriptor.on_observation
         if hook is not None:
             try:
-                hook(self.descriptor_state, href, rep)
+                hook(self.descriptor_state, href, resulting)
             except Exception:
                 pass
         if self._on_change is not None:
