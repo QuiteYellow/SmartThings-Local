@@ -136,11 +136,9 @@ One dead end closes here. `EnergyConsumption.saveLocation` is `/files/usage.db` 
 
 Neither appliance here runs that generation, and nobody has scanned them for port 8888 to check whether anything of it survives. Its use on this page is as a decoder for fields the current surface exposes raw, not as a route in.
 
-### Course codes have names, and they are not on the appliance
+### Course codes carry no names
 
-`/course/vs/0` reports the running course as `Course_<HH>` and `/st/dryercourse/vs/0` as `Table_<TT>_Course_<HH>`, with no name attached; `/wm/editcourse/vs/0` lists the unit's whole dial as one hex string. Nothing the appliance serves carries a human-readable name for any of them, so a mapping from code to name has to come from somewhere else and be corroborated before it is trusted.
-
-For this dryer the names are corroborated twice over: the 14 codes captured by hand in May (`mqtt_demo/samples/dryer.py`) are exactly the 14 the appliance itself lists in `EditCourseList_…`. Only `0x23` differs in spelling, rendered elsewhere as `Quick Dry 35'` with an apostrophe for minutes.
+`/course/vs/0` reports the running course as `Course_<HH>` and `/st/dryercourse/vs/0` as `Table_<TT>_Course_<HH>`, with no name attached; `/wm/editcourse/vs/0` lists the unit's whole dial as one hex string. Nothing the appliance serves carries a human-readable name for any of them. The 14 codes captured by hand in May (`mqtt_demo/samples/dryer.py`) are exactly the 14 the appliance itself lists in `EditCourseList_…`, so the code set is confirmed against the device even though the names are not.
 
 ## The OCF-standard `/x/0` twins
 
