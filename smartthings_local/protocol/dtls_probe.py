@@ -34,6 +34,7 @@ import math
 import socket
 import time
 import warnings
+from collections import Counter
 from dataclasses import dataclass
 
 from OpenSSL import SSL
@@ -115,6 +116,11 @@ SERVER_HELLO = 'server_hello'
 ALERT = 'alert'
 
 _DTLS_VERSIONS = frozenset((b'\xfe\xff', b'\xfe\xfd'))
+
+# Cap on the retained handshake-message name list. The counter keeps rising
+# past it, so a server that floods distinct messages is still reported without
+# the list growing without bound.
+_MAX_HANDSHAKE_MSGS = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,8 +514,19 @@ class ProbeResult:
         self.port = port
         self.outcome = DEAD
         self.rtt_s = None
-        # Ordered, de-duplicated handshake message names the server sent.
+        # Ordered handshake message names the server sent. A byte-identical
+        # retransmission collapses into the entry it repeats, because that is
+        # what a DTLS retransmission is. A message the server sent twice with
+        # *different* bytes appears twice, which is how a re-issued
+        # HelloVerifyRequest becomes visible: a client that ignores the second
+        # cookie request and a server that keeps asking for one deadlock until
+        # the handshake deadline, and under a name-keyed list the two requests
+        # rendered as one (mbillow/localthings#504).
         self.handshake_msgs = []
+        # Occurrences by message name, retransmissions included. A high count
+        # against a short ``handshake_msgs`` says the server kept resending
+        # what it already sent, which is evidence our reply never arrived.
+        self.handshake_counts = Counter()
         # (level, description_name) if a fatal/warning Alert was seen.
         self.alert = None
         # Raw inbound datagrams, for callers that want to dig deeper.
@@ -527,7 +544,10 @@ class ProbeResult:
         if self.rtt_s is not None:
             bits.append(f'{self.rtt_s * 1000:.0f}ms')
         if self.handshake_msgs:
-            bits.append('+'.join(self.handshake_msgs))
+            bits.append('+'.join(
+                name if self.handshake_counts.get(name, 1) <= 1
+                else f'{name}x{self.handshake_counts[name]}'
+                for name in dict.fromkeys(self.handshake_msgs)))
         if self.alert:
             bits.append(f'alert={self.alert[1]}')
         if self.error:
@@ -551,6 +571,74 @@ def classify_datagram(dgram):
         else:
             out.append((ct, None))
     return out
+
+
+def _iter_handshake_fragments(fragment):
+    """Yield ``(name, message_seq, fragment_offset, raw)`` for each message
+    fragment in a handshake record's payload.
+
+    ``raw`` is the fragment as it arrived, its 12-byte DTLS handshake header
+    included, so two of them compare equal only when the peer put the same
+    bytes on the wire twice. That is what a retransmission is, which is what
+    lets a repeat be told from a re-issue.
+
+    ``fragment_offset`` matters because one logical message can arrive in
+    several fragments, and those differ in bytes without the peer having said
+    anything new. A caller identifying messages should key on the fragment at
+    offset zero and treat the rest as continuations.
+
+    A payload too short or too truncated to carry a complete header yields one
+    fallback entry at offset zero, so a malformed record still proves a DTLS
+    server answered.
+    """
+    parsed = False
+    offset = 0
+    while offset + 12 <= len(fragment):
+        header = fragment[offset:offset + 12]
+        fragment_length = int.from_bytes(header[9:12], 'big')
+        end = offset + 12 + fragment_length
+        if end > len(fragment):
+            break
+        parsed = True
+        yield (
+            _HS_NAMES.get(header[0], f'hs{header[0]}'),
+            int.from_bytes(header[4:6], 'big'),
+            int.from_bytes(header[6:9], 'big'),
+            bytes(fragment[offset:end]),
+        )
+        offset = end
+    if not parsed and fragment:
+        yield (
+            _HS_NAMES.get(fragment[0], f'hs{fragment[0]}'),
+            None,
+            0,
+            bytes(fragment),
+        )
+
+
+def _iter_datagram_events(dgram):
+    """Walk a datagram in record order, as :func:`classify_datagram` does, but
+    with handshake detail carrying
+    ``(name, message_seq, fragment_offset, raw)``.
+
+    Record order is what makes the ChangeCipherSpec guard work: everything
+    after that record in the same datagram is ciphertext, and reading a
+    message type out of it invents one.
+    """
+    for record in split_dtls(dgram):
+        content_type = record[0]
+        fragment = record[13:]
+        if content_type == _CT_HANDSHAKE and fragment:
+            yield from (
+                (content_type, message)
+                for message in _iter_handshake_fragments(fragment))
+        elif content_type == _CT_ALERT and len(fragment) >= 2:
+            yield content_type, (
+                fragment[0],
+                _ALERT_NAMES.get(fragment[1], str(fragment[1])),
+            )
+        else:
+            yield content_type, None
 
 
 def probe(host, port, *, cert_pem=None, key_pem=None,
@@ -599,9 +687,11 @@ def probe(host, port, *, cert_pem=None, key_pem=None,
     if liveness.response_kind == HELLO_VERIFY_REQUEST:
         result.outcome = LIVE
         result.handshake_msgs.append('HelloVerifyRequest')
+        result.handshake_counts['HelloVerifyRequest'] += 1
     elif liveness.response_kind == SERVER_HELLO:
         result.outcome = LIVE
         result.handshake_msgs.append('ServerHello')
+        result.handshake_counts['ServerHello'] += 1
     elif liveness.response_kind == ALERT:
         result.alert = liveness.alert
         result.outcome = (
@@ -723,7 +813,7 @@ def diagnose_dtls_handshake(
         if result.rtt_s is None:
             result.rtt_s = time.monotonic() - started
         result.datagrams.append(datagram)
-        for content_type, detail in classify_datagram(datagram):
+        for content_type, detail in _iter_datagram_events(datagram):
             if content_type == _CT_CHANGE_CIPHER_SPEC:
                 # Handshake records after this one are encrypted, so their
                 # first byte is ciphertext and not a message type. Reading it
@@ -732,11 +822,21 @@ def diagnose_dtls_handshake(
                 # enough to have produced a phantom 'Finished' in testing.
                 encrypted = True
             elif content_type == _CT_HANDSHAKE and not encrypted:
-                if detail not in seen:
-                    seen.add(detail)
-                    result.handshake_msgs.append(detail)
+                name, message_seq, fragment_offset, raw = detail
                 if result.outcome == DEAD:
                     result.outcome = LIVE
+                if fragment_offset:
+                    # A continuation of a message already accounted for at
+                    # offset zero. Counting it again would report a
+                    # certificate chain that needed four datagrams as four
+                    # certificates.
+                    continue
+                result.handshake_counts[name] += 1
+                key = (name, message_seq, raw)
+                if key not in seen:
+                    seen.add(key)
+                    if len(result.handshake_msgs) < _MAX_HANDSHAKE_MSGS:
+                        result.handshake_msgs.append(name)
             elif content_type == _CT_ALERT and detail is not None:
                 level, name = detail
                 result.alert = (level, name)
