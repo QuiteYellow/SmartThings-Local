@@ -248,7 +248,10 @@ def test_refetch_uses_a_fresh_one_shot_token_not_the_observe_token():
     sess, calls = _make_session(responder)
     try:
         observe_tok = sess.subscribe(["mode", "vs", "0"])
-        assert len(observe_tok) == 1, "OBSERVE registrations use 1-byte tokens"
+        assert len(observe_tok) == 8, (
+            "OBSERVE registrations use 8-byte tokens: the observer lookup "
+            "matches on the incoming token's length, so a short token "
+            "collides with a held one's prefix")
         sess.conn.inject(
             _notification(observe_tok, blocks[0],
                           block2=block_value(0, 1, SZX)))
