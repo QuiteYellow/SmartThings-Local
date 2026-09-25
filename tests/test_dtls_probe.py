@@ -17,19 +17,19 @@ def _rec(content_type, frag, *, epoch=0):
             + frag)
 
 
-def _hs(msg_type, body=b''):
+def _hs(msg_type, body=b'', *, seq=0):
     header = (
         bytes([msg_type])
         + len(body).to_bytes(3, 'big')
-        + b'\x00\x00'                    # message sequence
+        + seq.to_bytes(2, 'big')         # message sequence
         + b'\x00\x00\x00'              # fragment offset
         + len(body).to_bytes(3, 'big')
     )
     return _rec(p._CT_HANDSHAKE, header + body)
 
 
-def _hvr(cookie=b'cookie'):
-    return _hs(3, b'\xfe\xfd' + bytes([len(cookie)]) + cookie)
+def _hvr(cookie=b'cookie', *, seq=0):
+    return _hs(3, b'\xfe\xfd' + bytes([len(cookie)]) + cookie, seq=seq)
 
 
 def _server_hello():
@@ -868,3 +868,90 @@ def test_encrypted_records_do_not_invent_handshake_messages(monkeypatch):
 
     assert result.handshake_msgs == ['HelloVerifyRequest']
     assert 'Finished' not in result.handshake_msgs
+
+
+def test_retransmitted_handshake_message_collapses(monkeypatch):
+    # A DTLS retransmission puts the same bytes on the wire again. Listing it
+    # twice would read as the server having said something new, so the name
+    # list collapses it -- and the counter is where the repetition shows.
+    responses = iter((_hvr(), _hvr()))
+    fake = _FakeSock(lambda _f: next(responses, None))
+    _patch_sock(monkeypatch, fake)
+
+    result = p.diagnose_dtls_handshake('127.0.0.1', 5684, timeout=0.3)
+
+    assert result.handshake_msgs == ['HelloVerifyRequest']
+    assert result.handshake_counts['HelloVerifyRequest'] == 2
+
+
+def test_reissued_hello_verify_request_is_listed_twice(monkeypatch):
+    # A second cookie request carries a different cookie, so the message
+    # differs byte for byte from the first. Our client ignores it and the
+    # handshake deadlocks to the deadline, which under a name-keyed list was
+    # indistinguishable from one cookie exchange (mbillow/localthings#504).
+    responses = iter((_hvr(b'cookie-one'), _hvr(b'cookie-two')))
+    fake = _FakeSock(lambda _f: next(responses, None))
+    _patch_sock(monkeypatch, fake)
+
+    result = p.diagnose_dtls_handshake('127.0.0.1', 5684, timeout=0.3)
+
+    assert result.handshake_msgs == [
+        'HelloVerifyRequest', 'HelloVerifyRequest']
+    assert result.handshake_counts['HelloVerifyRequest'] == 2
+    assert 'HelloVerifyRequestx2' in repr(result)
+
+
+def test_same_cookie_at_a_new_message_seq_is_listed_twice(monkeypatch):
+    # The peer may re-issue the same cookie under a fresh message sequence.
+    # That is still a second request rather than a repeat of the first, and
+    # the sequence number is part of the bytes that separate them.
+    responses = iter((_hvr(seq=0), _hvr(seq=1)))
+    fake = _FakeSock(lambda _f: next(responses, None))
+    _patch_sock(monkeypatch, fake)
+
+    result = p.diagnose_dtls_handshake('127.0.0.1', 5684, timeout=0.3)
+
+    assert result.handshake_msgs == [
+        'HelloVerifyRequest', 'HelloVerifyRequest']
+    assert result.handshake_counts['HelloVerifyRequest'] == 2
+
+
+def test_handshake_name_list_is_capped_but_the_counter_is_not(monkeypatch):
+    # A peer that floods distinct messages must not grow the retained list
+    # without bound. The count still reports everything that arrived.
+    flood = b''.join(
+        _hvr(f'cookie-{n}'.encode()) for n in range(p._MAX_HANDSHAKE_MSGS + 8))
+    responses = iter((flood,))
+    fake = _FakeSock(lambda _f: next(responses, None))
+    _patch_sock(monkeypatch, fake)
+
+    result = p.diagnose_dtls_handshake('127.0.0.1', 5684, timeout=0.3)
+
+    assert len(result.handshake_msgs) == p._MAX_HANDSHAKE_MSGS
+    assert result.handshake_counts['HelloVerifyRequest'] == (
+        p._MAX_HANDSHAKE_MSGS + 8)
+
+
+def test_iter_handshake_fragments_reads_several_messages_in_one_record():
+    body_one = b'\xfe\xfd\x02ab'
+    body_two = b'\xfe\xfd\x02cd'
+    fragment = (
+        bytes([3]) + len(body_one).to_bytes(3, 'big') + (7).to_bytes(2, 'big')
+        + b'\x00\x00\x00' + len(body_one).to_bytes(3, 'big') + body_one
+        + bytes([2]) + len(body_two).to_bytes(3, 'big') + (8).to_bytes(2, 'big')
+        + b'\x00\x00\x00' + len(body_two).to_bytes(3, 'big') + body_two
+    )
+
+    got = list(p._iter_handshake_fragments(fragment))
+
+    assert [(name, seq, off) for name, seq, off, _ in got] == [
+        ('HelloVerifyRequest', 7, 0), ('ServerHello', 8, 0)]
+
+
+def test_iter_handshake_fragments_falls_back_on_a_truncated_header():
+    # Too short to carry a handshake header at all. It still proves a DTLS
+    # server answered, so it must yield something rather than vanish.
+    got = list(p._iter_handshake_fragments(bytes([3]) + b'\x00\x01'))
+
+    assert [(name, seq, off) for name, seq, off, _ in got] == [
+        ('HelloVerifyRequest', None, 0)]
