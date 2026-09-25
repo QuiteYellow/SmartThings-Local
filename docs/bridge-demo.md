@@ -48,7 +48,7 @@ There are two parallel paths between the appliance and the app over the local Co
 
 In normal operation both happen at once: an OBSERVE notification arrives first, the cache absorbs it, and the next-poll timer for that resource is reset. In an air-gapped LAN the app keeps working. Only the worst-case freshness changes (from ~100 ms with push to ≤1 s on hot-tier resources via polling). Reads, writes, and HA entities behave identically.
 
-Which path is doing the work is visible in Home Assistant. The bridge publishes per-appliance diagnostic entities including **Push Active** (on while OBSERVE is firing), **Last Update Source** (`observe` / `observe-register` / `poll` / `sweep` / `optimistic`), **Last OBSERVE Age**, **Poll Max RTT**, **Slow Polls (window)**, **Poll Errors (window)**, and **Stalest Resource Age**, all under each device's Diagnostic section.
+Which path is doing the work is visible in Home Assistant. The bridge publishes per-appliance diagnostic entities including **Push Active** (on while OBSERVE is firing), **Last Update Source** (`observe` / `observe-register` / `poll` / `sweep` / `optimistic`), **Last OBSERVE Age**, **Poll Max RTT**, **Slow Polls (window)**, **Poll Errors (window)**, and **Stalest Resource Age**, all under each device's Diagnostic section. Push Active is enabled by default; the counters are discovered disabled, so enable the ones you want from the device page — they are bridge-tuning detail rather than everyday state. A **Wi-Fi signal** sensor (dBm, from `/rm/wifi/vs/0`, polled every two minutes) sits alongside them and is enabled: that resource is outside the `/device/0` batch, so it is the one diagnostic the appliance reports about its own link.
 
 **Push Active** counts only what the appliance sent of its own accord. A device answers every OBSERVE register CON with the current representation, and that answer reaches the notification callback exactly as a spontaneous notification does. The bridge reads `ObserveDelivery.registration` to tell them apart and records the answer as `observe-register`, so an appliance with no route to Samsung's cloud reads offline instead of going online for the window after every connect.
 
@@ -148,14 +148,20 @@ In HA: **Settings → Devices & Services → MQTT** should show both devices pop
 
 | Capability | Works? | Notes |
 |---|---|---|
-| Read all state | ✅ | Machine state, job state, energy (W + kWh), course, dry level, completion time, remote control, child lock, alarms |
+| Read all state | ✅ | Machine state, progress, energy (W + kWh), course, dry level, completion time and `finish_at`, remote control, child lock, alarm code and an alarm-active binary, job-beginning status, firmware-update-available |
 | Wrinkle Prevent toggle | ✅ | Persists |
+| Dry level select | ⚠️ | Via `/washer/vs/0`; options are the class list, and a value the board's own `supportedDryLevel` does not carry is refused before it is sent. Not gated on Remote Control: this board reports `isModelSettingWithoutSC=true`, and the same write on the same model landed with Smart Control off in localthings' PR #407. Not yet exercised through this bridge. |
+| Delay end | ⚠️ | Hours to the end of the cycle, written to `delayEndTime` as `HH:MM:00`. Gated on Remote Control, since it writes the resource Start needs it for. Format measured on another laundry board (localthings #427), not yet exercised here. |
 | Start / Pause / Stop | ✅ | Via `/operational/state/vs/0`; needs Remote Control on |
 | Change course | ✅ | Via `/st/dryercourse/vs/0`; needs Remote Control on. **Not exposed by the SmartThings cloud HA integration.** |
 | Power on/off | ❌ | Accepted (2.04) but reverts within seconds; hardware-mirrored |
 | Child Lock / Remote Control toggle | ❌ | Same; hardware-mirrored physical buttons |
 
 The dryer's `/operational/state/vs/0` sits on the hot poll tier (1s idle, 0.5s during a cycle) and accepts OBSERVE registration, pushing within ~100ms of a change when the appliance has internet.
+
+`/alarms/vs/0` is the fault channel: a fault arrives as an `ErrorCode_<CODE>` item in state `Created`, and every notification carries the full current set, so the bridge reads the whole list each time rather than accumulating. Rows in state `Deleted` and `<Name>_OFF` placeholder rows both mean "not firing" and are skipped. `Alarm code` is the joined list of active codes; `Alarm active` is its binary form.
+
+The dryer's countdown follows the same anchor-and-hold model as the oven's (below): `completion_time` and `completion_minutes` are minute-resolution, and `finish_at` carries the precision as an absolute timestamp.
 
 ### Oven
 
@@ -277,6 +283,8 @@ Dryer:
 | `cmd/wrinkle_prevent` | `On`, `Off` | POST `/washer/vs/0` |
 | `cmd/operational_state` | `Run`, `Pause`, `Ready` | POST `/operational/state/vs/0`; requires RC |
 | `cmd/dryer_mode` | Course name (e.g. `Cotton`) | Translated to `Course_HH` then POST `/st/dryercourse/vs/0`; requires RC |
+| `cmd/dry_level` | A value from the board's `supportedDryLevel` (`None`, `1`, `2`, `3` here) | POST `/washer/vs/0 {dryLevel}`; refused if the live list does not carry it |
+| `cmd/delay_end` | Hours, 0–24 (e.g. `1.5`) | POST `/operational/state/vs/0 {delayEndTime: HH:MM:00}`; requires RC |
 
 Oven:
 

@@ -5,13 +5,17 @@ inventory, and MQTT command handlers out of the original
 samsung_dryer/{bridge,sensors,discovery}.py modules into one place.
 """
 import time
+from datetime import datetime, timezone
 
 from ..descriptor import (
+    WIFI_PATH,
+    WIFI_RSSI_SENSOR,
     ApplianceDescriptor,
     avail_base,
     avail_with_remote,
     device_block,
     encode,
+    wifi_rssi_dbm,
 )
 from smartthings_local.ocf.poll_scheduler import PollTier
 
@@ -122,6 +126,66 @@ def _int(v):
         return None
 
 
+# `progress` values this board declares in its own
+# `supportedProgress` list (dryer_device0.json, DA_WM_TP2_20_COMMON),
+# plus the 'Idle' the bridge substitutes for the firmware's literal
+# "None". Published as the enum sensor's option list, so a board that
+# reports a progress outside this set will show as unknown in HA rather
+# than as text — capture its list and extend this one.
+PROGRESS_OPTIONS = ('Idle', 'Drying', 'Cooling', 'Finish')
+
+# Dry levels this board lists in `supportedDryLevel`. Discovery payloads
+# are built before any resource has been read, so the select's options
+# cannot be the board's live answer; the live list is republished as
+# `dry_level_supported` and the write handler validates against it.
+# Other boards use words here (Damp/Less/Normal/More/Very on TP1_21
+# per localthings) — a bridge for one of those needs its own list.
+DRY_LEVEL_OPTIONS = ('None', '1', '2', '3')
+
+# Delay-end bounds in hours. The firmware field is `delayEndTime`, a
+# duration to the END of the cycle written as HH:MM:SS; localthings
+# measured that on a WD80T634 (their #427) and offers the same 0–24 h
+# range. 0 clears the delay.
+DELAY_END_MAX_H = 24
+
+
+def _active_alarm_codes(items):
+    """Codes currently raised on /alarms/vs/0, joined, or None.
+
+    The resource is level-triggered: every notification carries the full
+    set, so this reads the whole list each time rather than accumulating.
+    Rows in state `Deleted` are the firmware's retained history of a
+    cleared fault, and `<Name>_OFF` rows are per-type placeholders some
+    boards pre-populate; both mean "not firing". This is the same rule
+    localthings' `_active_alarm_codes` applies across families."""
+    if not isinstance(items, list):
+        return None
+    codes = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        code = item.get('x.com.samsung.da.code')
+        if not code:
+            continue
+        if str(item.get('x.com.samsung.da.state', '')).lower() == 'deleted':
+            continue
+        if str(code).lower().endswith('_off'):
+            continue
+        codes.append(str(code))
+    return ', '.join(codes) if codes else None
+
+
+def _hms_to_hours(v):
+    """'HH:MM:SS' → hours as a float, or None."""
+    if not isinstance(v, str):
+        return None
+    try:
+        h, m, s = v.split(':')
+        return round(int(h) + int(m) / 60.0 + int(s) / 3600.0, 2)
+    except (ValueError, AttributeError):
+        return None
+
+
 # --- flatten -----------------------------------------------------------
 def flatten(links):
     """Map a /device/0 link dict to the flat sensor dict that's
@@ -144,13 +208,19 @@ def flatten(links):
                      else g('/operational/state/0', 'currentMachineState'))
 
     progress = g('/operational/state/vs/0', 'x.com.samsung.da.progress')
-    job_state = progress or g('/operational/state/0', 'currentJobState')
     # HA's value_template treats the literal "None" as null (renders as
     # "Unknown"). Substitute something we can render verbatim.
-    if job_state in (None, 'None'):
-        job_state = 'Idle'
     if progress in (None, 'None'):
         progress = 'Idle'
+
+    # The board parks progressPercentage at "1" while Ready
+    # (dryer_device0.json), so a raw publish shows 1 % on an idle
+    # machine. It only means anything during a cycle.
+    progress_pct = _int(g('/operational/state/vs/0',
+                          'x.com.samsung.da.progressPercentage')
+                        or g('/operational/state/0', 'progressPercentage'))
+    if machine_state != 'active':
+        progress_pct = 0
 
     remaining = (g('/operational/state/vs/0',
                    'x.com.samsung.da.remainingTime')
@@ -171,18 +241,32 @@ def flatten(links):
     kids_bin  = (sam_kids != 'Ready') if sam_kids is not None else None
     rc_bin    = (str(sam_rc).lower() == 'true') if sam_rc is not None else None
 
+    delay_end = g('/operational/state/vs/0', 'x.com.samsung.da.delayEndTime')
+
+    # Fault channel. Empty `{}` at rest on this board; a fault arrives as
+    # an ErrorCode_<CODE> item (local-tools/android-capture resolves the
+    # 78-code table for this class).
+    alarm_code = _active_alarm_codes(g('/alarms/vs/0',
+                                       'x.com.samsung.da.items'))
+
+    fw_new = g('/otninformation/vs/0', 'x.com.samsung.da.newVersionAvailable')
+    fw_bin = (str(fw_new).lower() == 'true') if fw_new is not None else None
+
     return {
         'machine_state':         machine_state,
-        'job_state':             job_state,
         'progress':              progress,
-        'progress_percentage':   _int(g('/operational/state/vs/0',
-                                        'x.com.samsung.da.progressPercentage')
-                                       or g('/operational/state/0',
-                                            'progressPercentage')),
+        'progress_percentage':   progress_pct,
         'completion_time':       remaining,
         'completion_minutes':    rem_min,
-        'delay_end_time':        g('/operational/state/vs/0',
-                                   'x.com.samsung.da.delayEndTime'),
+        'delay_end_time':        delay_end,
+        'delay_end_hours':       _hms_to_hours(delay_end),
+        'alarm_code':            alarm_code,
+        'alarm_active':          alarm_code is not None,
+        # "Why did the cycle not start" — door open, no water, and so on.
+        # `None` on this board when nothing is wrong.
+        'job_beginning_status':  g('/wm/jobbeginingstatus/vs/0',
+                                   'x.com.samsung.da.currentStatus'),
+        'firmware_update_available': fw_bin,
         'power_state':           sam_power,
         'power_state_binary':    power_bin,
         'child_lock':            sam_kids,
@@ -196,8 +280,13 @@ def flatten(links):
         'dryer_mode':            _decode_course(
                                      g('/st/dryercourse/vs/0',
                                        'x.com.samsung.da.st.dryerMode')),
-        'dry_level':             _int(g('/washer/vs/0',
-                                        'x.com.samsung.da.dryLevel')),
+        # Published as the raw string so the select's state matches its
+        # options verbatim ("2", not 2). The board's own list rides
+        # alongside; the write handler checks against it.
+        'dry_level':             g('/washer/vs/0',
+                                   'x.com.samsung.da.dryLevel'),
+        'dry_level_supported':   g('/washer/vs/0',
+                                   'x.com.samsung.da.supportedDryLevel'),
         'dry_time':              g('/washer/vs/0',
                                    'x.com.samsung.da.dryTime'),
         'dryer_type':            g('/washer/vs/0',
@@ -208,26 +297,54 @@ def flatten(links):
                                    'x.com.samsung.da.diagnosisStart'),
         'country_code':          g('/configuration/vs/0',
                                    'x.com.samsung.da.countryCode'),
+        'wifi_rssi':             wifi_rssi_dbm(links),
     }
 
 
 # --- Remaining-time anchor + extrapolation ----------------------------
 # The dryer pushes /operational/state/vs/0 on state transitions but not
-# on remainingTime ticks. Anchor = (timestamp, total_seconds) at last
-# push; project() extrapolates downward while machine_state == 'active'.
+# on remainingTime ticks. Anchor = (timestamp, total_seconds) at the
+# last CHANGE of remainingTime; project() extrapolates downward while
+# machine_state == 'active'.
+#
+# Anchoring on a change rather than on every observation matters
+# because this resource is hot-polled every second: re-anchoring on
+# each poll pinned the extrapolation to the value it was just handed,
+# so the clock sat still for a whole minute and then jumped. At the
+# instant remaining steps 600 → 540 it really is 540, so anchoring
+# there leaves only the polling interval as error. Same reasoning as
+# the oven descriptor's on_observation.
+
+# How far the published finish time may move before it is republished.
+# Sampling jitter of a minute-granular field is under a poll interval;
+# anything larger is a real change (a pause, a course edit).
+FINISH_DEADBAND_S = 15
+
+
+def _hms_to_seconds(v):
+    if not isinstance(v, str):
+        return None
+    try:
+        h, m, s = v.split(':')
+        return int(h) * 3600 + int(m) * 60 + int(s)
+    except (ValueError, AttributeError):
+        return None
+
 
 def on_observation(state, href, rep):
     if href != '/operational/state/vs/0':
         return
-    rem = rep.get('x.com.samsung.da.remainingTime')
-    if not isinstance(rem, str):
-        return
-    try:
-        h, m, s = rem.split(':')
-        state['remaining_anchor'] = (time.time(),
-                                     int(h) * 3600 + int(m) * 60 + int(s))
-    except (ValueError, AttributeError):
-        pass
+    rem = _hms_to_seconds(rep.get('x.com.samsung.da.remainingTime'))
+    if rem != state.get('_rem_last'):
+        state['_rem_last'] = rem
+        if rem is not None:
+            state['remaining_anchor'] = (time.time(), rem)
+    # Drop the anchor when the cycle ends so the next one cannot
+    # inherit it, and so the held finish time is not carried over.
+    sam = rep.get('x.com.samsung.da.state')
+    if _SAMSUNG_STATE_TO_OCF.get(sam, sam) != 'active':
+        for k in ('remaining_anchor', '_rem_last', '_finish_published'):
+            state.pop(k, None)
 
 
 def project(state, sensors):
@@ -235,12 +352,30 @@ def project(state, sensors):
     if sensors.get('machine_state') != 'active' or anchor is None:
         return sensors
     ts, total = anchor
-    remaining = max(0, int(total - (time.time() - ts)))
-    h, rest = divmod(remaining, 3600)
-    m, s = divmod(rest, 60)
+    now = time.time()
+    remaining = max(0, int(total - (now - ts)))
+    # Minute resolution deliberately: the bridge republishes the whole
+    # state topic whenever any field changes, so a seconds field here
+    # ticked once a second for the length of every cycle and wrote a
+    # recorder row per sensor each time. finish_at carries the
+    # precision instead.
+    mins = (remaining + 59) // 60
+    h, m = divmod(mins, 60)
     sensors = dict(sensors)
-    sensors['completion_time'] = f"{h}:{m:02d}:{s:02d}"
-    sensors['completion_minutes'] = h * 60 + m + (1 if s > 0 else 0)
+    sensors['completion_time'] = f"{h}:{m:02d}:00"
+    sensors['completion_minutes'] = mins
+    # Absolute finish time for HA's `timestamp` device class, which the
+    # frontend renders as a live countdown on its own. It is anchor_ts +
+    # anchored_remaining, so it does not move as `now` advances, and it
+    # is held across anchor changes smaller than the deadband so the
+    # state topic is not republished for sampling jitter.
+    finish_epoch = ts + total
+    held = state.get('_finish_published')
+    if held is None or abs(finish_epoch - held) > FINISH_DEADBAND_S:
+        state['_finish_published'] = finish_epoch
+        held = finish_epoch
+    sensors['finish_at'] = datetime.fromtimestamp(
+        held, tz=timezone.utc).isoformat(timespec='seconds')
     return sensors
 
 
@@ -255,16 +390,30 @@ def log_state_change(sensors):
 MODEL = 'OCF dryer (TizenRT-iotivity)'
 
 # (key, friendly name, extra-config-dict)
+#
+# Only read-only sensors live here. `dry_level` has a select entity
+# below, so it is not duplicated as a sensor. `machine_state` and
+# `progress` carry `device_class: enum` with a fixed option list so HA
+# stores and translates them as states rather than free text; the
+# other string sensors have no measured option list on this board and
+# stay text.
 _SENSORS = [
-    ('machine_state',       'Machine state',       {'icon': 'mdi:tumble-dryer'}),
-    ('job_state',           'Job state',           {}),
-    ('progress',            'Progress',            {}),
+    ('machine_state',       'Machine state',
+        {'icon': 'mdi:tumble-dryer', 'device_class': 'enum',
+         'options': ['idle', 'active', 'pause']}),
+    ('progress',            'Progress',
+        {'device_class': 'enum', 'options': list(PROGRESS_OPTIONS)}),
     ('progress_percentage', 'Progress percent',
         {'unit_of_measurement': '%', 'state_class': 'measurement'}),
     ('completion_time',     'Completion time',     {'icon': 'mdi:timer-sand'}),
     ('completion_minutes',  'Remaining minutes',
         {'unit_of_measurement': 'min', 'device_class': 'duration',
          'state_class': 'measurement'}),
+    # Absolute finish time. HA renders a timestamp sensor as a live
+    # relative countdown; the fields above stay minute-resolution so
+    # they do not churn the recorder.
+    ('finish_at',           'Finishes at',
+        {'device_class': 'timestamp'}),
     ('delay_end_time',      'Delay end time',      {'icon': 'mdi:timer'}),
     ('power_state',         'Power state',         {}),
     ('power_watts',         'Power',
@@ -274,28 +423,49 @@ _SENSORS = [
         {'unit_of_measurement': 'kWh', 'device_class': 'energy',
          'state_class': 'total_increasing'}),
     ('dryer_mode',          'Dryer mode',          {}),
-    ('dry_level',           'Dry level',           {}),
     ('dry_time',            'Dry time',            {}),
     ('dryer_type',          'Dryer type',          {}),
     ('wrinkle_prevent',     'Wrinkle prevent',     {}),
-    ('diagnosis',           'Diagnosis',           {}),
-    ('country_code',        'Country code',        {}),
+    ('alarm_code',          'Alarm code',
+        {'icon': 'mdi:alert', 'entity_category': 'diagnostic'}),
+    ('job_beginning_status', 'Job beginning status',
+        {'icon': 'mdi:play-circle-outline', 'entity_category': 'diagnostic'}),
+    ('diagnosis',           'Diagnosis',
+        {'entity_category': 'diagnostic'}),
+    ('country_code',        'Country code',
+        {'entity_category': 'diagnostic'}),
+    WIFI_RSSI_SENSOR,
 ]
 
-# (key, friendly name, value_template, device_class)
+# (key, friendly name, value_template, device_class, extras)
 _BINARY_SENSORS = [
     ('running', 'Running',
         "{{ 'ON' if value_json.machine_state == 'active' else 'OFF' }}",
-        'running'),
+        'running', {}),
     ('power_switch', 'Power switch',
         "{{ 'ON' if value_json.power_state_binary else 'OFF' }}",
-        'power'),
+        'power', {}),
     ('child_lock_active', 'Child lock',
         "{{ 'ON' if value_json.child_lock_binary else 'OFF' }}",
-        'lock'),
+        'lock', {}),
     ('remote_control_enabled', 'Remote control',
         "{{ 'ON' if value_json.remote_control_binary else 'OFF' }}",
-        'connectivity'),
+        'connectivity', {}),
+    ('alarm_active', 'Alarm active',
+        "{{ 'ON' if value_json.alarm_active else 'OFF' }}",
+        'problem', {}),
+    ('firmware_update_available', 'Firmware update available',
+        "{{ 'ON' if value_json.firmware_update_available else 'OFF' }}",
+        'update', {'entity_category': 'diagnostic'}),
+]
+
+# Discovery topics this descriptor used to publish and no longer does.
+# An empty retained payload on each tells HA to remove the entity;
+# without it the broker keeps serving the old config forever.
+# (platform, key)
+_RETIRED = [
+    ('sensor', 'job_state'),   # duplicated `progress`
+    ('sensor', 'dry_level'),   # replaced by the select below
 ]
 
 # MQTT command-topic suffixes. The bridge subscribes to <prefix>/cmd/#
@@ -303,6 +473,8 @@ _BINARY_SENSORS = [
 CMD_WRINKLE_PREVENT = 'cmd/wrinkle_prevent'
 CMD_OPERATIONAL     = 'cmd/operational_state'
 CMD_DRYER_MODE      = 'cmd/dryer_mode'
+CMD_DRY_LEVEL       = 'cmd/dry_level'
+CMD_DELAY_END       = 'cmd/delay_end'
 
 
 def build_discovery(topic_prefix, ha_prefix, device_name):
@@ -329,7 +501,7 @@ def build_discovery(topic_prefix, ha_prefix, device_name):
         out.append((f"{ha_prefix}/sensor/{topic_prefix}/{key}/config",
                     encode(cfg)))
 
-    for key, name, template, dclass in _BINARY_SENSORS:
+    for key, name, template, dclass, extra in _BINARY_SENSORS:
         cfg = {
             'name':           name,
             'unique_id':      f"{topic_prefix}_{key}",
@@ -342,8 +514,13 @@ def build_discovery(topic_prefix, ha_prefix, device_name):
             'availability':   avail_base(avail_topic),
             'device':         dev,
         }
+        cfg.update(extra)
         out.append((f"{ha_prefix}/binary_sensor/{topic_prefix}/{key}/config",
                     encode(cfg)))
+
+    for platform, key in _RETIRED:
+        out.append((f"{ha_prefix}/{platform}/{topic_prefix}/{key}/config",
+                    b''))
 
     # switch: wrinkle prevent (always available)
     cfg = {
@@ -402,6 +579,51 @@ def build_discovery(topic_prefix, ha_prefix, device_name):
     out.append((f"{ha_prefix}/select/{topic_prefix}/course/config",
                 encode(cfg)))
 
+    # select: dry level. Not gated on Remote Control: this board reports
+    # isModelSettingWithoutSC=true on /wm/setinfo/vs/0, and localthings
+    # exercised the dryLevel write end to end on a DV5000T with Smart
+    # Control off (their PR #407). The same flag is why Wrinkle prevent
+    # above is ungated.
+    cfg = {
+        'name':              'Dry level',
+        'unique_id':         f"{topic_prefix}_dry_level_select",
+        'object_id':         f"{topic_prefix}_dry_level_select",
+        'state_topic':       state_topic,
+        'value_template':    '{{ value_json.dry_level }}',
+        'command_topic':     f"{topic_prefix}/{CMD_DRY_LEVEL}",
+        'options':           list(DRY_LEVEL_OPTIONS),
+        'icon':              'mdi:water-percent',
+        'entity_category':   'config',
+        'availability':      avail_base(avail_topic),
+        'device':            dev,
+    }
+    out.append((f"{ha_prefix}/select/{topic_prefix}/dry_level/config",
+                encode(cfg)))
+
+    # number: delay end, in hours (gated on remote control — it writes
+    # the same /operational/state/vs/0 resource as Start, which needs
+    # it; whether this field alone is honoured without it is unmeasured)
+    cfg = {
+        'name':              'Delay end',
+        'unique_id':         f"{topic_prefix}_delay_end",
+        'object_id':         f"{topic_prefix}_delay_end",
+        'state_topic':       state_topic,
+        'value_template':    '{{ value_json.delay_end_hours }}',
+        'command_topic':     f"{topic_prefix}/{CMD_DELAY_END}",
+        'min':               0,
+        'max':               DELAY_END_MAX_H,
+        'step':              0.5,
+        'unit_of_measurement': 'h',
+        'device_class':      'duration',
+        'mode':              'box',
+        'icon':              'mdi:timer-plus-outline',
+        'availability':      avail_with_remote(avail_topic, remote_topic),
+        'availability_mode': 'all',
+        'device':            dev,
+    }
+    out.append((f"{ha_prefix}/number/{topic_prefix}/delay_end/config",
+                encode(cfg)))
+
     return out
 
 
@@ -433,10 +655,37 @@ def command_handlers(state=None):
             return None
         return ['st', 'dryercourse', 'vs', '0'], {'x.com.samsung.da.st.dryerMode': code}
 
+    def _dry_level(p, links):
+        # The select's options are the class list; the board's live
+        # supportedDryLevel is the one that counts. Refuse a value the
+        # board does not list rather than POST it.
+        rep = links.get('/washer/vs/0') or {}
+        supported = rep.get('x.com.samsung.da.supportedDryLevel') or DRY_LEVEL_OPTIONS
+        if p not in supported:
+            return None
+        return ['washer', 'vs', '0'], {'x.com.samsung.da.dryLevel': p}
+
+    def _delay_end(p, _links):
+        try:
+            hours = float(p)
+        except (TypeError, ValueError):
+            return None
+        if not (0 <= hours <= DELAY_END_MAX_H):
+            return None
+        total_min = int(round(hours * 60))
+        h, m = divmod(total_min, 60)
+        # Zero-padded hour: the oven measured `0:10:00` being read as a
+        # ~609-minute duration where `00:10:00` was right, and this is
+        # the same firmware family's duration format.
+        return ['operational', 'state', 'vs', '0'], {
+            'x.com.samsung.da.delayEndTime': f"{h:02d}:{m:02d}:00"}
+
     return {
         CMD_WRINKLE_PREVENT: _wrinkle,
         CMD_OPERATIONAL:     _operational,
         CMD_DRYER_MODE:      _course,
+        CMD_DRY_LEVEL:       _dry_level,
+        CMD_DELAY_END:       _delay_end,
     }
 
 
@@ -473,6 +722,15 @@ DRYER_POLL_TIERS = [
             ('energy', 'consumption', 'vs', '0'),
             ('diagnosis', 'vs', '0'),
         ),
+    ),
+    # Off the /device/0 batch, so the sweep never refreshes it. RSSI
+    # moves on every read, and each read republishes the state topic,
+    # so this is paced as a diagnostic rather than as state.
+    PollTier(
+        name='wifi',
+        interval_s=120.0,
+        timeout_s=6.0,
+        paths=(WIFI_PATH,),
     ),
     PollTier(
         name='sweep',

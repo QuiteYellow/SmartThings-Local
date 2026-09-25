@@ -84,3 +84,24 @@ def test_zero_is_rejected_on_the_write_path_too():
     handler = oven.command_handlers()[oven.CMD_SETPOINT]
 
     assert handler('0', _links(180)) is None
+
+
+def test_idle_zero_cavity_temperature_is_published_as_absent():
+    """The idle oven reports current=0 next to desired=0
+    (local-tools/comparisons/oven_device0.json). That is not a reading."""
+    sensors = oven.flatten(_links(0, current=0))
+
+    assert sensors['current_temp_c'] is None
+    assert sensors['target_temp_c'] is None
+
+
+def _op_links(state, pct):
+    return {'/operational/state/vs/0': {
+        'x.com.samsung.da.state': state,
+        'x.com.samsung.da.progressPercentage': pct,
+    }}
+
+
+def test_progress_percentage_is_zero_unless_active():
+    assert oven.flatten(_op_links('Ready', '1'))['progress_percentage'] == 0
+    assert oven.flatten(_op_links('Run', '37'))['progress_percentage'] == 37

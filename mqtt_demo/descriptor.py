@@ -222,6 +222,40 @@ def encode(cfg: dict) -> bytes:
     return json.dumps(cfg).encode()
 
 
+# --- Wi-Fi signal ------------------------------------------------------
+# `/rm/wifi/vs/0` is part of Samsung's HRM monitoring set: it is in
+# neither /oic/res nor the /device/0 batch and still answers a GET, so a
+# descriptor that wants it lists the path in a poll tier. The value is
+# `x.com.samsung.rm.rssi` (no `.da.`), and the two boards measured
+# disagree on its shape — the dryer wraps it in a one-element list, the
+# oven sends a bare integer (docs/appliance-resources.md, 2026-09-18).
+
+WIFI_PATH = ('rm', 'wifi', 'vs', '0')
+WIFI_HREF = '/' + '/'.join(WIFI_PATH)
+
+
+def wifi_rssi_dbm(links: dict):
+    """RSSI in dBm from the cached /rm/wifi/vs/0 rep, or None."""
+    rep = links.get(WIFI_HREF) or {}
+    v = rep.get('x.com.samsung.rm.rssi')
+    if isinstance(v, list):
+        v = v[0] if v else None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+#: `_SENSORS` row for the RSSI field, shared by the descriptors that
+#: poll WIFI_PATH. Diagnostic, but enabled: signal strength is the one
+#: number that explains a flaky session without the bridge log.
+WIFI_RSSI_SENSOR = ('wifi_rssi', 'Wi-Fi signal',
+                    {'unit_of_measurement': 'dBm',
+                     'device_class': 'signal_strength',
+                     'state_class': 'measurement',
+                     'entity_category': 'diagnostic'})
+
+
 def bridge_diagnostic_discovery(topic_prefix: str,
                                 ha_discovery_prefix: str,
                                 device_name: str,
@@ -248,6 +282,12 @@ def bridge_diagnostic_discovery(topic_prefix: str,
             'availability':      avail,
             'device':            device,
             'entity_category':   'diagnostic',
+            # Off by default: these are bridge-tuning counters, useful
+            # when chasing a stalled session and noise on every other
+            # day. Push Active below stays on as the one-glance signal.
+            # HA only reads this on first discovery, so an entity a user
+            # has already enabled keeps its setting.
+            'enabled_by_default': False,
         }
         if unit is not None:         cfg['unit_of_measurement'] = unit
         if device_class is not None: cfg['device_class']        = device_class
