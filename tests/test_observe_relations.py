@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -94,7 +94,7 @@ def test_subscribe_registers_path_and_query_before_immediate_response():
         query=("if=oic.if.a", "rt=x.test"),
     )
 
-    assert len(token) == 1
+    assert len(token) == 8
     assert delivered == [("/mode/vs/0", b"initial")]
     assert [value for number, value in requests[0][4] if number == URI_QUERY] == [
         b"if=oic.if.a",
@@ -393,17 +393,19 @@ def test_refresh_preserves_each_query_separated_relation():
 
 
 def test_observe_token_space_fails_closed_without_overwriting_relation():
+    """Every allocation attempt landing on a token this session already
+    holds must fail closed. Eight random bytes make that unreachable in
+    practice, so the collision is forced to keep the guard covered."""
     session = _session()
     session._send_dgram = Mock()
-    session._observe_tokens = {
-        bytes([value]): f"/resource/{value}" for value in range(1, 256)
-    }
-    session._observe_queries = {
-        token: () for token in session._observe_tokens
-    }
+    held = bytes(range(1, 9))
+    session._observe_tokens = {held: "/resource/held"}
+    session._observe_queries = {held: ()}
 
-    with pytest.raises(SessionIdentifierError):
-        session.subscribe(["mode", "vs", "0"])
+    with patch("smartthings_local.protocol.dtls_session.os.urandom",
+               return_value=held):
+        with pytest.raises(SessionIdentifierError):
+            session.subscribe(["mode", "vs", "0"])
 
-    assert len(session._observe_tokens) == 255
+    assert session._observe_tokens == {held: "/resource/held"}
     session._send_dgram.assert_not_called()

@@ -749,7 +749,7 @@ StateCache(descriptor: '_ObservationHook')
 *class*
 
 - `apply_optimistic(href: str, body: dict) -> bool`
-- `apply_rep(href: str, rep: dict, source: str) -> bool`
+- `apply_rep(href: str, rep: dict, source: str, *, merge: bool = False) -> bool`: Apply one representation. `merge` folds a partial one into what is already held; the default replaces.
 - `freshness_s(href: str) -> float | None`
 - `get(href: str) -> dict | None`
 - `index_device_tree(device0_body) -> dict[str, dict]`: Turn a /device/0 CBOR list-of-{href, rep} sweep response into a dict keyed by href. Some responses put a device-level `/device/0` rep first, while others put a normal resource in that slot.

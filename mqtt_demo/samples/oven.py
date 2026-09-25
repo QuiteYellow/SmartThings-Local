@@ -38,6 +38,8 @@ from datetime import datetime, timezone
 
 from ..descriptor import (
     LOCAL_ONLY,
+    WIFI_PATH,
+    WIFI_RSSI_SENSOR,
     ApplianceDescriptor,
     ClockSync,
     avail_base,
@@ -46,6 +48,7 @@ from ..descriptor import (
     avail_with_remote_and_idle,
     device_block,
     encode,
+    wifi_rssi_dbm,
 )
 from smartthings_local.ocf.poll_scheduler import PollTier
 
@@ -310,6 +313,13 @@ def flatten(links):
     # already reads when idle. _setpoint applies the same bounds on write.
     if des_c is not None and not (SETPOINT_MIN_C <= des_c <= SETPOINT_MAX_C):
         des_c = None
+    # The idle oven reports current=0 alongside desired=0
+    # (local-tools/comparisons/oven_device0.json). A 0 °C cavity is not
+    # a reading; publishing it put "0 °C" on the card whenever the oven
+    # was off. Only exact 0 is treated as absent: a cooling oven after a
+    # cycle still reports its real cavity temperature.
+    if cur_c == 0:
+        cur_c = None
 
     # Door
     doors_items = g('/doors/vs/0', 'x.com.samsung.da.items') or []
@@ -384,8 +394,11 @@ def flatten(links):
         # return 2.04 but get rolled back within ~3s.
         'cycle_active':            machine_state == 'active',
         'oven_state':              oven_state,
-        'progress_percentage':     _int(g('/operational/state/vs/0',
-                                          'x.com.samsung.da.progressPercentage')),
+        # Only meaningful during a cycle; the board parks it at a
+        # non-zero value while Ready.
+        'progress_percentage':     (_int(g('/operational/state/vs/0',
+                                           'x.com.samsung.da.progressPercentage'))
+                                    if machine_state == 'active' else 0),
         'operation_time':          operation_time,
         'operation_time_minutes':  op_min,
         'completion_time':         remaining,
@@ -423,6 +436,7 @@ def flatten(links):
         'connected':               sam_connected,
         'connected_binary':        connected_bin,
         'firmware_update_available': fw_update_bin,
+        'wifi_rssi':               wifi_rssi_dbm(links),
     }
 
 
@@ -633,7 +647,9 @@ MODEL = 'OCF oven (TizenRT-iotivity, NV7000BS-class)'
 # sensor would just clutter the device card with the same value
 # twice.
 _SENSORS = [
-    ('machine_state',       'Machine state',        {'icon': 'mdi:stove'}),
+    ('machine_state',       'Machine state',
+        {'icon': 'mdi:stove', 'device_class': 'enum',
+         'options': ['idle', 'active', 'pause']}),
     ('oven_state',          'Cavity state',         {}),
     # Cooking mode is read-only via local OCF — the oven owns the
     # `modes` field once a cycle is active and rolls back any writes.
@@ -681,6 +697,7 @@ _SENSORS = [
         {'icon': 'mdi:clock-alert', 'entity_category': 'diagnostic'}),
     ('connected',           'Cloud connectivity',
         {'entity_category': 'diagnostic'}),
+    WIFI_RSSI_SENSOR,
 ]
 
 # (key, friendly, value_template, device_class, extras)
@@ -1468,6 +1485,13 @@ OVEN_POLL_TIERS = [
         paths=(
             ('otninformation', 'vs', '0'),
         ),
+    ),
+    # Off the /device/0 batch; see the dryer's tier of the same name.
+    PollTier(
+        name='wifi',
+        interval_s=120.0,
+        timeout_s=6.0,
+        paths=(WIFI_PATH,),
     ),
     PollTier(
         name='sweep',

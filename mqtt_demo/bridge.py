@@ -320,7 +320,14 @@ class PushBridge:
 
     def _on_notification(self, href, payload_bytes, source='observe'):
         """Large resources (oven /mode/vs/0 ~9KB) arrive truncated with
-        Block2.M=1 and we use cbor-decode failure as the partial signal."""
+        Block2.M=1 and we use cbor-decode failure as the partial signal.
+
+        A push is merged into the cached representation, because a
+        notification here can be a sparse delta naming only what changed
+        (see StateCache.apply_rep). A registration response is the whole
+        representation and replaces, as does the fetchback below, which
+        carries this source label while being a complete GET result.
+        """
         if not payload_bytes:
             self._schedule_fetchback(href, source=source)
             return
@@ -333,7 +340,8 @@ class PushBridge:
             return
         if DEBUG_BRIDGE:
             self._debug_log_rep(href, rep)
-        self.cache.apply_rep(href, rep, source=source)
+        self.cache.apply_rep(href, rep, source=source,
+                             merge=(source == 'observe'))
 
     def _debug_log_rep(self, href, rep):
         if href == '/mode/vs/0' and isinstance(rep, dict):

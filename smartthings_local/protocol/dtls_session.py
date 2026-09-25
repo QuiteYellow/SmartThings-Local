@@ -158,6 +158,11 @@ _OBSERVE_SEQUENCE_MODULUS = 1 << 24
 _OBSERVE_SEQUENCE_HALF_RANGE = 1 << 23
 _OBSERVE_SEQUENCE_RESET_S = 128.0
 _MAX_OBSERVE_RELATIONS = 0xFF
+# CA_MAX_TOKEN_LEN (cacommon.h:95). The width is what keeps a registration
+# from inheriting a relation the appliance still holds on the same token;
+# see the constructor for the measurements behind moving off one byte.
+_OBSERVE_TOKEN_LEN = 8
+_OBSERVE_TOKEN_ALLOC_ATTEMPTS = 8
 
 
 class _EtagChanged(Exception):
@@ -620,26 +625,50 @@ class DtlsCoapSession:
         # active is silently no-ops.
         self._mid = int.from_bytes(os.urandom(2), 'big')
         self._tok_counter = int.from_bytes(os.urandom(4), 'big')
-        # OBSERVE tokens are 1-byte (Samsung silently drops TKL>1
-        # OBSERVE registrations). Pick a random starting byte in the
-        # 0x40..0xff range so each session uses fresh values.
+        # OBSERVE tokens are 8 bytes, the CoAP maximum (CA_MAX_TOKEN_LEN,
+        # cacommon.h:95), drawn fresh at random per registration.
         #
-        # The TKL>1 claim has no source behind it and the likely source
-        # files contradict it: the fork these appliances run (TizenRT's
-        # iotivity_1.2-rel, see docs/firmware-families.md for the pin these
-        # lines are from) accepts tokens up to
-        # CA_MAX_TOKEN_LEN 8 (cacommon.h:95), and its receive path just
-        # records the parsed length (caprotocolmessage.c:939,1030) with no
-        # width check anywhere. Its observer lookup compares only the
-        # *incoming* token's length (ocobserve.c:518), so a short token
-        # matching a held token's first bytes collides with it — and a
-        # collision is answered with silence, which reads as a dead
-        # device. One byte is therefore the width most likely to collide,
-        # against exactly 192 distinct values here. Widening it is a wire
-        # change on hardware that cannot be replaced, so it wants testing
-        # across models first, not a quiet edit. See
-        # docs/firmware-families.md for the tree and pin.
-        self._observe_tok_counter = 0x40 + (os.urandom(1)[0] & 0xBF)
+        # The firmware line numbers below are from the fork these
+        # appliances run, TizenRT's iotivity_1.2-rel; docs/firmware-families.md
+        # carries the tree and the pin they were read at.
+        #
+        # They were one byte until 2026-09-25, on the reasoning in 8775f7a
+        # (2026-05-31): "Samsung RT-OCF silently drops registrations with
+        # TKL>1 ... symptom was that writes returned 2.04 but the appliance
+        # never pushed state changes". That symptom is the cloud gate: two
+        # days earlier an A/B test had already found that these appliances
+        # accept OBSERVE registrations and never fire while their cloud
+        # connection is down. The commit also changed six other things,
+        # among them a pyOpenSSL reader-loop locking fix, so the width was
+        # never the isolated variable. Measured on both appliances on
+        # 2026-09-18 and again on 2026-09-25: tokens of 1, 2, 3, 4, 5 and 8
+        # bytes all register, each confirmed by a deregistration that only
+        # answers for a token the stack holds, and a 1-byte and an 8-byte
+        # relation on one resource both receive every notification in the
+        # same millisecond. See
+        # local-tools/HARDWARE-RESULTS-2026-09-25-token-widths.md.
+        #
+        # Width is what defends against the collision. The observer lookup
+        # compares only the *incoming* token's length (ocobserve.c:518), so
+        # a short token matching a held token's first bytes collides with
+        # it, the registration is dropped in silence (ocresource.c:1213)
+        # and the old relation keeps the token — after which its
+        # notifications arrive here labelled with whatever href we have
+        # since mapped that token to. Reproduced on hardware 2026-09-25
+        # (HARDWARE-RESULTS-2026-09-25-forced-collision.md). One byte gave
+        # 192 starting values; eight must match on all eight bytes.
+        #
+        # Still random rather than derived from the href. Deriving it makes
+        # a same-href collision harmless instead of merely improbable, and
+        # makes connect-time deregistration possible, but that is a second
+        # variable and it waits for this one to be seen in the field.
+        #
+        # Transition: relations left by pre-8-byte builds are stored in a
+        # buffer of their own length (OICMalloc, ocobserve.c:429), so the
+        # firmware reads past them when comparing our longer token. It
+        # already does exactly that in its own logging path. Those
+        # relations age out through the three-strike notification path or
+        # a reboot.
         # token (bytes) → (Event, container_dict)
         self._pending = {}
         # request MID (int) → _MidExchange. Empty ACK and RST frames carry
@@ -1168,12 +1197,17 @@ class DtlsCoapSession:
             return self._tok_counter.to_bytes(4, 'big')
 
     def _next_available_observe_tok_locked(self):
-        """Return an unused nonzero one-byte Observe token."""
-        for _ in range(min(len(self._observe_tokens) + 1, 0xFF)):
-            self._observe_tok_counter = (self._observe_tok_counter + 1) & 0xFF
-            if self._observe_tok_counter == 0:
-                self._observe_tok_counter = 1
-            token = bytes([self._observe_tok_counter])
+        """Return an unused 8-byte Observe token.
+
+        Random rather than sequential: the appliance keeps observer state
+        across DTLS sessions and matches on the incoming token's length,
+        so a value this session has never used is what avoids inheriting
+        a relation registered by an earlier one. The retry loop only
+        guards against a repeat within this session's own live map; a
+        clash across 8 random bytes is not something to plan around.
+        """
+        for _ in range(_OBSERVE_TOKEN_ALLOC_ATTEMPTS):
+            token = os.urandom(_OBSERVE_TOKEN_LEN)
             if token not in self._observe_tokens:
                 return token
         raise SessionIdentifierError()
