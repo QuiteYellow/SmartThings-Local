@@ -43,3 +43,24 @@ missing. Keep real values in a `.env` you do not commit.
 Script output is written to be safe to paste into a public thread: identifiers
 are reported as a comparison result or a hash prefix rather than printed. Read
 the output before you post it anyway.
+
+## Tests for the #115 Python PSK probe
+
+The tested environment uses Python 3.12.13, pytest 9.1.1, pyOpenSSL 26.4.0,
+cryptography 50.0.2, cbor2 6.1.5, and OpenSSL 4.0.3.
+These versions describe the tested environment, not minimum requirements.
+The OpenSSL fixture uses pyOpenSSL's private CFFI bindings.
+
+Create a virtual environment and install the tested dependencies:
+
+```sh
+python3.12 -m venv .venv
+.venv/bin/python -m pip install pytest==9.1.1 pyOpenSSL==26.4.0 cryptography==50.0.2 cbor2==6.1.5
+cd pr-115-purepy-psk
+PYTHONDONTWRITEBYTECODE=1 ../.venv/bin/python -B -m pytest -p no:cacheprovider test_dtls_psk.py test_oven_psk_test.py -q
+```
+
+The expected result is 26 passing tests.
+The tests require no appliance credentials or hardware.
+The OpenSSL tests use memory BIOs.
+The probe tests use localhost UDP, including replies from another source port.

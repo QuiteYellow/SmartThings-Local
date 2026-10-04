@@ -343,10 +343,10 @@ class DtlsPskClient:
             + bytes([1, 0])
         )
         body += struct.pack("!H", len(extensions)) + extensions
-        # RFC 6347 4.2.1: the initial ClientHello and the HelloVerifyRequest are
-        # excluded from the transcript; the cookie ClientHello starts it.
+        # Keep ClientHello when the server skips HelloVerifyRequest.
+        # The cookie path resets the transcript before its replacement hello.
         self._start_flight()
-        self._emit_handshake(_HT_CLIENT_HELLO, bytes(body), transcript=bool(cookie))
+        self._emit_handshake(_HT_CLIENT_HELLO, bytes(body), transcript=True)
 
     def _send_client_flight(self) -> None:
         """ClientKeyExchange + ChangeCipherSpec + Finished."""
@@ -469,11 +469,17 @@ class DtlsPskClient:
 
     def _handle_record(self, record: bytes) -> None:
         content_type = record[0]
-        if record[1:3] != _VERSION:
-            return
         epoch = int.from_bytes(record[3:5], "big")
-        seq = int.from_bytes(record[5:11], "big")
         fragment = record[_RECORD_HEADER:]
+        if record[1:3] != _VERSION:
+            # DTLS 1.2 servers may frame HelloVerifyRequest as DTLS 1.0.
+            # Accept that framing only for the initial plaintext cookie reply.
+            if not (record[1:3] == b"\xfe\xff" and epoch == 0
+                    and content_type == _CT_HANDSHAKE
+                    and self._state == "sent_hello"
+                    and fragment[:1] == bytes([_HT_HELLO_VERIFY_REQUEST])):
+                return
+        seq = int.from_bytes(record[5:11], "big")
 
         expected_epoch = 1 if self._read_active else 0
         if epoch != expected_epoch:
