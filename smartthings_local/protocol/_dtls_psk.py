@@ -491,8 +491,15 @@ class DtlsPskClient:
         epoch = int.from_bytes(record[3:5], "big")
         fragment = record[_RECORD_HEADER:]
         if record[1:3] != _VERSION:
-            # DTLS 1.2 servers may frame HelloVerifyRequest as DTLS 1.0.
-            # Accept that framing only for the initial plaintext cookie reply.
+            # OpenSSL frames its HelloVerifyRequest as DTLS 1.0 under cookie
+            # exchange; the interop tests pin that. The appliance does not:
+            # its header was recorded as 16 fe fd 00 .. 2f, and Mbed TLS
+            # derives that version from the negotiated one, so other
+            # generations are unmeasured rather than known to match.
+            #
+            # Hence the exception, kept narrow. In this state a peer can
+            # already send a 1.2-framed HelloVerifyRequest, so accepting the
+            # same message in a second framing grants nothing further.
             if not (record[1:3] == b"\xfe\xff" and epoch == 0
                     and content_type == _CT_HANDSHAKE
                     and self._state == "sent_hello"
