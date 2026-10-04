@@ -41,6 +41,7 @@ result.
 Usage:
   handshake_matrix.py HOST [--port N] [--cert PATH --key PATH]
                       [--interval S] [--repeats N] [--variants a,b,...]
+                      [--cookie-delay S]
                       [--no-clean-close] [--no-health-gate] [--list]
 
 Credentials default to $CERT_PATH / $KEY_PATH. Nothing is written to disk and
@@ -126,7 +127,7 @@ def _apply(ctx, variant):
 
 _orig_context = probe._diagnostic_context
 _orig_drive = probe._drive_dtls_handshake
-_state = {'variant': 'baseline', 'clean_close': True}
+_state = {'variant': 'baseline', 'clean_close': True, 'cookie_delay': 0.0}
 
 
 def _patched_context(**kw):
@@ -148,8 +149,11 @@ def _patched_drive(connection, sock, **kw):
             sent[record[13]] += 1
 
     kw['on_record_sent'] = on_record_sent
+    if _state['cookie_delay'] > 0:
+        sock = _DelayAfterHelloVerify(sock, _state['cookie_delay'])
     completed = _orig_drive(connection, sock, **kw)
     _state['client_hellos'] = sent[1]
+    _state['delayed'] = getattr(sock, 'delayed', 0)
     _state['close_bytes'] = 0
     if completed and _state['clean_close']:
         try:
@@ -171,6 +175,53 @@ def _patched_drive(connection, sock, **kw):
 
 probe._diagnostic_context = _patched_context
 probe._drive_dtls_handshake = _patched_drive
+
+
+def _is_hello_verify_request(datagram):
+    """True if this datagram carries a HelloVerifyRequest (handshake type 3)."""
+    o = 0
+    while o + 13 <= len(datagram):
+        ct = datagram[o]
+        ln = struct.unpack('>H', datagram[o + 11:o + 13])[0]
+        body = datagram[o + 13:o + 13 + ln]
+        o += 13 + ln
+        if ct == 22 and body and body[0] == 3:
+            return True
+    return False
+
+
+class _DelayAfterHelloVerify:
+    """Hold the cookie reply back by ``delay`` seconds.
+
+    The appliance firmware answers a cookieless ClientHello, then runs
+    ``mbedtls_ssl_session_reset`` + ``mbedtls_ssl_set_client_transport_id`` +
+    another handshake step (``ca_adapter_net_ssl.c:2215``). Measured on issue
+    #20's captures, our cookie reply leaves 0.38-0.77 ms after the appliance
+    transmits, i.e. while that reset is still running. Delaying the moment
+    OpenSSL *sees* the HelloVerifyRequest delays the reply, with no change to
+    any byte in it.
+    """
+
+    def __init__(self, sock, delay):
+        self._sock = sock
+        self._delay = delay
+        self.delayed = 0
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+    def send(self, data):
+        return self._sock.send(data)
+
+    def settimeout(self, value):
+        return self._sock.settimeout(value)
+
+    def recv(self, size):
+        data = self._sock.recv(size)
+        if self._delay > 0 and _is_hello_verify_request(data):
+            self.delayed += 1
+            time.sleep(self._delay)
+        return data
 
 
 # --------------------------------------------------------------------------
@@ -358,7 +409,8 @@ def run_one(host, port, variant, cert, key, timeout):
     _state['close_bytes'] = 0
     started = time.time()
     result = probe.diagnose_dtls_handshake(
-        host, port, cert_path=cert, key_path=key, timeout=timeout, retries=2)
+        host, port, cert_path=cert, key_path=key,
+        timeout=timeout + _state['cookie_delay'], retries=2)
     sh_exts, curves = server_flight_detail(result.datagrams)
     return {
         'variant': variant,
@@ -371,6 +423,7 @@ def run_one(host, port, variant, cert, key, timeout):
         'curve': [GROUP_NAMES.get(c, c) for c in curves],
         'client_hellos_sent': _state['client_hellos'],
         'close_notify_bytes': _state['close_bytes'],
+        'cookie_delayed': _state.get('delayed', 0),
     }
 
 
@@ -389,6 +442,10 @@ def main(argv=None):
     ap.add_argument('--timeout', type=float, default=6.0)
     ap.add_argument('--no-clean-close', action='store_true',
                     help='skip close_notify -- leaves a peer behind per run')
+    ap.add_argument('--cookie-delay', type=float, default=0.0,
+                    help='seconds to hold the cookie-bearing ClientHello back '
+                         'after the HelloVerifyRequest arrives (default 0, '
+                         'which reproduces the sub-millisecond reply)')
     ap.add_argument('--no-health-gate', action='store_true')
     ap.add_argument('--list', action='store_true',
                     help='describe the variants and exit')
@@ -409,11 +466,13 @@ def main(argv=None):
         ap.error(f'unknown variants: {unknown}; try --list')
 
     _state['clean_close'] = not args.no_clean_close
+    _state['cookie_delay'] = args.cookie_delay
     print(f'OpenSSL: {SSL.OpenSSL_version(SSL.SSLEAY_VERSION).decode()}')
     print(f'cipher list: {probe._DTLS_CIPHERS.decode()}')
     print(f'clean close: {_state["clean_close"]}   '
           f'health gate: {not args.no_health_gate}   '
-          f'interval: {args.interval}s\n')
+          f'interval: {args.interval}s   '
+          f'cookie delay: {args.cookie_delay}s\n')
 
     if not self_check(chosen, args.cert, args.key):
         return 1
@@ -462,7 +521,8 @@ def main(argv=None):
             print(f'         {variant:11} {row["outcome"]:9} '
                   f'rtt={row["rtt_ms"]}ms curve={row["curve"]} '
                   f'alert={row["alert"]}')
-            print(f'         {"":11} ClientHellos_sent={row["client_hellos_sent"]} '
+            print(f'         {"":11} cookie_replies_delayed={row["cookie_delayed"]} '
+                  f'ClientHellos_sent={row["client_hellos_sent"]} '
                   f'close_notify={row["close_notify_bytes"]}B '
                   f'server_hello_exts='
                   f'{[EXT_NAMES.get(e, e) for e in (row["server_hello_exts"] or [])]}')
