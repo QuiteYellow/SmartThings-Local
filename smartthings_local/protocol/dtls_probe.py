@@ -45,6 +45,10 @@ from .coap import split_dtls
 from .dtls_handshake import _drive_dtls_handshake
 from .endpoint import open_host_filtered_udp_socket
 
+# A close_notify is a two-byte alert inside one record, so this only has to
+# clear OpenSSL's queued shutdown rather than a whole flight.
+_SHUTDOWN_READ_SIZE = 4096
+
 # DTLS record content types (RFC 6347 §4.1)
 _CT_CHANGE_CIPHER_SPEC = 20
 _CT_ALERT = 21
@@ -713,6 +717,37 @@ def _accept_any_peer_chain(*_args):
     return True
 
 
+def _release_peer(connection, sock):
+    """Send close_notify so the appliance frees the peer this run allocated.
+
+    The appliance firmware frees a peer entry when it receives close_notify,
+    and has no idle timeout that would reclaim one otherwise, so a diagnostic
+    that closed its socket without a shutdown left association state behind
+    for the life of the appliance. Measured on 2026-10-04: six completed
+    diagnostics inside six minutes took a healthy dryer's DTLS endpoint down
+    for about seven minutes, while its ICMP and plaintext CoAP kept answering
+    normally.
+
+    The connection is a memory BIO, so ``shutdown()`` only queues the alert;
+    it has to be read back out and sent here. Best effort by design -- the
+    caller already has its result, and a peer this fails to release is the
+    behaviour that shipped before, so nothing here may raise.
+    """
+    try:
+        connection.shutdown()
+    except SSL.Error:
+        return
+    try:
+        pending = connection.bio_read(_SHUTDOWN_READ_SIZE)
+    except SSL.Error:
+        return
+    for record in split_dtls(pending):
+        try:
+            sock.send(record)
+        except OSError:
+            return
+
+
 def _validate_diagnostic_auth(auth, cert_pem, key_pem, cert_path, key_path):
     if auth is None:
         return
@@ -855,6 +890,7 @@ def diagnose_dtls_handshake(
             result.outcome = COMPLETED
             if result.rtt_s is None:
                 result.rtt_s = time.monotonic() - started
+            _release_peer(conn, sock)
     except SSL.Error:
         # A fatal Alert lands here; record_datagram() has already classified
         # the alert record before it is fed back into OpenSSL.
