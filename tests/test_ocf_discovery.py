@@ -613,35 +613,40 @@ def test_a_silent_filtered_lookup_leaves_the_directory_most_of_the_budget():
 
 
 @pytest.mark.parametrize(
-    'primary_payload',
+    'first_payload',
     (
         b'not-cbor',
         _payload(_eps_link('coaps://127.0.0.2:61002')),
     ),
 )
-def test_malformed_or_cross_source_primary_never_starts_fallback(
-        primary_payload):
+def test_an_unusable_first_answer_still_reads_the_directory(first_payload):
+    # The two lookups ask different questions, so the narrow one answering
+    # unusably says nothing about the directory. Undecodable CBOR and an
+    # `eps` bound to another address both used to end the operation here,
+    # which under the doxm-first default made a device advertising its only
+    # trustworthy port elsewhere unreachable. Falling through accepts no
+    # port from the failed answer: the port below comes from the directory
+    # and faces the same source check.
     listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     listener.bind(('127.0.0.1', 0))
     listener.settimeout(0.4)
     errors = []
-    saw_fallback = []
+    queries = []
 
     def respond():
         try:
-            request, client = listener.recvfrom(8192)
-            parsed = parse_coap(request)
-            listener.sendto(
-                build_coap(
-                    TYPE_NON, 0x45, 0x7301, parsed[3], [], primary_payload),
-                client,
-            )
-            try:
-                listener.recvfrom(8192)
-            except TimeoutError:
-                return
-            saw_fallback.append(True)
-        except Exception as exc:  # noqa: BLE001 - surfaced through errors below
+            for index, payload in enumerate(
+                    (first_payload, _payload(_doxm_link(port=61002)))):
+                request, client = listener.recvfrom(8192)
+                parsed = parse_coap(request)
+                queries.append(_option_map(parsed[4]).get(URI_QUERY))
+                listener.sendto(
+                    build_coap(
+                        TYPE_NON, 0x45, 0x7301 + index, parsed[3], [],
+                        payload),
+                    client,
+                )
+        except Exception as exc:  # noqa: BLE001 - surfaced through errors
             errors.append(exc)
 
     thread = threading.Thread(target=respond)
@@ -660,8 +665,122 @@ def test_malformed_or_cross_source_primary_never_starts_fallback(
 
     assert not thread.is_alive()
     assert errors == []
-    assert saw_fallback == []
+    assert queries == [[b'rt=oic.r.doxm'], None]
+    assert result.ports == (61002,)
+    assert result.attempts == 2
+    assert result.response_received
+    assert result.error_code is None
+
+
+def test_a_filtered_lookup_that_runs_out_of_time_hands_off():
+    # A Block2 transfer that was answered in part and never finished is
+    # labelled malformed, which is indistinguishable from bad content at
+    # the call site. The filtered lookup's share is a hard cap when it runs
+    # first, so a slow narrow answer used to end the operation inside a
+    # fraction of the deadline and the directory was never asked.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listener.bind(('127.0.0.1', 0))
+    listener.settimeout(2.0)
+    body = _payload(_doxm_link(port=61009), padding='x' * 40)
+    assert len(body) > 64
+    errors = []
+    queries = []
+
+    def respond():
+        try:
+            request, client = listener.recvfrom(8192)
+            parsed = parse_coap(request)
+            queries.append(_option_map(parsed[4]).get(URI_QUERY))
+            # Block 0 of the filtered answer, then nothing: the transfer
+            # stays incomplete until its share of the budget is spent.
+            listener.sendto(
+                build_coap(
+                    TYPE_NON, 0x45, 0x7801, parsed[3],
+                    [(BLOCK2, block_value(0, 1, 2))], body[:64]),
+                client,
+            )
+            while True:
+                stalled, client = listener.recvfrom(8192)
+                parsed = parse_coap(stalled)
+                query = _option_map(parsed[4]).get(URI_QUERY)
+                if query is None:
+                    break
+            queries.append(query)
+            listener.sendto(
+                build_coap(
+                    TYPE_NON, 0x45, 0x7802, parsed[3], [],
+                    _payload(_doxm_link(port=61010))),
+                client,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced through errors
+            errors.append(exc)
+
+    thread = threading.Thread(target=respond)
+    thread.start()
+    try:
+        result = discovery.discover_ocf_secure_ports(
+            '127.0.0.1',
+            discovery_port=listener.getsockname()[1],
+            timeout=1.2,
+            retries=0,
+            family=socket.AF_INET,
+        )
+    finally:
+        thread.join(timeout=3.0)
+        listener.close()
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert queries == [[b'rt=oic.r.doxm'], None]
+    assert result.ports == (61010,)
+    assert result.error_code is None
+
+
+def test_two_unusable_answers_report_the_first_diagnosis():
+    # Falling through does not swallow the finding. With no usable port from
+    # either lookup, the unusable first answer is the more specific outcome
+    # than the directory advertising nothing, so it keeps the error code.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listener.bind(('127.0.0.1', 0))
+    listener.settimeout(0.4)
+    errors = []
+    queries = []
+
+    def respond():
+        try:
+            for index, payload in enumerate(
+                    (b'not-cbor', _payload())):
+                request, client = listener.recvfrom(8192)
+                parsed = parse_coap(request)
+                queries.append(_option_map(parsed[4]).get(URI_QUERY))
+                listener.sendto(
+                    build_coap(
+                        TYPE_NON, 0x45, 0x7401 + index, parsed[3], [],
+                        payload),
+                    client,
+                )
+        except Exception as exc:  # noqa: BLE001 - surfaced through errors
+            errors.append(exc)
+
+    thread = threading.Thread(target=respond)
+    thread.start()
+    try:
+        result = discovery.discover_ocf_secure_ports(
+            '127.0.0.1',
+            discovery_port=listener.getsockname()[1],
+            timeout=0.6,
+            retries=0,
+            family=socket.AF_INET,
+        )
+    finally:
+        thread.join(timeout=2.0)
+        listener.close()
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert queries == [[b'rt=oic.r.doxm'], None]
     assert result.ports == ()
+    assert result.attempts == 2
     assert result.response_received
     assert result.error_code == 'malformed_ocf_response'
 

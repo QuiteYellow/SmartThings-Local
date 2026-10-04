@@ -852,10 +852,13 @@ def discover_ocf_secure_ports(
     ``'doxm-first'``, the default, asks ``/oic/res?rt=oic.r.doxm`` and keeps
     the unfiltered ``/oic/res`` directory behind it; ``'directory-first'``
     reverses them. Coverage is the same either way, since both advertised
-    forms are read from whichever answer arrives, so the order decides only
-    which kind of device pays for a second round trip. The filtered lookup
-    is held to at most one second, and to half of a shorter ``timeout``, so
-    that a directory transfer behind it keeps the rest of the budget.
+    forms are read from whichever answer arrives and only a usable port ends
+    the operation early, so the order decides which kind of device pays for
+    a second round trip and nothing else. The filtered lookup's share of
+    ``timeout`` is one second, or half of a shorter ``timeout``: running
+    first it is capped there, so the directory behind it keeps the rest;
+    running second it is guaranteed that much instead, because the directory
+    ahead of it stops early to leave it.
 
     Name resolution happens synchronously first. ``timeout`` then bounds both
     explicit directory lookups and every Block2 continuation. An advertisement
@@ -882,11 +885,14 @@ def discover_ocf_secure_ports(
     # Whichever lookup runs second has to fit in the deadline the first one
     # leaves, and the two are not the same size: the filtered lookup is one
     # small answer where the unfiltered directory spans several Block2
-    # blocks. So the filtered lookup is capped at half of a short timeout
-    # and at one second either way, wherever in the order it sits, and the
-    # directory read keeps the rest of the budget.
+    # blocks. So the directory read gets the bulk of the budget in both
+    # orders, and `filtered_share` is what the filtered lookup gets. The
+    # two orders spend it differently, which is why this is not one rule:
+    # running first the filtered lookup is capped at it, so the directory
+    # behind it keeps the rest; running second it is instead guaranteed at
+    # least that much, because the directory ahead of it stops early.
     filtered_share = min(1.0, float(timeout) / 2)
-    if first_query is _FILTERED_QUERY:
+    if first_query == _FILTERED_QUERY:
         first_cutoff = started + filtered_share
     else:
         first_cutoff = deadline - filtered_share
@@ -908,24 +914,46 @@ def discover_ocf_secure_ports(
         response_received = response_received or first.response_received
 
         if first.status == _TRANSFER_ENDPOINT_UNAVAILABLE:
+            # Sends themselves failed, so the routes are gone and a second
+            # lookup over them would ask nothing.
             return _result(
                 (), attempts, response_received, 'endpoint_unavailable')
+
+        # Only a usable port ends the operation here. Every other outcome
+        # goes on to the second lookup, because the two ask different
+        # questions and the first one failing says nothing about the answer
+        # to the second: the filtered lookup sees doxm links alone, so a
+        # device advertising its only trustworthy `eps` elsewhere, or
+        # answering this narrow question with undecodable CBOR or a
+        # cross-source `eps`, is still reachable through the directory.
+        # Returning here instead would make that device unreachable under
+        # whichever order puts the narrow lookup first.
+        #
+        # #36, which added this function, lists "malformed, partial,
+        # stale-token, and cross-source responses fail closed" as a safety
+        # bound, so the early return this replaces had a stated intent. Two
+        # items on that list say what it meant: a stale token and a rejected
+        # piggyback ACK both discard the response and go on to the second
+        # lookup, which `test_stale_primary_token_is_ignored_during_fallback`
+        # and `test_non_request_rejects_piggyback_ack_and_uses_fallback` pin
+        # by asserting a port comes back over two attempts. Failing closed
+        # there is refusing the content, not abandoning the operation, and
+        # that is what this does: nothing from a failed lookup is carried
+        # forward, and every port the second one yields faces the same
+        # source check. `first_error` holds the diagnosis in the meantime,
+        # to report if the second lookup finds no port either.
+        first_error = None
         if first.status == _TRANSFER_MALFORMED:
-            return _result(
-                (), attempts, response_received, 'malformed_ocf_response')
-        if first.status == _TRANSFER_COMPLETE:
+            first_error = 'malformed_ocf_response'
+        elif first.status == _TRANSFER_COMPLETE:
             status, ports = _extraction_for_transfer(first)
             if status == _PORTS_FOUND:
                 return _result(ports, attempts, response_received)
             if status in (_PORTS_MALFORMED, _PORTS_UNTRUSTED):
-                return _result(
-                    (), attempts, response_received,
-                    'malformed_ocf_response')
+                first_error = 'malformed_ocf_response'
 
-        # A completely unanswered first request and a valid representation
-        # with no usable secure port are the only conditions for a second
-        # lookup. It gets a fresh token, accumulator, and peer pin and starts
-        # at the original public discovery routes.
+        # The second lookup gets a fresh token, accumulator, and peer pin and
+        # starts at the original public discovery routes.
         second = _fetch_resource(
             routes,
             selector,
@@ -947,7 +975,8 @@ def discover_ocf_secure_ports(
                 (), attempts, response_received, 'malformed_ocf_response')
         if second.status == _TRANSFER_NO_RESPONSE:
             return _result(
-                (), attempts, response_received, 'no_ocf_response')
+                (), attempts, response_received,
+                first_error or 'no_ocf_response')
 
         status, ports = _extraction_for_transfer(second)
         if status == _PORTS_FOUND:
@@ -955,6 +984,12 @@ def discover_ocf_secure_ports(
         if status in (_PORTS_MALFORMED, _PORTS_UNTRUSTED):
             return _result(
                 (), attempts, response_received, 'malformed_ocf_response')
-        return _result((), attempts, response_received, 'no_secure_ports')
+        # A first lookup that answered unusably is the more specific finding
+        # than the second one advertising nothing, so it wins the code: the
+        # caller probes its candidate ports either way, and the log keeps
+        # the fact that something was advertised and refused.
+        return _result(
+            (), attempts, response_received,
+            first_error or 'no_secure_ports')
     finally:
         _close_routes(routes, selector)
