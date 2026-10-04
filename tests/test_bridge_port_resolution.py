@@ -21,8 +21,16 @@ def _mk_bridge(ocf_port, default=49155, discovered=None):
     return b
 
 
-def _fake_directory(ports, *, error=None):
-    """Return a plaintext-directory stand-in advertising ``ports``."""
+def _fake_directory(ports, *, error=None, response_received=None):
+    """Return a plaintext-directory stand-in advertising ``ports``.
+
+    ``response_received`` defaults to whether any port came back, so an
+    empty result reads as a device that never answered. Pass it explicitly
+    for the other empty case: a directory that answered and carried no
+    usable secure port.
+    """
+    answered = bool(ports) if response_received is None else response_received
+
     def fake(ip, **kw):
         if error is not None:
             raise error
@@ -30,8 +38,9 @@ def _fake_directory(ports, *, error=None):
             ports=tuple(ports),
             found=bool(ports),
             attempts=1,
-            response_received=bool(ports),
-            error_code=None if ports else 'no_secure_ports',
+            response_received=answered,
+            error_code=None if ports else (
+                'no_secure_ports' if answered else 'no_ocf_response'),
         )
     return fake
 
@@ -267,7 +276,35 @@ def test_every_resolution_path_logs_which_tier_chose_the_port(
             bridge, 'discover_ocf_secure_ports', _fake_directory(()))
         _mk_bridge(ocf_port=None)._resolve_port()
         assert bridge._SOURCE_SWEPT in caplog.text
+        assert 'no answer from the directory' in caplog.text
+
+
+def test_a_silent_directory_is_not_logged_as_advertising_no_port(
+        monkeypatch, caplog):
+    # Both empty results fall through to the sweep, so the chosen port
+    # cannot tell them apart and this log line is the only place the
+    # difference survives. #110 quoted the old wording for a dryer that had
+    # not answered on 5683, and read it as an appliance with no secure port.
+    monkeypatch.setattr(bridge, 'probe_dtls_port', _fake_port_probe({49155}))
+    monkeypatch.setattr(bridge, 'probe_dtls_ports', _fake_port_set({49155}))
+
+    with caplog.at_level(logging.INFO):
+        monkeypatch.setattr(
+            bridge, 'discover_ocf_secure_ports',
+            _fake_directory((), response_received=False))
+        _mk_bridge(ocf_port=None)._resolve_port()
+        assert 'no answer from the directory' in caplog.text
+        assert 'advertised no secure port' not in caplog.text
+        assert 'no_ocf_response' in caplog.text
+
+        caplog.clear()
+        monkeypatch.setattr(
+            bridge, 'discover_ocf_secure_ports',
+            _fake_directory((), response_received=True))
+        _mk_bridge(ocf_port=None)._resolve_port()
         assert 'advertised no secure port' in caplog.text
+        assert 'no answer from the directory' not in caplog.text
+        assert 'no_secure_ports' in caplog.text
 
 
 def test_a_pinned_port_is_never_written_to_the_discovery_cache(monkeypatch):

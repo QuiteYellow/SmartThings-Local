@@ -407,7 +407,11 @@ class PushBridge:
     # ---- session lifecycle ------------------------------------------
 
     def _advertised_ports(self) -> list[int]:
-        """Return secure ports this device advertises, or [] if it says none.
+        """Return the secure ports this device advertises, else [].
+
+        An empty list covers both a directory that answered with no usable
+        secure port and one that never answered at all; the log line names
+        which.
 
         One plaintext /oic/res read. An advertisement is a candidate and no
         more, so the caller still proves it with a ClientHello.
@@ -424,12 +428,18 @@ class PushBridge:
                 "no directory read from %d: %s", OCF_DISCOVERY_PORT, exc)
             return []
         if not result.found:
-            # The redacted repr carries the error code and attempt count,
-            # which is what separates a silent plaintext port from a device
-            # that answered and advertised nothing usable.
-            self.log.info(
-                "directory on %d advertised no secure port -- %s",
-                OCF_DISCOVERY_PORT, result)
+            # Two outcomes reach this branch and a bug report turns on
+            # which: a device that never answered on the plaintext port,
+            # and one that answered carrying no usable secure port. The
+            # redacted repr keeps the error code and attempt count on both.
+            if result.response_received:
+                self.log.info(
+                    "directory on %d advertised no secure port -- %s",
+                    OCF_DISCOVERY_PORT, result)
+            else:
+                self.log.info(
+                    "no answer from the directory on %d -- %s",
+                    OCF_DISCOVERY_PORT, result)
             return []
         self.log.info(
             "directory on %d advertises %s",
