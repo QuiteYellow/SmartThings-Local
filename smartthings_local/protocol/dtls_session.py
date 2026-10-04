@@ -269,6 +269,11 @@ def _validate_handshake_timeout(timeout, default):
 _MAX_REQUEST_OPTION_BYTES = 1024
 _MAX_REQUEST_OPTION_COUNT = 32
 _MAX_REQUEST_OPTION_NUMBER = 65535
+# ACCEPT is managed, so a caller cannot ask in another dialect. That is
+# deliberate rather than an oversight: both appliances measured here answer
+# /oic/res with 4.06 when asked with Accept 10000, the oven on its plaintext
+# and DTLS transports alike (2026-09-14), so the OCF 1.0 dialect removes the
+# representation instead of enriching it. See the notes in ocf_discovery.
 _MANAGED_REQUEST_OPTIONS = frozenset((
     URI_PATH, URI_QUERY, OBSERVE, CONTENT_FORMAT, ACCEPT,
     BLOCK2, BLOCK1, SIZE2, SIZE1,
@@ -1774,7 +1779,12 @@ class DtlsCoapSession:
         Reuses one CoAP token across every block of a multi-block
         response — Samsung's server keys per-transfer state on the
         token, and dropping a fresh token on block 1+ silently drops
-        the request."""
+        the request.
+
+        Requests ask with Accept 60 (``application/cbor``) and ``ACCEPT``
+        is a managed option, so ``extra_options`` cannot select another
+        dialect. The appliances measured here decline Accept 10000 with
+        4.06, so that is a deliberate closure and not a gap."""
         self._check_live()
         path_segs = _validated_text_options(
             path_segs, name='path_segs', allow_empty=False)

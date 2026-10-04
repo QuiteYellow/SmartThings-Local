@@ -315,7 +315,7 @@ PlaintextOcfResourceResult(code: int | None, payload: bytes, blocks_received: in
 #### `discover_ocf_secure_ports`
 
 ```python
-discover_ocf_secure_ports(host, *, discovery_port=5683, timeout=3.0, retries=1, family=<AddressFamily.AF_UNSPEC: 0>)
+discover_ocf_secure_ports(host, *, discovery_port=5683, timeout=3.0, retries=1, family=<AddressFamily.AF_UNSPEC: 0>, order='doxm-first')
 ```
 
 *function*: Discover secure ports advertised by a target's public OCF directory.
