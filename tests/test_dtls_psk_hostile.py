@@ -67,7 +67,7 @@ def established() -> DtlsPskClient:
 
 
 def test_spoofed_epoch0_record_does_not_wedge_the_handshake(client):
-    """RFC 6347 4.1.2.6 applies the replay check to records that authenticate.
+    """RFC 6347 anti-replay (section 4.1.2) applies the replay check to records that authenticate.
 
     Epoch 0 carries no MAC, so a window advanced from it lets one forged
     datagram with a high sequence number drop every genuine reply after it.

@@ -129,7 +129,7 @@ def _prf(secret: bytes, label: bytes, seed: bytes, length: int) -> bytes:
 
 
 class _ReplayWindow:
-    """RFC 6347 section 4.1.2.6 sliding window, one per read epoch."""
+    """RFC 6347 anti-replay (section 4.1.2) sliding window, one per read epoch."""
 
     __slots__ = ("_bitmap", "_highest")
 
@@ -143,7 +143,7 @@ class _ReplayWindow:
         Separated from :meth:`accept` because a record that fails
         authentication must leave the window untouched. Advancing on an
         unauthenticated record lets one spoofed datagram carrying a high
-        sequence number wedge the session permanently (RFC 6347 4.1.2.6
+        sequence number wedge the session permanently (RFC 6347 anti-replay (section 4.1.2)
         applies the replay check to records that authenticate).
         """
         if seq > self._highest:
