@@ -407,7 +407,11 @@ class PushBridge:
     # ---- session lifecycle ------------------------------------------
 
     def _advertised_ports(self) -> list[int]:
-        """Return secure ports this device advertises, or [] if it says none.
+        """Return the secure ports this device advertises, else [].
+
+        An empty list covers both a directory that answered with no usable
+        secure port and one that never answered at all; the log line names
+        which.
 
         One plaintext /oic/res read. An advertisement is a candidate and no
         more, so the caller still proves it with a ClientHello.
@@ -424,12 +428,27 @@ class PushBridge:
                 "no directory read from %d: %s", OCF_DISCOVERY_PORT, exc)
             return []
         if not result.found:
-            # The redacted repr carries the error code and attempt count,
-            # which is what separates a silent plaintext port from a device
-            # that answered and advertised nothing usable.
-            self.log.info(
-                "directory on %d advertised no secure port -- %s",
-                OCF_DISCOVERY_PORT, result)
+            # Three outcomes reach this branch and a bug report turns on
+            # which: a request that was never sent, a device that was asked
+            # and stayed silent, and one that answered carrying no usable
+            # secure port. Saying "no answer" for the first would claim the
+            # appliance was asked, which is the reading #111 was filed
+            # about. attempts == 0 is what separates them, since discovery
+            # reports endpoint_unavailable with no attempts when the host
+            # does not resolve or no route opens. The redacted repr keeps
+            # the error code and attempt count on all three.
+            if result.attempts == 0:
+                self.log.info(
+                    "no request sent to %d -- %s",
+                    OCF_DISCOVERY_PORT, result)
+            elif result.response_received:
+                self.log.info(
+                    "a lookup on %d answered with no secure port -- %s",
+                    OCF_DISCOVERY_PORT, result)
+            else:
+                self.log.info(
+                    "no answer from the directory on %d -- %s",
+                    OCF_DISCOVERY_PORT, result)
             return []
         self.log.info(
             "directory on %d advertises %s",

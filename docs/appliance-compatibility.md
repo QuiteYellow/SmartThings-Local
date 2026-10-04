@@ -64,18 +64,7 @@ multicast to locate a different public port. If the appliance does not listen
 on 5683, locate that public port separately and pass it explicitly as
 `discovery_port=...`.
 
-`discover_ocf_secure_ports()` reads the public `/oic/res` directory and takes
-both advertised forms from that one answer: `coaps://` `eps` endpoints whose
-literal host matches the correlated response source, and the `p.sec`/`port`
-pair on the device's own `/oic/sec/doxm` link. Which form a device emits
-follows its spec generation, so an OIC 1.1 device carrying no `eps` at all
-still resolves in one exchange. If that representation advertises no secure
-port, the same overall deadline also bounds a filtered
-`/oic/res?rt=oic.r.doxm` retry. It
-accepts a different dynamic response source port after the request reaches the
-known public port, while still requiring the resolved target address and CoAP
-token, and assembles Block2 responses within fixed time, block-count, and
-payload limits.
+`discover_ocf_secure_ports()` reads the public OCF directory and takes both advertised forms from whichever representation arrives: `coaps://` `eps` endpoints whose literal host matches the correlated response source, and the `p.sec`/`port` pair on the device's own `/oic/sec/doxm` link. Which form a device emits follows its spec generation, so an OIC 1.1 device carrying no `eps` at all still resolves in one exchange. Two lookups reach those forms and `order` chooses which goes first: the default `'doxm-first'` asks `/oic/res?rt=oic.r.doxm`, answered here in a single 147–149 byte datagram, and keeps the unfiltered `/oic/res` directory behind it, which the same two appliances answer in 1629–1727 bytes across two Block2 blocks. Both carry the same secure port, so the default costs one request where the directory costs two. `order='directory-first'` reverses them. Both lookups stay available either way, because a device advertising `eps` on a link other than doxm is reachable only through the unfiltered directory, and one overall deadline bounds the pair. Discovery accepts a different dynamic response source port after the request reaches the known public port, while still requiring the resolved target address and CoAP token, and assembles Block2 responses within fixed time, block-count, and payload limits.
 
 Directory discovery and the DTLS probe have separate jobs: discovery can learn
 a device-advertised port outside the caller's fixed fallback set, while

@@ -253,6 +253,8 @@ def test_ipv6_eps_binding_inherits_or_exactly_matches_response_scope():
 
 
 def test_unfiltered_dynamic_source_and_two_block_response_are_supported():
+    # The unfiltered directory is the lookup that actually spans blocks on
+    # hardware, so this asks for it first by order rather than by default.
     listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     responder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     listener.bind(('127.0.0.1', 0))
@@ -339,6 +341,7 @@ def test_unfiltered_dynamic_source_and_two_block_response_are_supported():
             timeout=1.5,
             retries=1,
             family=socket.AF_INET,
+            order='directory-first',
         )
     finally:
         thread.join(timeout=3.0)
@@ -353,11 +356,27 @@ def test_unfiltered_dynamic_source_and_two_block_response_are_supported():
     assert result.attempts == 2
 
 
-def test_an_oic_1_1_directory_resolves_in_one_exchange():
-    # The shape both reference appliances serve: an unfiltered /oic/res with
-    # no eps key anywhere and the real DTLS port on the doxm link's p.sec /
-    # port. It has to resolve without a filtered second lookup, which is the
-    # round trip this used to cost on every such device.
+@pytest.mark.parametrize(
+    ('order', 'first_query', 'links'),
+    (
+        ('doxm-first', [b'rt=oic.r.doxm'], (_doxm_link(49155),)),
+        (
+            'directory-first',
+            None,
+            (
+                {'href': '/oic/d', 'rt': ['oic.wk.d'],
+                 'p': {'bm': 1, 'sec': False}},
+                _doxm_link(49155),
+            ),
+        ),
+    ),
+)
+def test_an_oic_1_1_directory_resolves_in_one_exchange(
+        order, first_query, links):
+    # The shape both reference appliances serve: no eps key anywhere and the
+    # real DTLS port on the doxm link's p.sec / port. Either order has to
+    # resolve it in one exchange, so neither pays a second round trip for a
+    # key this generation never emits.
     listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     listener.bind(('127.0.0.1', 0))
     listener.settimeout(2.0)
@@ -368,7 +387,8 @@ def test_an_oic_1_1_directory_resolves_in_one_exchange():
         try:
             primary, client = listener.recvfrom(8192)
             primary_parsed = parse_coap(primary)
-            assert URI_QUERY not in _option_map(primary_parsed[4])
+            assert _option_map(
+                primary_parsed[4]).get(URI_QUERY) == first_query
             listener.sendto(
                 build_coap(
                     TYPE_NON,
@@ -376,11 +396,7 @@ def test_an_oic_1_1_directory_resolves_in_one_exchange():
                     0x7201,
                     primary_parsed[3],
                     [],
-                    _payload(
-                        {'href': '/oic/d', 'rt': ['oic.wk.d'],
-                         'p': {'bm': 1, 'sec': False}},
-                        _doxm_link(49155),
-                    ),
+                    _payload(*links),
                 ),
                 client,
             )
@@ -401,6 +417,7 @@ def test_an_oic_1_1_directory_resolves_in_one_exchange():
             timeout=1.5,
             retries=0,
             family=socket.AF_INET,
+            order=order,
         )
     finally:
         thread.join(timeout=3.0)
@@ -428,7 +445,8 @@ def test_absent_primary_falls_back_with_fresh_token_on_original_route():
         try:
             primary, client = listener.recvfrom(8192)
             primary_parsed = parse_coap(primary)
-            assert URI_QUERY not in _option_map(primary_parsed[4])
+            assert _option_map(primary_parsed[4])[URI_QUERY] == [
+                b'rt=oic.r.doxm']
             responder.sendto(
                 build_coap(
                     TYPE_NON,
@@ -447,7 +465,7 @@ def test_absent_primary_falls_back_with_fresh_token_on_original_route():
             fallback_parsed = parse_coap(fallback)
             option_map = _option_map(fallback_parsed[4])
             assert fallback_client == client
-            assert option_map[URI_QUERY] == [b'rt=oic.r.doxm']
+            assert URI_QUERY not in option_map
             assert fallback_parsed[3] != primary_parsed[3]
             assert fallback_parsed[2] != primary_parsed[2]
             listener.sendto(
@@ -486,7 +504,7 @@ def test_absent_primary_falls_back_with_fresh_token_on_original_route():
     assert result.response_received
 
 
-def test_unanswered_primary_reserves_time_for_filtered_fallback():
+def test_an_unanswered_first_lookup_reserves_time_for_the_second():
     listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     listener.bind(('127.0.0.1', 0))
     listener.settimeout(2.0)
@@ -496,12 +514,12 @@ def test_unanswered_primary_reserves_time_for_filtered_fallback():
         try:
             primary, client = listener.recvfrom(8192)
             primary_parsed = parse_coap(primary)
-            assert URI_QUERY not in _option_map(primary_parsed[4])
+            assert _option_map(primary_parsed[4])[URI_QUERY] == [
+                b'rt=oic.r.doxm']
             fallback, fallback_client = listener.recvfrom(8192)
             fallback_parsed = parse_coap(fallback)
             assert fallback_client == client
-            assert _option_map(fallback_parsed[4])[URI_QUERY] == [
-                b'rt=oic.r.doxm']
+            assert URI_QUERY not in _option_map(fallback_parsed[4])
             listener.sendto(
                 build_coap(
                     TYPE_NON,
@@ -539,36 +557,96 @@ def test_unanswered_primary_reserves_time_for_filtered_fallback():
     assert elapsed < 1.0
 
 
+def test_a_silent_filtered_lookup_leaves_the_directory_most_of_the_budget():
+    # The directory read is the one that spans Block2 blocks, so the small
+    # filtered lookup ahead of it is capped rather than given half: on a 3s
+    # budget it is abandoned at a second and the directory keeps two.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listener.bind(('127.0.0.1', 0))
+    listener.settimeout(3.0)
+    errors = []
+    second_request_at = []
+
+    def respond():
+        try:
+            started = time.monotonic()
+            first, _client = listener.recvfrom(8192)
+            assert _option_map(parse_coap(first)[4])[URI_QUERY] == [
+                b'rt=oic.r.doxm']
+            second, second_client = listener.recvfrom(8192)
+            second_request_at.append(time.monotonic() - started)
+            second_parsed = parse_coap(second)
+            assert URI_QUERY not in _option_map(second_parsed[4])
+            listener.sendto(
+                build_coap(
+                    TYPE_NON,
+                    0x45,
+                    0x7a01,
+                    second_parsed[3],
+                    [],
+                    _payload(_doxm_link(61006)),
+                ),
+                second_client,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced through errors below
+            errors.append(exc)
+
+    thread = threading.Thread(target=respond)
+    thread.start()
+    try:
+        result = discovery.discover_ocf_secure_ports(
+            '127.0.0.1',
+            discovery_port=listener.getsockname()[1],
+            timeout=3.0,
+            retries=0,
+            family=socket.AF_INET,
+        )
+    finally:
+        thread.join(timeout=4.0)
+        listener.close()
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert result.ports == (61006,)
+    assert result.attempts == 2
+    assert second_request_at and second_request_at[0] < 1.4
+
+
 @pytest.mark.parametrize(
-    'primary_payload',
+    'first_payload',
     (
         b'not-cbor',
         _payload(_eps_link('coaps://127.0.0.2:61002')),
     ),
 )
-def test_malformed_or_cross_source_primary_never_starts_fallback(
-        primary_payload):
+def test_an_unusable_first_answer_still_reads_the_directory(first_payload):
+    # The two lookups ask different questions, so the narrow one answering
+    # unusably says nothing about the directory. Undecodable CBOR and an
+    # `eps` bound to another address both used to end the operation here,
+    # which under the doxm-first default made a device advertising its only
+    # trustworthy port elsewhere unreachable. Falling through accepts no
+    # port from the failed answer: the port below comes from the directory
+    # and faces the same source check.
     listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     listener.bind(('127.0.0.1', 0))
     listener.settimeout(0.4)
     errors = []
-    saw_fallback = []
+    queries = []
 
     def respond():
         try:
-            request, client = listener.recvfrom(8192)
-            parsed = parse_coap(request)
-            listener.sendto(
-                build_coap(
-                    TYPE_NON, 0x45, 0x7301, parsed[3], [], primary_payload),
-                client,
-            )
-            try:
-                listener.recvfrom(8192)
-            except TimeoutError:
-                return
-            saw_fallback.append(True)
-        except Exception as exc:  # noqa: BLE001 - surfaced through errors below
+            for index, payload in enumerate(
+                    (first_payload, _payload(_doxm_link(port=61002)))):
+                request, client = listener.recvfrom(8192)
+                parsed = parse_coap(request)
+                queries.append(_option_map(parsed[4]).get(URI_QUERY))
+                listener.sendto(
+                    build_coap(
+                        TYPE_NON, 0x45, 0x7301 + index, parsed[3], [],
+                        payload),
+                    client,
+                )
+        except Exception as exc:  # noqa: BLE001 - surfaced through errors
             errors.append(exc)
 
     thread = threading.Thread(target=respond)
@@ -587,8 +665,122 @@ def test_malformed_or_cross_source_primary_never_starts_fallback(
 
     assert not thread.is_alive()
     assert errors == []
-    assert saw_fallback == []
+    assert queries == [[b'rt=oic.r.doxm'], None]
+    assert result.ports == (61002,)
+    assert result.attempts == 2
+    assert result.response_received
+    assert result.error_code is None
+
+
+def test_a_filtered_lookup_that_runs_out_of_time_hands_off():
+    # A Block2 transfer that was answered in part and never finished is
+    # labelled malformed, which is indistinguishable from bad content at
+    # the call site. The filtered lookup's share is a hard cap when it runs
+    # first, so a slow narrow answer used to end the operation inside a
+    # fraction of the deadline and the directory was never asked.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listener.bind(('127.0.0.1', 0))
+    listener.settimeout(2.0)
+    body = _payload(_doxm_link(port=61009), padding='x' * 40)
+    assert len(body) > 64
+    errors = []
+    queries = []
+
+    def respond():
+        try:
+            request, client = listener.recvfrom(8192)
+            parsed = parse_coap(request)
+            queries.append(_option_map(parsed[4]).get(URI_QUERY))
+            # Block 0 of the filtered answer, then nothing: the transfer
+            # stays incomplete until its share of the budget is spent.
+            listener.sendto(
+                build_coap(
+                    TYPE_NON, 0x45, 0x7801, parsed[3],
+                    [(BLOCK2, block_value(0, 1, 2))], body[:64]),
+                client,
+            )
+            while True:
+                stalled, client = listener.recvfrom(8192)
+                parsed = parse_coap(stalled)
+                query = _option_map(parsed[4]).get(URI_QUERY)
+                if query is None:
+                    break
+            queries.append(query)
+            listener.sendto(
+                build_coap(
+                    TYPE_NON, 0x45, 0x7802, parsed[3], [],
+                    _payload(_doxm_link(port=61010))),
+                client,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced through errors
+            errors.append(exc)
+
+    thread = threading.Thread(target=respond)
+    thread.start()
+    try:
+        result = discovery.discover_ocf_secure_ports(
+            '127.0.0.1',
+            discovery_port=listener.getsockname()[1],
+            timeout=1.2,
+            retries=0,
+            family=socket.AF_INET,
+        )
+    finally:
+        thread.join(timeout=3.0)
+        listener.close()
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert queries == [[b'rt=oic.r.doxm'], None]
+    assert result.ports == (61010,)
+    assert result.error_code is None
+
+
+def test_two_unusable_answers_report_the_first_diagnosis():
+    # Falling through does not swallow the finding. With no usable port from
+    # either lookup, the unusable first answer is the more specific outcome
+    # than the directory advertising nothing, so it keeps the error code.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listener.bind(('127.0.0.1', 0))
+    listener.settimeout(0.4)
+    errors = []
+    queries = []
+
+    def respond():
+        try:
+            for index, payload in enumerate(
+                    (b'not-cbor', _payload())):
+                request, client = listener.recvfrom(8192)
+                parsed = parse_coap(request)
+                queries.append(_option_map(parsed[4]).get(URI_QUERY))
+                listener.sendto(
+                    build_coap(
+                        TYPE_NON, 0x45, 0x7401 + index, parsed[3], [],
+                        payload),
+                    client,
+                )
+        except Exception as exc:  # noqa: BLE001 - surfaced through errors
+            errors.append(exc)
+
+    thread = threading.Thread(target=respond)
+    thread.start()
+    try:
+        result = discovery.discover_ocf_secure_ports(
+            '127.0.0.1',
+            discovery_port=listener.getsockname()[1],
+            timeout=0.6,
+            retries=0,
+            family=socket.AF_INET,
+        )
+    finally:
+        thread.join(timeout=2.0)
+        listener.close()
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert queries == [[b'rt=oic.r.doxm'], None]
     assert result.ports == ()
+    assert result.attempts == 2
     assert result.response_received
     assert result.error_code == 'malformed_ocf_response'
 
@@ -685,8 +877,7 @@ def test_non_request_rejects_piggyback_ack_and_uses_fallback():
             )
             fallback, fallback_client = listener.recvfrom(8192)
             fallback_parsed = parse_coap(fallback)
-            assert _option_map(fallback_parsed[4])[URI_QUERY] == [
-                b'rt=oic.r.doxm']
+            assert URI_QUERY not in _option_map(fallback_parsed[4])
             listener.sendto(
                 build_coap(
                     TYPE_NON,
@@ -855,7 +1046,10 @@ def test_primary_retry_keeps_token_and_changes_message_id():
             assert first_parsed[0] == second_parsed[0] == TYPE_NON
             assert first_parsed[3] == second_parsed[3]
             assert first_parsed[2] != second_parsed[2]
-            assert URI_QUERY not in _option_map(second_parsed[4])
+            assert _option_map(second_parsed[4])[URI_QUERY] == [
+                b'rt=oic.r.doxm']
+            assert _option_map(first_parsed[4])[URI_QUERY] == [
+                b'rt=oic.r.doxm']
             listener.sendto(
                 build_coap(
                     TYPE_NON,
@@ -928,8 +1122,70 @@ def test_result_is_immutable_and_ipv6_scope_is_part_of_source_identity():
 
 
 @pytest.mark.parametrize(
+    ('order', 'expected_query'),
+    (
+        (None, [b'rt=oic.r.doxm']),
+        ('doxm-first', [b'rt=oic.r.doxm']),
+        ('directory-first', None),
+    ),
+)
+def test_order_decides_which_lookup_is_asked_first(order, expected_query):
+    # The doxm lookup is one 147-149 byte datagram on the appliances here,
+    # where the unfiltered directory is 1629-1727 bytes over two blocks, and
+    # both advertised forms are read from either answer. So the default asks
+    # the small one first: one request against the directory's two.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listener.bind(('127.0.0.1', 0))
+    listener.settimeout(2.0)
+    queries = []
+
+    def respond():
+        try:
+            request, client = listener.recvfrom(8192)
+            parsed = parse_coap(request)
+            queries.append(_option_map(parsed[4]).get(URI_QUERY))
+            listener.sendto(
+                build_coap(
+                    TYPE_NON,
+                    0x45,
+                    0x7901,
+                    parsed[3],
+                    [],
+                    _payload(_doxm_link(61007)),
+                ),
+                client,
+            )
+        except Exception:  # noqa: BLE001 - asserted through queries below
+            pass
+
+    thread = threading.Thread(target=respond)
+    thread.start()
+    options = {} if order is None else {'order': order}
+    try:
+        result = discovery.discover_ocf_secure_ports(
+            '127.0.0.1',
+            discovery_port=listener.getsockname()[1],
+            timeout=1.0,
+            retries=0,
+            family=socket.AF_INET,
+            **options,
+        )
+    finally:
+        thread.join(timeout=2.0)
+        listener.close()
+
+    assert not thread.is_alive()
+    assert queries == [expected_query]
+    assert result.ports == (61007,)
+    assert result.attempts == 1
+
+
+@pytest.mark.parametrize(
     ('keyword', 'value', 'error_type'),
     (
+        ('order', 'doxm_first', ValueError),
+        ('order', '', ValueError),
+        ('order', b'doxm-first', TypeError),
         ('discovery_port', 0, ValueError),
         ('discovery_port', True, TypeError),
         ('timeout', 0, ValueError),
