@@ -100,6 +100,9 @@ _MAX_PENDING_MESSAGES = 16
 _MAX_INBOX = 64
 _MAX_APPDATA = 256
 _MAX_PAD_SCAN = 256
+# A server may legitimately re-issue a cookie; one that only ever does so is
+# either broken or stalling, and must not hold the handshake open.
+_MAX_HELLO_VERIFY = 5
 
 _ALERT_CLOSE_NOTIFY = 0
 _ALERT_FATAL = 2
@@ -256,6 +259,12 @@ class DtlsPskClient:
 
         self._identity = identity
         self._psk = key
+        # Accepted for interface compatibility with OpenSSL's connection and
+        # never used: this engine does not fragment. Every flight it sends is
+        # a few hundred bytes (no certificates on a PSK handshake), so the
+        # question of whether OpenSSL's link MTU and mbedTLS's datagram
+        # payload limit mean the same number never arises here. A flight that
+        # could approach an MTU would need real fragmentation, not this value.
         self._mtu = mtu
 
         self._inbox: deque[bytes] = deque()
@@ -286,6 +295,7 @@ class DtlsPskClient:
         self._rto = 1.0
         self._flight_deadline: float | None = None
         self._peer_closed = False
+        self._hello_verify_count = 0
         self._failed: str | None = None
 
     # -- memory BIO ------------------------------------------------------
@@ -572,7 +582,7 @@ class DtlsPskClient:
 
             # HelloVerifyRequest is answered immediately and never reassembled.
             if msg_type == _HT_HELLO_VERIFY_REQUEST and frag_off == 0:
-                self._handle_hello_verify_request(body)
+                self._handle_hello_verify_request(body, msg_seq)
                 continue
             if msg_seq < self._next_recv_msg_seq:
                 continue  # already consumed; a server retransmit
@@ -644,20 +654,44 @@ class DtlsPskClient:
         elif msg_type == _HT_FINISHED:
             self._handle_server_finished(body)
 
-    def _handle_hello_verify_request(self, body: bytes) -> None:
-        if self._state != "sent_hello" or len(body) < 3:
+    def _handle_hello_verify_request(self, body: bytes, msg_seq: int) -> None:
+        """Answer a HelloVerifyRequest, including a repeated one.
+
+        A server may re-issue a cookie in reply to a ClientHello that already
+        carries one. Answering only the first is what OpenSSL does, and it
+        leaves both sides retransmitting until the handshake deadline with no
+        alert -- the shape this project reported on localthings#504 as the
+        leading explanation for issue #20's silent 12 s timeouts. There is no
+        reason to inherit that here, so each one is answered, bounded by
+        _MAX_HELLO_VERIFY so a server that only ever sends cookies cannot
+        hold the handshake open indefinitely.
+        """
+        if self._state not in ("sent_hello", "sent_cookie_hello"):
+            return
+        if len(body) < 3:
             return
         cookie_len = body[2]
         if 3 + cookie_len > len(body):
             return
-        self._cookie = body[3:3 + cookie_len]
-        # RFC 6347 4.2.1 / ssl_srv.c:1409: the cookie ClientHello keeps
-        # counting, so it carries message_seq 1 and the server mirrors it.
+        cookie = body[3:3 + cookie_len]
+        if self._state == "sent_cookie_hello":
+            self._hello_verify_count += 1
+            if self._hello_verify_count > _MAX_HELLO_VERIFY:
+                self._fail("server kept re-issuing HelloVerifyRequest")
+                return
+            if cookie == self._cookie:
+                # Same cookie again: our answer was lost rather than refused.
+                # The flight timer owns that retransmission, so do not start
+                # a new hello and renumber the handshake underneath it.
+                return
+        self._cookie = cookie
+        # RFC 6347 4.2.1: the transcript starts at the ClientHello that
+        # carries the accepted cookie, so everything before it is discarded.
         self._transcript = bytearray()
-        # The HelloVerifyRequest is the server's message_seq 0, so the
-        # ServerHello that follows is 1 -- it mirrors our cookie ClientHello
-        # (RFC 6347 4.2.1, ssl_srv.c:1409). Ordered delivery must expect 1.
-        self._next_recv_msg_seq = 1
+        # The server mirrors our message_seq (ssl_srv.c:1409), so the next
+        # message it sends follows the HelloVerifyRequest we just read.
+        # Hardcoding 1 here breaks as soon as a second cookie arrives.
+        self._next_recv_msg_seq = msg_seq + 1
         self._ready.clear()
         self._send_client_hello(cookie=self._cookie)
         self._state = "sent_cookie_hello"
