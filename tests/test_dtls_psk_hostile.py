@@ -259,7 +259,7 @@ def test_identical_cookie_does_not_renumber_the_handshake(client):
 
 # -- the DTLS 1.0 framing exemption, driven through the record layer -------
 #
-# The four tests above call _handle_hello_verify_request directly, which is
+# The three tests above call _handle_hello_verify_request directly, which is
 # how a record-layer admission bug survived them: the engine answered a
 # repeated cookie framed as DTLS 1.2 and dropped the same message framed as
 # DTLS 1.0, because the exemption was gated on `sent_hello` alone. Found by
