@@ -731,6 +731,48 @@ class DtlsCoapSession:
 
     # ---- lifecycle ---------------------------------------------------
 
+    def _new_dtls_connection(self, cancel):
+        """Build the DTLS connection for one handshake attempt.
+
+        The single construction site for a session's connection, so an
+        engine other than pyOpenSSL can be reached without an isinstance
+        fork spreading through connect() and the reader loop.
+
+        A built-in provider may carry a private ``_create_dtls_connection``
+        factory, which owns its own engine and never sees an
+        ``SSL.Context``. This is deliberately not a verb on
+        ``AuthenticationProvider``: that Protocol is ``runtime_checkable``
+        and ``__init__`` gates on ``isinstance``, so a required method would
+        reject every third-party provider that does not grow one. A public
+        connection-provider interface, if it is ever wanted, is a separate
+        opt-in thing rather than a widening of this one.
+
+        Cancellation is checked around the provider's work rather than
+        inside it, so a slow ``configure_context`` -- loading a PEM chain
+        off disk, in the certificate case -- stays interruptible.
+        """
+        factory = getattr(self.auth, "_create_dtls_connection", None)
+        if factory is not None:
+            conn = factory(mtu=self.mtu)
+            if self._lifecycle_cancel.is_set() or \
+                    (cancel is not None and cancel.is_set()):
+                raise SessionClosedError()
+            return conn
+
+        ctx = SSL.Context(SSL.DTLS_METHOD)
+        self.auth.configure_context(ctx)
+        if self._lifecycle_cancel.is_set() or \
+                (cancel is not None and cancel.is_set()):
+            raise SessionClosedError()
+
+        conn = SSL.Connection(ctx, None)
+        conn.set_connect_state()
+        conn.set_ciphertext_mtu(self.mtu)
+        if self._lifecycle_cancel.is_set() or \
+                (cancel is not None and cancel.is_set()):
+            raise SessionClosedError()
+        return conn
+
     def connect(
         self,
         *,
@@ -778,18 +820,7 @@ class DtlsCoapSession:
                 (cancel is not None and cancel.is_set()):
             raise SessionClosedError()
         deadline = time.monotonic() + handshake_timeout
-        ctx = SSL.Context(SSL.DTLS_METHOD)
-        self.auth.configure_context(ctx)
-        if self._lifecycle_cancel.is_set() or \
-                (cancel is not None and cancel.is_set()):
-            raise SessionClosedError()
-
-        conn = SSL.Connection(ctx, None)
-        conn.set_connect_state()
-        conn.set_ciphertext_mtu(self.mtu)
-        if self._lifecycle_cancel.is_set() or \
-                (cancel is not None and cancel.is_set()):
-            raise SessionClosedError()
+        conn = self._new_dtls_connection(cancel)
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:

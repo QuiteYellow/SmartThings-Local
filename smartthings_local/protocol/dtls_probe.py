@@ -750,6 +750,38 @@ def _diagnostic_context(*, auth, cert_pem, key_pem, cert_path, key_path):
     return ctx
 
 
+def _diagnostic_connection(
+        *, auth, cert_pem, key_pem, cert_path, key_path, mtu):
+    """Build the connection one diagnostic run drives.
+
+    The factory is asked before the context path, and that order is the
+    whole point: a built-in provider carrying its own engine keeps
+    ``configure_context`` for direct callers, so ``_validate_diagnostic_auth``
+    accepts it either way and nothing further down would notice a credential
+    being handed to the wrong engine.
+
+    Nothing is relaxed for a provider that brings its own engine, because
+    there is nothing to relax: a diagnostic must report the appliance's own
+    alert rather than a local verdict, and an engine with no X.509 reaches
+    that by construction instead of by re-asserting accept-any.
+    """
+    factory = getattr(auth, "_create_dtls_connection", None)
+    if factory is not None:
+        return factory(mtu=mtu)
+
+    ctx = _diagnostic_context(
+        auth=auth,
+        cert_pem=cert_pem,
+        key_pem=key_pem,
+        cert_path=cert_path,
+        key_path=key_path,
+    )
+    conn = SSL.Connection(ctx, None)
+    conn.set_connect_state()
+    conn.set_ciphertext_mtu(mtu)
+    return conn
+
+
 def diagnose_dtls_handshake(
         host, port, *, auth=None, cert_pem=None, key_pem=None,
         cert_path=None, key_path=None,
@@ -780,17 +812,14 @@ def diagnose_dtls_handshake(
     _validate_diagnostic_auth(auth, cert_pem, key_pem, cert_path, key_path)
     result = ProbeResult(host, port)
 
-    ctx = _diagnostic_context(
+    conn = _diagnostic_connection(
         auth=auth,
         cert_pem=cert_pem,
         key_pem=key_pem,
         cert_path=cert_path,
         key_path=key_path,
+        mtu=mtu,
     )
-
-    conn = SSL.Connection(ctx, None)
-    conn.set_connect_state()
-    conn.set_ciphertext_mtu(mtu)
 
     try:
         sock, _endpoint = open_host_filtered_udp_socket(
