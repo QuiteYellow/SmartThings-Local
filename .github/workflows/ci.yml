@@ -60,6 +60,7 @@ jobs:
         run: >-
           python -m pip install
           "cbor2==5.6.0"
+          "cryptography==38.0.0"
           "pyOpenSSL==23.1.0"
           "pytest==8.0.0"
       - if: matrix.mode == 'floor'
