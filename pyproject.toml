@@ -21,6 +21,13 @@ classifiers = [
 ]
 dependencies = [
     "cbor2>=5.6",
+    # Already imported directly by protocol/auth.py (cryptography.x509.oid)
+    # and by protocol/_dtls_psk.py, but only ever resolved as a transitive
+    # dependency of pyOpenSSL until now.
+    # The floor matches what pyOpenSSL 23.1.0 permits (it caps below 41), so
+    # the floor CI job resolves. Everything used here -- AES-CBC, HMAC,
+    # EC key generation and from_encoded_point -- long predates it.
+    "cryptography>=38.0",
     "pyOpenSSL>=23.1",
 ]
 
