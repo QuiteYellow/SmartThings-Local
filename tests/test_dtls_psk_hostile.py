@@ -39,6 +39,35 @@ def record(content_type: int, epoch: int, seq: int, payload: bytes) -> bytes:
     )
 
 
+def framed_record(
+    content_type: int, epoch: int, seq: int, payload: bytes, version: bytes
+) -> bytes:
+    """``record()`` with the record-header version left to the caller."""
+    return (
+        bytes([content_type])
+        + version
+        + struct.pack("!H", epoch)
+        + seq.to_bytes(6, "big")
+        + struct.pack("!H", len(payload))
+        + payload
+    )
+
+
+def handshake_message(msg_type: int, msg_seq: int, body: bytes) -> bytes:
+    length = len(body).to_bytes(3, "big")
+    return (
+        bytes([msg_type]) + length + struct.pack("!H", msg_seq)
+        + (0).to_bytes(3, "big") + length + body
+    )
+
+
+def hello_verify(msg_seq: int, cookie: bytes) -> bytes:
+    """One HelloVerifyRequest message, its body always framing DTLS 1.2."""
+    return handshake_message(
+        3, msg_seq, b"\xfe\xfd" + bytes([len(cookie)]) + cookie
+    )
+
+
 def peer_of(key_block: bytes) -> _Transform:
     return _Transform(
         key_block[32:64] + key_block[0:32] + key_block[80:96] + key_block[64:80]
@@ -226,6 +255,105 @@ def test_identical_cookie_does_not_renumber_the_handshake(client):
     after_first = client._next_msg_seq
     client._handle_hello_verify_request(body, 1)
     assert client._next_msg_seq == after_first
+
+
+# -- the DTLS 1.0 framing exemption, driven through the record layer -------
+#
+# The four tests above call _handle_hello_verify_request directly, which is
+# how a record-layer admission bug survived them: the engine answered a
+# repeated cookie framed as DTLS 1.2 and dropped the same message framed as
+# DTLS 1.0, because the exemption was gated on `sent_hello` alone. Found by
+# @Jason-Morcos on PR #117. Anything asserting which challenges are answered
+# has to cross the record layer to mean it.
+
+FRAMINGS = [b"\xfe\xfd", b"\xfe\xff"]
+
+
+@pytest.mark.parametrize("version", FRAMINGS)
+def test_second_cookie_is_answered_under_either_framing(client, version):
+    client.bio_write(framed_record(22, 0, 0, hello_verify(0, b"\xAA" * 4), version))
+    with pytest.raises(WantRead):
+        client.do_handshake()
+    assert (client._state, client._cookie) == ("sent_cookie_hello", b"\xAA" * 4)
+    client.bio_read()
+
+    client.bio_write(framed_record(22, 0, 1, hello_verify(1, b"\xBB" * 4), version))
+    with pytest.raises(WantRead):
+        client.do_handshake()
+    assert client._cookie == b"\xBB" * 4
+    assert client._hello_verify_count == 1
+    assert client._next_recv_msg_seq == 2
+    # The replacement hello carries the new cookie, so it has to be on the wire.
+    assert b"\xBB" * 4 in client.bio_read()
+
+
+@pytest.mark.parametrize("version", FRAMINGS)
+def test_repeated_cookie_does_not_renumber_under_either_framing(client, version):
+    message = hello_verify(0, b"\xAA" * 4)
+    client.bio_write(framed_record(22, 0, 0, message, version))
+    with pytest.raises(WantRead):
+        client.do_handshake()
+    after_first = client._next_msg_seq
+
+    client.bio_write(framed_record(22, 0, 1, hello_verify(1, b"\xAA" * 4), version))
+    with pytest.raises(WantRead):
+        client.do_handshake()
+    assert client._next_msg_seq == after_first
+
+
+@pytest.mark.parametrize("version", FRAMINGS)
+def test_cookie_retry_cap_holds_under_either_framing(client, version):
+    """A server that only ever re-challenges must not hold us open."""
+    for index in range(40):
+        cookie = bytes([index, index, index, index])
+        client.bio_write(
+            framed_record(22, 0, index, hello_verify(index, cookie), version)
+        )
+        try:
+            client.do_handshake()
+        except WantRead:
+            continue
+        except DtlsError:
+            break
+    assert client._failed is not None
+
+
+def test_dtls10_record_admits_nothing_behind_the_hello_verify_request(client):
+    """The exemption covers one message, not the record it arrived in.
+
+    _handle_handshake_fragment walks every message in a record while the
+    version check reads only the first, so a 1.0-framed record leading with
+    a HelloVerifyRequest carried a ServerHello straight into the state
+    machine -- the framing test in test_dtls_psk_interop.py asserts that is
+    refused, and it was, only while the ServerHello arrived in its own
+    record.
+    """
+    server_hello = handshake_message(
+        2, 1, b"\xfe\xfd" + bytes(range(32)) + b"\x00"
+        + struct.pack("!H", 0xC037) + b"\x00"
+    )
+    client.bio_write(
+        framed_record(
+            22, 0, 0, hello_verify(0, b"\xAA" * 4) + server_hello, b"\xfe\xff"
+        )
+    )
+    with pytest.raises(WantRead):
+        client.do_handshake()
+    assert client._state == "sent_cookie_hello"
+    assert client._server_random == b""
+
+
+def test_dtls10_record_not_leading_with_hello_verify_is_dropped(client):
+    """The first-message check is what admits the record at all."""
+    server_hello = handshake_message(
+        2, 0, b"\xfe\xfd" + bytes(range(32)) + b"\x00"
+        + struct.pack("!H", 0xC037) + b"\x00"
+    )
+    client.bio_write(framed_record(22, 0, 0, server_hello, b"\xfe\xff"))
+    with pytest.raises(WantRead):
+        client.do_handshake()
+    assert client._state == "sent_hello"
+    assert client._server_random == b""
 
 
 def test_zero_length_fragments_terminate(client):
