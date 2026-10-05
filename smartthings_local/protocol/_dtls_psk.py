@@ -490,6 +490,7 @@ class DtlsPskClient:
         content_type = record[0]
         epoch = int.from_bytes(record[3:5], "big")
         fragment = record[_RECORD_HEADER:]
+        hello_verify_only = False
         if record[1:3] != _VERSION:
             # OpenSSL frames its HelloVerifyRequest as DTLS 1.0 under cookie
             # exchange; the interop tests pin that. The appliance does not:
@@ -497,14 +498,24 @@ class DtlsPskClient:
             # derives that version from the negotiated one, so other
             # generations are unmeasured rather than known to match.
             #
-            # Hence the exception, kept narrow. In this state a peer can
-            # already send a 1.2-framed HelloVerifyRequest, so accepting the
-            # same message in a second framing grants nothing further.
+            # Hence the exception, kept narrow. In either hello state a peer
+            # can already send a 1.2-framed HelloVerifyRequest, so accepting
+            # the same message in a second framing grants nothing further --
+            # and both states have to be here, because a server that frames
+            # its first challenge this way frames its second one the same,
+            # and dropping that one leaves us retransmitting to the deadline:
+            # exactly the OpenSSL behaviour _handle_hello_verify_request
+            # exists to avoid.
             if not (record[1:3] == b"\xfe\xff" and epoch == 0
                     and content_type == _CT_HANDSHAKE
-                    and self._state == "sent_hello"
+                    and self._state in ("sent_hello", "sent_cookie_hello")
                     and fragment[:1] == bytes([_HT_HELLO_VERIFY_REQUEST])):
                 return
+            # The check above reads the first message in the record, while
+            # _handle_handshake_fragment walks every message in it, so the
+            # exemption has to travel with the record or anything packed
+            # behind the HelloVerifyRequest inherits it.
+            hello_verify_only = True
         seq = int.from_bytes(record[5:11], "big")
 
         expected_epoch = 1 if self._read_active else 0
@@ -529,7 +540,11 @@ class DtlsPskClient:
             payload = fragment
 
         if content_type == _CT_HANDSHAKE:
-            self._handle_handshake_fragment(payload, authenticated=epoch > 0)
+            self._handle_handshake_fragment(
+                payload,
+                authenticated=epoch > 0,
+                hello_verify_only=hello_verify_only,
+            )
         elif content_type == _CT_CHANGE_CIPHER_SPEC:
             if payload == b"\x01" and self._state == "sent_client_flight":
                 self._read_active = True
@@ -573,7 +588,11 @@ class DtlsPskClient:
             self._fail(f"peer sent fatal alert {description}")
 
     def _handle_handshake_fragment(
-        self, payload: bytes, *, authenticated: bool = False
+        self,
+        payload: bytes,
+        *,
+        authenticated: bool = False,
+        hello_verify_only: bool = False,
     ) -> None:
         if self._state == "established" and authenticated:
             # Renegotiation is disabled on the appliance
@@ -583,6 +602,11 @@ class DtlsPskClient:
         offset = 0
         while offset + _HANDSHAKE_HEADER <= len(payload):
             msg_type = payload[offset]
+            if hello_verify_only and msg_type != _HT_HELLO_VERIFY_REQUEST:
+                # A DTLS 1.0-framed record is admitted for one message only.
+                # Abandon the rest of it rather than reading a ServerHello
+                # out of a framing the state machine never accepted.
+                return
             length = int.from_bytes(payload[offset + 1:offset + 4], "big")
             msg_seq = int.from_bytes(payload[offset + 4:offset + 6], "big")
             frag_off = int.from_bytes(payload[offset + 6:offset + 9], "big")
