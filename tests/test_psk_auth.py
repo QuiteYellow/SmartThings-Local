@@ -84,25 +84,43 @@ def test_psk_auth_rejects_invalid_identity_lengths(identity_length):
         PskAuth(identity=b"i" * identity_length, key=_KEY)
 
 
-def test_psk_auth_rejects_identity_with_nul_byte():
-    with pytest.raises(ValueError, match="cannot contain a NUL"):
-        PskAuth(identity=b"i" * 15 + b"\x00", key=_KEY)
+def test_a_nul_identity_builds_a_provider_and_a_session_connection():
+    # The restriction is OpenSSL's, not the credential's: a session reaches
+    # this credential through the library's own DTLS client, which carries
+    # the identity with an explicit length. So the provider exists and can
+    # produce a connection, and only configure_context refuses.
+    identity = b"i" * 15 + b"\x00"
+    provider = PskAuth(identity=identity, key=_KEY)
+
+    assert PskAuth.validate_identity(identity) is None
+    assert provider._create_dtls_connection(mtu=1200) is not None
 
 
-def test_nul_rejection_explains_the_truncation_it_prevents():
+def test_openssl_path_refuses_a_nul_identity_rather_than_truncating_it():
     # Measured against OpenSSL 4.0.0: a 16-byte identity with a NUL at byte 8
-    # goes on the wire as 8 bytes and the handshake raises nothing locally, so
-    # the guard is the only thing standing between a caller and a silently
-    # wrong identity. The message has to carry that, because an appliance
-    # answers the truncated value with unknown_psk_identity and nothing else
-    # points back here.
+    # goes on the wire as 8 bytes and the handshake raises nothing locally,
+    # so this guard is the only thing standing between a direct
+    # configure_context caller and a silently wrong identity. The message has
+    # to carry that, because an appliance answers the truncated value with
+    # unknown_psk_identity and nothing else points back here.
+    provider = PskAuth(identity=b"i" * 15 + b"\x00", key=_KEY)
+
     with pytest.raises(ValueError) as raised:
-        PskAuth(identity=b"i" * 15 + b"\x00", key=_KEY)
+        provider.configure_context(MagicMock())
 
     message = str(raised.value)
     assert "C string" in message
     assert "truncates" in message
     assert "shorter identity" in message
+    # And it names the path that does carry the credential.
+    assert "DtlsCoapSession" in message
+
+
+def test_no_openssl_callback_is_built_for_an_unpresentable_identity():
+    # Nothing that could truncate the identity is constructed at all, so the
+    # guard is the absence of the callback rather than a flag beside it.
+    assert PskAuth(identity=b"i" * 15 + b"\x00", key=_KEY)._callback is None
+    assert PskAuth(identity=_IDENTITY, key=_KEY)._callback is not None
 
 
 def test_validate_identity_checks_a_credential_before_one_is_assembled():
@@ -111,13 +129,26 @@ def test_validate_identity_checks_a_credential_before_one_is_assembled():
     # and raises what the constructor raises.
     assert PskAuth.validate_identity(_IDENTITY) is None
 
-    with pytest.raises(ValueError, match="cannot contain a NUL"):
-        PskAuth.validate_identity(b"i" * 15 + b"\x00")
+    with pytest.raises(ValueError, match="raw 16-byte OCF UUID"):
+        PskAuth.validate_identity(b"i" * 15)
+
+
+def test_validate_identity_is_a_pure_check():
+    """It must not depend on anything but the identity.
+
+    The closed #115 made this environment-dependent, so a staticmethod
+    raised or not depending on whether a shared library was on disk. A
+    caller showing a user the reason their credential was refused cannot
+    have that answer move underneath them.
+    """
+    identity = b"i" * 15 + b"\x00"
+    assert PskAuth.validate_identity(identity) is None
+    assert PskAuth.validate_identity(identity) is None
 
 
 @pytest.mark.parametrize(
     "identity",
-    [b"i" * 15 + b"\x00", b"i" * 15, b"i" * 17, b""],
+    [b"i" * 15, b"i" * 17, b""],
 )
 def test_validate_identity_rejects_what_the_constructor_rejects(identity):
     # One code path, so the reason a caller can show a user is the same
@@ -401,8 +432,6 @@ def test_session_accepts_psk_provider_without_legacy_certificate_material():
 def test_psk_handshake_rejection_does_not_expose_credentials():
     provider = PskAuth(identity=_IDENTITY, key=_KEY)
     session = DtlsCoapSession("appliance.invalid", 49154, auth=provider)
-    context = MagicMock()
-    context._context = object()
     connection = MagicMock()
     connection.do_handshake.side_effect = SSL.Error()
     udp_socket = MagicMock()
@@ -410,8 +439,11 @@ def test_psk_handshake_rejection_does_not_expose_credentials():
 
     with (
         patch.object(auth_module, "_util", _fake_openssl_util(lambda *_: None)),
-        patch.object(session_module.SSL, "Context", return_value=context),
-        patch.object(session_module.SSL, "Connection", return_value=connection),
+        patch.object(
+            PskAuth,
+            "_create_dtls_connection",
+            lambda _self, *, mtu: connection,
+        ),
         patch.object(
             session_module,
             "open_host_filtered_udp_socket",
@@ -528,7 +560,8 @@ def test_openssl_sends_a_clean_identity_whole():
 
 
 def test_a_nul_identity_would_reach_the_wire_truncated():
-    # The reason PskAuth refuses this rather than passing it through.
+    # The reason configure_context refuses this rather than passing it
+    # through. A session does not come this way and has no such limit.
     # OpenSSL's DTLS 1.2 PSK client callback returns the identity as a
     # C string and takes its strlen, so everything from the NUL onward is
     # dropped and nothing raises. An appliance would be asked to
@@ -544,5 +577,5 @@ def test_a_nul_identity_would_reach_the_wire_truncated():
     assert declared == 8
     assert wire == identity[:8]
 
-    with pytest.raises(ValueError, match="cannot contain a NUL"):
-        PskAuth(identity=identity, key=_KEY)
+    with pytest.raises(ValueError, match="truncates"):
+        PskAuth(identity=identity, key=_KEY).configure_context(MagicMock())

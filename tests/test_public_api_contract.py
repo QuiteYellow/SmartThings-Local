@@ -263,7 +263,12 @@ def test_psk_identity_validation_is_reachable_without_a_key():
     assert PskAuth.validate_identity(b"i" * 16) is None
 
     with pytest.raises(ValueError):
-        PskAuth.validate_identity(b"i" * 15 + b"\x00")
+        PskAuth.validate_identity(b"i" * 15)
+
+    # A zero byte is accepted here: it is OpenSSL that cannot carry one, and
+    # a session does not go through OpenSSL. configure_context refuses it,
+    # which test_psk_auth pins.
+    assert PskAuth.validate_identity(b"i" * 15 + b"\x00") is None
 
 
 def test_owner_psk_derivation_keeps_every_security_input_explicit():
