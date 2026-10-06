@@ -740,18 +740,33 @@ class DtlsCoapSession:
         engine other than pyOpenSSL can be reached without an isinstance
         fork spreading through connect() and the reader loop.
 
-        A built-in provider may carry a private ``_create_dtls_connection``
-        factory, which owns its own engine and never sees an
-        ``SSL.Context``. This is deliberately not a verb on
-        ``AuthenticationProvider``: that Protocol is ``runtime_checkable``
-        and ``__init__`` gates on ``isinstance``, so a required method would
-        reject every third-party provider that does not grow one. A public
-        connection-provider interface, if it is ever wanted, is a separate
-        opt-in thing rather than a widening of this one.
+        A provider may carry a private ``_create_dtls_connection`` factory,
+        which owns its own engine and never sees an ``SSL.Context``. Found
+        by ``getattr`` rather than declared on ``AuthenticationProvider``:
+        that Protocol is ``runtime_checkable`` and ``__init__`` gates on
+        ``isinstance``, so a required method would reject every third-party
+        provider that has not grown one. A provider that deliberately
+        supplies the hook is therefore routed whether or not this package
+        ships it, which does not make it a supported public extension API --
+        a real one would be designed separately.
 
-        Cancellation is checked around the provider's work rather than
-        inside it, so a slow ``configure_context`` -- loading a PEM chain
-        off disk, in the certificate case -- stays interruptible.
+        The contract the hook has to meet, for anyone experimenting with
+        another engine:
+
+        - Return a fresh connection for this attempt, already in client
+          state, with ``mtu`` applied.
+        - Own no socket, and start no network I/O. The caller owns the
+          socket, the cancellation and deadline handling, and publishing
+          the session.
+        - Raise and behave like the memory-BIO subset of
+          ``OpenSSL.SSL.Connection`` that ``_drive_dtls_handshake`` drives:
+          ``WantReadError`` until a handshake completes, ``ZeroReturnError``
+          on an orderly close, ``Error`` otherwise.
+
+        Cancellation is checked before and after the provider's work, never
+        inside it. A ``configure_context`` or factory call already blocked
+        on a slow PEM read is not interrupted; what the checks guarantee is
+        that no socket is created once cancellation is set.
         """
         factory = getattr(self.auth, "_create_dtls_connection", None)
         if factory is not None:

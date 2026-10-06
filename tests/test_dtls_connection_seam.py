@@ -15,10 +15,12 @@ diagnostic depends on cannot be silently reversed.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from OpenSSL import SSL
 
-from smartthings_local.errors import SessionClosedError
+from smartthings_local.errors import SessionClosedError, SessionTimeoutError
 from smartthings_local.protocol import dtls_probe, dtls_session
 from smartthings_local.protocol.auth import AuthenticationProvider
 from smartthings_local.protocol.dtls_session import (
@@ -288,3 +290,53 @@ def test_the_session_and_the_probe_share_one_mtu_rule():
     for module_validator in (dtls_probe._validate_mtu,
                              dtls_session._validate_mtu):
         assert module_validator is _validate_mtu
+# -- what the cancellation checks actually guarantee ------------------------
+
+
+def test_cancellation_inside_the_factory_creates_no_socket(monkeypatch):
+    """The guarantee is "no socket", not "the factory is interrupted".
+
+    An earlier docstring here said a slow configure_context "stays
+    interruptible", which overstates it: a provider call already blocked on
+    a PEM read is not interrupted. @Jason-Morcos caught that on #120. What
+    the checks do promise is that cancellation set during the provider's
+    work stops the attempt before any socket exists, and that is the part
+    worth pinning.
+    """
+    cancel = ConnectCancellation()
+    auth = _EngineAuth(_Connection())
+
+    def create(*, mtu):
+        cancel.set()
+        return auth.connection
+
+    auth._create_dtls_connection = create
+    monkeypatch.setattr(
+        dtls_session,
+        "open_host_filtered_udp_socket",
+        lambda *_a, **_k: pytest.fail("created a socket after cancellation"),
+    )
+
+    with pytest.raises(SessionClosedError):
+        DtlsCoapSession(
+            "device.example", 5684, auth=auth).connect(cancel=cancel)
+
+
+def test_a_factory_consuming_the_whole_deadline_creates_no_socket(monkeypatch):
+    """A provider slow past the deadline must not go on to open a socket."""
+    auth = _EngineAuth(_Connection())
+
+    def create(*, mtu):
+        time.sleep(0.05)
+        return auth.connection
+
+    auth._create_dtls_connection = create
+    monkeypatch.setattr(
+        dtls_session,
+        "open_host_filtered_udp_socket",
+        lambda *_a, **_k: pytest.fail("created a socket past the deadline"),
+    )
+
+    with pytest.raises(SessionTimeoutError):
+        DtlsCoapSession(
+            "device.example", 5684, auth=auth).connect(timeout=0.01)
