@@ -50,6 +50,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 import time
 
@@ -61,6 +62,38 @@ except ImportError as exc:
     sys.exit(f"smartthings-local is not installed in this interpreter: {exc}")
 
 LOCAL_PORT = 51234
+_IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+
+
+def _scrub(text: str, host: str) -> str:
+    """Remove your address from anything this prints.
+
+    The output of this script is meant to be pasteable into a public thread,
+    so it must not carry your network details. The library logs the host it
+    is talking to in its reader loop (dtls_session.py, "reader exiting:
+    socket error ... from ..."), and a stray OSError can carry it too, so
+    both the host as you gave it and any bare IPv4 literal are replaced.
+    """
+    if host:
+        text = text.replace(host, "<host>")
+    return _IPV4.sub("<ip>", text)
+
+
+class _ScrubbingFilter(logging.Filter):
+    """Apply _scrub to formatted log records before they are emitted."""
+
+    def __init__(self, host: str) -> None:
+        super().__init__()
+        self.host = host
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            record.msg = _scrub(record.getMessage(), self.host)
+            record.args = ()
+        except Exception:
+            record.msg = "<log line suppressed: could not be scrubbed>"
+            record.args = ()
+        return True
 
 
 def _env(name: str) -> str:
@@ -90,7 +123,7 @@ def _attempt(label: str, host: str, port: int, auth: PskAuth) -> bool:
         session.connect()
     except Exception as exc:
         print(f"connect failed after {time.monotonic() - started:.1f}s: "
-              f"{type(exc).__name__}: {exc}")
+              f"{type(exc).__name__}: {_scrub(str(exc), host)}")
         return False
     print(f"handshake completed in {time.monotonic() - started:.1f}s")
 
@@ -100,18 +133,19 @@ def _attempt(label: str, host: str, port: int, auth: PskAuth) -> bool:
         # out, which looks exactly like a dead device.
         session.start_reader()
         code, payload = session.get(["oic", "d"], timeout=10.0)
-        # 0x45 is 2.05 Content. Payload is CBOR; its length is enough here,
-        # and printing it would put the device id in your paste.
+        # 0x45 is 2.05 Content. The length is the useful part: /oic/d carries
+        # your device UUID, so printing the payload would put it in a public
+        # paste. Decode it yourself if you want to check the id matches.
         print(f"GET /oic/d -> code 0x{code:02x}, {len(payload)} bytes of CBOR")
         ok = code == 0x45
     except Exception as exc:
-        print(f"GET failed: {type(exc).__name__}: {exc}")
+        print(f"GET failed: {type(exc).__name__}: {_scrub(str(exc), host)}")
     finally:
         try:
             session.close()
             print("closed, close_notify sent")
         except Exception as exc:
-            print(f"close failed: {type(exc).__name__}: {exc}")
+            print(f"close failed: {type(exc).__name__}: {_scrub(str(exc), host)}")
     return ok
 
 
@@ -120,13 +154,15 @@ def main() -> int:
     parser.add_argument("--debug", action="store_true",
                         help="turn on the library's DEBUG logging")
     args = parser.parse_args()
+    host = _env("PSK_HOST")
     if args.debug:
         logging.basicConfig(
             level=logging.DEBUG,
             format="%(asctime)s %(levelname)s %(name)s %(message)s")
         logging.getLogger("smartthings_local").setLevel(logging.DEBUG)
-
-    host = _env("PSK_HOST")
+        scrubber = _ScrubbingFilter(host)
+        for handler in logging.getLogger().handlers:
+            handler.addFilter(scrubber)
     try:
         port = int(_env("PSK_PORT"))
     except ValueError:
