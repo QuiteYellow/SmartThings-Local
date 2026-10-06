@@ -42,7 +42,7 @@ from OpenSSL import SSL
 from ..errors import ProbeError
 from .auth import PskAuth, _DTLS_CIPHERS, _OCF_ROOT_CA, _load_pem_chain
 from .coap import split_dtls
-from .dtls_handshake import _drive_dtls_handshake
+from .dtls_handshake import _drive_dtls_handshake, _validate_mtu
 from .endpoint import open_host_filtered_udp_socket
 
 # A close_notify is a two-byte alert inside one record, so this only has to
@@ -191,10 +191,7 @@ def _validate_liveness_options(port, retries, timeout, mtu):
         raise TypeError('timeout must be a number')
     if not math.isfinite(timeout) or not 0 < timeout <= 30:
         raise ValueError('timeout must be greater than zero and at most 30')
-    if isinstance(mtu, bool) or not isinstance(mtu, int):
-        raise TypeError('mtu must be an integer')
-    if not 576 <= mtu <= 16384:
-        raise ValueError('mtu is outside the safe UDP range')
+    _validate_mtu(mtu)
 
 
 def _validate_probe_family(family):

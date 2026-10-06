@@ -251,6 +251,45 @@ def test_port_probe_flight_stays_on_openssl():
     parameters = inspect.signature(dtls_probe._client_hello_flight).parameters
     assert set(parameters) == {"mtu"}
 
+
+# -- one mtu rule, so a number cannot mean different things per provider ----
+
+
+@pytest.mark.parametrize("mtu", [100, 575, 16385, 70000])
+def test_out_of_range_mtu_is_refused_for_every_provider(mtu):
+    """The divergence this closes: the session never validated mtu.
+
+    DtlsPskClient requires 256-65535 and OpenSSL silently accepts anything,
+    consulting it only when it has to fragment. So mtu=100 used to construct,
+    then raise from connect() on a PSK provider while a certificate provider
+    carried on. Now both are refused where the argument was supplied, under
+    the range dtls_probe has validated since it was written.
+    """
+    for auth in (_ContextAuth(), _EngineAuth(_Connection())):
+        with pytest.raises(ValueError, match="safe UDP range"):
+            DtlsCoapSession("device.example", 5684, auth=auth, mtu=mtu)
+
+
+@pytest.mark.parametrize("mtu", [576, 1200, 16384])
+def test_in_range_mtu_is_accepted_for_every_provider(mtu):
+    for auth in (_ContextAuth(), _EngineAuth(_Connection())):
+        assert DtlsCoapSession(
+            "device.example", 5684, auth=auth, mtu=mtu).mtu == mtu
+
+
+@pytest.mark.parametrize("mtu", [True, 1200.0, "1200", None])
+def test_mtu_must_be_an_integer(mtu):
+    with pytest.raises(TypeError, match="mtu must be an integer"):
+        DtlsCoapSession("device.example", 5684, auth=_ContextAuth(), mtu=mtu)
+
+
+def test_the_session_and_the_probe_share_one_mtu_rule():
+    """Two copies of a range drift. The probe's message is the shared one."""
+    from smartthings_local.protocol.dtls_handshake import _validate_mtu
+
+    for module_validator in (dtls_probe._validate_mtu,
+                             dtls_session._validate_mtu):
+        assert module_validator is _validate_mtu
 # -- what the cancellation checks actually guarantee ------------------------
 
 

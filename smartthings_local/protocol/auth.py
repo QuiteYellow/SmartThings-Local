@@ -14,6 +14,8 @@ from uuid import UUID
 from cryptography.x509.oid import ExtensionOID
 from OpenSSL import SSL, _util, crypto
 
+from ._dtls_psk import DtlsPskClient
+
 logger = logging.getLogger(__name__)
 
 _OCF_ROOT_CA = str(Path(__file__).with_name("ocf_root_ca.pem"))
@@ -556,45 +558,47 @@ class CertificateAuth:
 class PskAuth:
     """DTLS authentication using an existing OCF PSK credential.
 
-    The identity must be a raw 16-byte OCF UUID that OpenSSL can present, as
-    described on :meth:`validate_identity`. The key must contain 16 or 32
-    bytes. Credential material is intentionally not exposed as public
+    The identity must be a raw 16-byte OCF UUID; the key must contain 16 or
+    32 bytes. Credential material is intentionally not exposed as public
     attributes and is never included in this provider's representation. A
     configured context must not outlive this provider; ``DtlsCoapSession``
     enforces that lifetime by retaining its provider.
+
+    A session reaches this credential through the library's own DTLS 1.2
+    ECDHE-PSK client, which carries the identity with an explicit length and
+    so takes any 16 bytes. :meth:`configure_context` is the OpenSSL path,
+    kept for direct callers, and it cannot carry an identity containing a
+    zero byte -- see :meth:`validate_identity`.
     """
 
-    __slots__ = ("_callback",)
+    __slots__ = ("_callback", "_engine")
 
     @staticmethod
     def validate_identity(identity: bytes) -> None:
-        """Raise unless ``identity`` is one OpenSSL can put on the wire.
+        """Raise unless ``identity`` is one a session can put on the wire.
 
         A caller holding a credential can check it here, and report the
-        reason, before building a provider or storing anything.
+        reason, before building a provider or storing anything. This is a
+        pure check: it depends on the identity and nothing else.
 
-        An OCF appliance takes the identity as bytes with an explicit length,
-        so a zero byte is unremarkable to the device. OpenSSL's DTLS 1.2 PSK
-        client callback returns the identity as a C string, which leaves no
-        way to express one: a NUL truncates the identity on the wire, and the
-        handshake then fails against the truncated value with no local error
-        to point at the cause. Roughly 6% of uniformly random 16-byte
-        identities carry a zero byte, and about 5% of UUIDv4s, whose version
-        and variant bytes can never be zero. There is no length-carrying PSK
-        callback for DTLS 1.2 to fall back on, so such a credential cannot be
-        used through this library.
+        A zero byte is accepted. An OCF appliance takes the identity as
+        bytes with an explicit length, so a zero byte is unremarkable to the
+        device, and the library's own DTLS client frames it the same way.
+        What cannot carry it is OpenSSL: its DTLS 1.2 PSK client callback
+        returns the identity as a C string, so a NUL truncates it on the
+        wire and the handshake fails against the truncated value with no
+        local error to point at the cause. That constraint belongs to one
+        backend rather than to the credential, so :meth:`configure_context`
+        refuses such an identity explicitly and a session does not.
+
+        The size of that difference, measured: roughly 6% of uniformly
+        random 16-byte identities carry a zero byte, and about 5% of
+        UUIDv4s, whose version and variant bytes can never be zero.
         """
         if type(identity) is not bytes:
             raise TypeError("identity must be bytes")
         if len(identity) != 16:
             raise ValueError("identity must be a raw 16-byte OCF UUID")
-        if b"\x00" in identity:
-            raise ValueError(
-                "identity cannot contain a NUL byte: OpenSSL presents a "
-                "DTLS 1.2 PSK identity as a C string, so a NUL truncates it "
-                "and the appliance would be sent a shorter identity than the "
-                "one supplied"
-            )
 
     def __init__(self, *, identity: bytes, key: bytes) -> None:
         if type(identity) is not bytes or type(key) is not bytes:
@@ -602,6 +606,22 @@ class PskAuth:
         self.validate_identity(identity)
         if len(key) not in (16, 32):
             raise ValueError("key must be 16 or 32 bytes")
+
+        def engine(*, mtu: int) -> DtlsPskClient:
+            return DtlsPskClient(identity, key, mtu)
+
+        # Held in a closure rather than an attribute, the same way the
+        # OpenSSL callback below is: no attribute, public or private, holds
+        # credential material, and test_psk_auth pins that.
+        object.__setattr__(self, "_engine", engine)
+
+        if b"\x00" in identity:
+            # OpenSSL would truncate this identity at the zero byte, so no
+            # callback is built for it at all and configure_context refuses.
+            # The engine a session uses carries an explicit length and is
+            # unaffected; see validate_identity.
+            object.__setattr__(self, "_callback", None)
+            return
 
         ffi = _util.ffi
 
@@ -644,8 +664,36 @@ class PskAuth:
         """Return a representation that never includes credential material."""
         return "PskAuth()"
 
+    def _create_dtls_connection(self, *, mtu: int):
+        """Return a DTLS connection carrying this credential.
+
+        Private, and found by ``DtlsCoapSession`` and the diagnostic through
+        ``getattr`` rather than through ``AuthenticationProvider``: that
+        Protocol is ``runtime_checkable`` and gated on with ``isinstance``,
+        so a required method here would reject third-party providers.
+
+        The engine speaks one ciphersuite and no X.509, and it frames the
+        identity with an explicit length, which is the whole reason this
+        path exists alongside :meth:`configure_context`.
+        """
+        return self._engine(mtu=mtu)
+
     def configure_context(self, context: SSL.Context) -> None:
-        """Configure one context for the narrow Samsung OCF PSK profile."""
+        """Configure one context for the narrow Samsung OCF PSK profile.
+
+        Raises when the identity contains a zero byte. OpenSSL presents a
+        DTLS 1.2 PSK identity as a C string, so it would send a shorter
+        identity than the one supplied and nothing local would say so. A
+        session does not come through here and has no such limit.
+        """
+        if self._callback is None:
+            raise ValueError(
+                "this identity contains a NUL byte and cannot be presented "
+                "through OpenSSL, which carries a DTLS 1.2 PSK identity as a "
+                "C string: it truncates there, and the appliance would be "
+                "sent a shorter identity than the one supplied. A "
+                "DtlsCoapSession carries this credential without OpenSSL"
+            )
         setter = getattr(_util.lib, "SSL_CTX_set_psk_client_callback", None)
         if setter is None:
             raise RuntimeError(

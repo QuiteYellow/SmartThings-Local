@@ -22,6 +22,27 @@ _DTLS_ALERT_HANDSHAKE_FAILURE = 40
 _DTLS_EPOCH_ZERO = b'\x00\x00'
 _DTLS_VERSIONS = frozenset((b'\xfe\xff', b'\xfe\xfd'))
 _MAX_CLEANUP_TRANSCRIPT_RECORDS = 32
+# The probe has validated this range since it was written; the session never
+# did, and the two have to agree now that a session can carry an engine with
+# a range of its own.
+_MIN_MTU = 576
+_MAX_MTU = 16384
+
+
+def _validate_mtu(mtu):
+    """Raise unless ``mtu`` is a datagram size every DTLS backend here takes.
+
+    One rule rather than one per caller. OpenSSL silently accepts anything
+    and only consults the value when it has to fragment a flight, so an
+    out-of-range mtu used to be invisible until something large went out.
+    The pure-Python PSK engine validates its own argument, which would
+    otherwise make the same number raise on one provider and pass on
+    another, from connect() rather than from where it was supplied.
+    """
+    if isinstance(mtu, bool) or not isinstance(mtu, int):
+        raise TypeError('mtu must be an integer')
+    if not _MIN_MTU <= mtu <= _MAX_MTU:
+        raise ValueError('mtu is outside the safe UDP range')
 
 
 def _complete_epoch_zero_handshake_types(record):
