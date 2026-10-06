@@ -731,6 +731,63 @@ class DtlsCoapSession:
 
     # ---- lifecycle ---------------------------------------------------
 
+    def _new_dtls_connection(self, cancel):
+        """Build the DTLS connection for one handshake attempt.
+
+        The single construction site for a session's connection, so an
+        engine other than pyOpenSSL can be reached without an isinstance
+        fork spreading through connect() and the reader loop.
+
+        A provider may carry a private ``_create_dtls_connection`` factory,
+        which owns its own engine and never sees an ``SSL.Context``. Found
+        by ``getattr`` rather than declared on ``AuthenticationProvider``:
+        that Protocol is ``runtime_checkable`` and ``__init__`` gates on
+        ``isinstance``, so a required method would reject every third-party
+        provider that has not grown one. A provider that deliberately
+        supplies the hook is therefore routed whether or not this package
+        ships it, which does not make it a supported public extension API --
+        a real one would be designed separately.
+
+        The contract the hook has to meet, for anyone experimenting with
+        another engine:
+
+        - Return a fresh connection for this attempt, already in client
+          state, with ``mtu`` applied.
+        - Own no socket, and start no network I/O. The caller owns the
+          socket, the cancellation and deadline handling, and publishing
+          the session.
+        - Raise and behave like the memory-BIO subset of
+          ``OpenSSL.SSL.Connection`` that ``_drive_dtls_handshake`` drives:
+          ``WantReadError`` until a handshake completes, ``ZeroReturnError``
+          on an orderly close, ``Error`` otherwise.
+
+        Cancellation is checked before and after the provider's work, never
+        inside it. A ``configure_context`` or factory call already blocked
+        on a slow PEM read is not interrupted; what the checks guarantee is
+        that no socket is created once cancellation is set.
+        """
+        factory = getattr(self.auth, "_create_dtls_connection", None)
+        if factory is not None:
+            conn = factory(mtu=self.mtu)
+            if self._lifecycle_cancel.is_set() or \
+                    (cancel is not None and cancel.is_set()):
+                raise SessionClosedError()
+            return conn
+
+        ctx = SSL.Context(SSL.DTLS_METHOD)
+        self.auth.configure_context(ctx)
+        if self._lifecycle_cancel.is_set() or \
+                (cancel is not None and cancel.is_set()):
+            raise SessionClosedError()
+
+        conn = SSL.Connection(ctx, None)
+        conn.set_connect_state()
+        conn.set_ciphertext_mtu(self.mtu)
+        if self._lifecycle_cancel.is_set() or \
+                (cancel is not None and cancel.is_set()):
+            raise SessionClosedError()
+        return conn
+
     def connect(
         self,
         *,
@@ -778,18 +835,7 @@ class DtlsCoapSession:
                 (cancel is not None and cancel.is_set()):
             raise SessionClosedError()
         deadline = time.monotonic() + handshake_timeout
-        ctx = SSL.Context(SSL.DTLS_METHOD)
-        self.auth.configure_context(ctx)
-        if self._lifecycle_cancel.is_set() or \
-                (cancel is not None and cancel.is_set()):
-            raise SessionClosedError()
-
-        conn = SSL.Connection(ctx, None)
-        conn.set_connect_state()
-        conn.set_ciphertext_mtu(self.mtu)
-        if self._lifecycle_cancel.is_set() or \
-                (cancel is not None and cancel.is_set()):
-            raise SessionClosedError()
+        conn = self._new_dtls_connection(cancel)
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
