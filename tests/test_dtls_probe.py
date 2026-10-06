@@ -838,16 +838,38 @@ def test_cli_refuses_a_certificate_and_a_psk_together(capsys):
 
 
 def test_cli_reports_an_unusable_psk_credential_without_a_traceback(capsys):
-    # A NUL in the identity is rejected by PskAuth, and the CLI has to render
-    # that as a usage error rather than an exception.
+    # A malformed credential is rejected by PskAuth, and the CLI has to
+    # render that as a usage error rather than an exception.
+    result = p._main([
+        '127.0.0.1', '5684', '--diagnostic',
+        '--psk-identity', '0102030405060708',
+        '--psk-key', '00' * 16,
+    ])
+
+    assert result == 2
+    assert 'invalid PSK credential' in capsys.readouterr().out
+
+
+def test_cli_accepts_an_identity_containing_a_zero_byte(monkeypatch, capsys):
+    # It used to be a usage error, because OpenSSL could not carry it. The
+    # diagnostic now reaches the same engine a session uses, so the
+    # credential is valid and the run has to proceed to the appliance.
+    diagnosed = {}
+
+    def record(host, port, **kwargs):
+        diagnosed['auth'] = kwargs.get('auth')
+        return p.ProbeResult(host, port)
+
+    monkeypatch.setattr(p, 'diagnose_dtls_handshake', record)
     result = p._main([
         '127.0.0.1', '5684', '--diagnostic',
         '--psk-identity', '0102030405060708000a0b0c0d0e0f10',
         '--psk-key', '00' * 16,
     ])
 
-    assert result == 2
-    assert 'invalid PSK credential' in capsys.readouterr().out
+    assert 'invalid PSK credential' not in capsys.readouterr().out
+    assert result != 2
+    assert diagnosed['auth'] is not None
 
 
 def test_encrypted_records_do_not_invent_handshake_messages(monkeypatch):

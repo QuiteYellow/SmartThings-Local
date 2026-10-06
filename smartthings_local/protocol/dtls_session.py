@@ -95,6 +95,7 @@ from .dtls_handshake import (
     _HvrPeerCleanupTranscript,
     _drive_dtls_handshake,
     _HandshakeCancelled,
+    _validate_mtu,
 )
 from .endpoint import open_host_filtered_udp_socket
 
@@ -570,6 +571,7 @@ class DtlsCoapSession:
         # cannot express which delivery answered the register CON, nor
         # which query-qualified relation it belongs to.
         self.on_observe_delivery = on_observe_delivery
+        _validate_mtu(mtu)
         self.mtu = mtu
         self._min_req_interval = 1.0 / rate_limit_rps
         self._write_max_attempts = max(1, int(write_max_attempts))

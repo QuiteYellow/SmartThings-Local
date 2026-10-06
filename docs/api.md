@@ -157,7 +157,7 @@ PskAuth(*, identity: bytes, key: bytes)
 *class*: DTLS authentication using an existing OCF PSK credential.
 
 - `configure_context(context: OpenSSL.SSL.Context) -> None`: Configure one context for the narrow Samsung OCF PSK profile.
-- `validate_identity(identity: bytes) -> None`: Raise unless `identity` is one OpenSSL can put on the wire.
+- `validate_identity(identity: bytes) -> None`: Raise unless `identity` is one a session can put on the wire.
 
 #### `SamsungServerProfile`
 

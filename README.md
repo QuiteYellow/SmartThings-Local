@@ -392,9 +392,11 @@ sess = DtlsCoapSession("192.0.2.100", 49154, auth=auth)
 
 The identity must be the raw 16-byte OCF UUID and the key exactly 16 or 32 bytes. `PskAuth` selects only `ECDHE-PSK-AES128-CBC-SHA256` and does not acquire, derive, provision, rotate, or persist credentials. Ownership transfer and credential discovery are outside this package.
 
-An identity containing a zero byte is rejected, and that limit is OpenSSL's rather than the appliance's. An OCF device takes the identity as bytes with an explicit length, so a zero byte means nothing to it, but OpenSSL's DTLS 1.2 PSK client callback returns the identity as a C string. Measured against OpenSSL 4.0.0, a 16-byte identity with a NUL at byte 8 reaches the wire as 8 bytes and the handshake raises nothing locally, so the appliance answers a truncated identity it has never seen. DTLS 1.2 offers no length-carrying PSK callback, so such a credential is unusable here: roughly 6% of uniformly random 16-byte identities, and about 5% of UUIDv4s, which have two fixed bytes.
+An identity containing a zero byte works in a session. A `DtlsCoapSession` carries a PSK credential through this package's own DTLS 1.2 ECDHE-PSK client, which frames the identity with an explicit length, exactly as an OCF device reads it.
 
-Code holding a credential can check it, and report why, before building a provider or storing anything:
+One path cannot carry such an identity, and that limit is OpenSSL's rather than the appliance's: `PskAuth.configure_context` raises for it instead of truncating it. OpenSSL's DTLS 1.2 PSK client callback returns the identity as a C string, and measured against OpenSSL 4.0.0 a 16-byte identity with a NUL at byte 8 reaches the wire as 8 bytes with nothing raising locally, so the appliance would answer a truncated identity it has never seen. DTLS 1.2 offers no length-carrying PSK callback. That affects roughly 6% of uniformly random 16-byte identities, and about 5% of UUIDv4s, which have two fixed bytes -- so code that configures a context itself, rather than handing the provider to a session, should expect the refusal.
+
+Code holding a credential can check it, and report why, before building a provider or storing anything. The check is pure -- it reads the identity and nothing else, so the answer does not move with the environment:
 
 ```python
 try:
