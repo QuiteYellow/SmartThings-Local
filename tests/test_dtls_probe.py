@@ -977,3 +977,50 @@ def test_iter_handshake_fragments_falls_back_on_a_truncated_header():
 
     assert [(name, seq, off) for name, seq, off, _ in got] == [
         ('HelloVerifyRequest', None, 0)]
+
+
+def test_completed_diagnostic_releases_the_peer_with_close_notify(monkeypatch):
+    # The appliance firmware frees a peer entry when it receives close_notify
+    # and has no idle timeout that reclaims one, so a diagnostic that
+    # completed and then closed its socket left association state behind.
+    # Measured on 2026-10-04: six completed diagnostics inside six minutes
+    # took a healthy dryer's DTLS endpoint down for about seven minutes while
+    # its ICMP and plaintext CoAP kept answering normally.
+    cert_pem, key_pem = _synthetic_ec_server_credentials()
+    server_cert, server_key = _synthetic_ec_server_credentials()
+    fake = _FakeSock(
+        _LoopbackDtlsServer(
+            _server_context(
+                cipher=b'ECDHE-ECDSA-AES128-GCM-SHA256:@SECLEVEL=0',
+                cert_pem=server_cert,
+                key_pem=server_key,
+            )
+        )
+    )
+    _patch_sock(monkeypatch, fake)
+
+    result = p.diagnose_dtls_handshake(
+        '127.0.0.1', 5684, cert_pem=cert_pem, key_pem=key_pem, timeout=2.0)
+
+    assert result.outcome == p.COMPLETED
+    assert fake.sends, 'the diagnostic sent nothing'
+    last = fake.sends[-1]
+    assert last[0] == p._CT_ALERT
+    # Sent under the negotiated epoch, so the two alert bytes are ciphertext
+    # here; the record type and a non-zero epoch are what identify it.
+    assert last[3:5] == b'\x00\x01'
+
+
+def test_diagnostic_that_never_completed_sends_no_alert(monkeypatch):
+    # Scope line for the release above. Before the handshake finishes there is
+    # no session for OpenSSL to shut down, and an appliance that answers with
+    # a fatal alert has already dropped the peer itself, so this path stays as
+    # it shipped.
+    fake = _FakeSock(lambda sock: None)
+    _patch_sock(monkeypatch, fake)
+
+    result = p.diagnose_dtls_handshake(
+        '127.0.0.1', 5684, timeout=0.3, retries=0)
+
+    assert result.outcome != p.COMPLETED
+    assert all(datagram[0] != p._CT_ALERT for datagram in fake.sends)
