@@ -720,9 +720,15 @@ class DtlsPskClient:
                 self._fail("server kept re-issuing HelloVerifyRequest")
                 return
             if cookie == self._cookie:
-                # Same cookie again: our answer was lost rather than refused.
-                # The flight timer owns that retransmission, so do not start
-                # a new hello and renumber the handshake underneath it.
+                # An identical cookie does not say why it arrived. Our answer
+                # may have been lost, or the server may have re-challenged
+                # inside the same clock second: Mbed TLS derives the cookie
+                # deterministically from a 4-byte timestamp and the client id
+                # under a key it generates once (ssl_cookie.c ssl_cookie_hmac),
+                # so a repeat within that second is byte-identical rather than
+                # rotated. Either way the flight timer owns the retransmission,
+                # so do not start a new hello and renumber the handshake
+                # underneath it.
                 return
         self._cookie = cookie
         # RFC 6347 4.2.1: the transcript starts at the ClientHello that
