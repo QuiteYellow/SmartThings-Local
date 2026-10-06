@@ -41,7 +41,7 @@ result.
 Usage:
   handshake_matrix.py HOST [--port N] [--cert PATH --key PATH]
                       [--interval S] [--repeats N] [--variants a,b,...]
-                      [--cookie-delay S]
+                      [--cookie-delay S] [--local-port N]
                       [--no-clean-close] [--no-health-gate] [--list]
 
 Credentials default to $CERT_PATH / $KEY_PATH. Nothing is written to disk and
@@ -127,7 +127,23 @@ def _apply(ctx, variant):
 
 _orig_context = probe._diagnostic_context
 _orig_drive = probe._drive_dtls_handshake
-_state = {'variant': 'baseline', 'clean_close': True, 'cookie_delay': 0.0}
+_orig_socket = probe.open_host_filtered_udp_socket
+_state = {'variant': 'baseline', 'clean_close': True, 'cookie_delay': 0.0,
+          'local_port': None}
+
+
+def _patched_socket(host, port, **kw):
+    """Bind every run's socket to one source port when asked.
+
+    The appliance firmware keys its peer table on address *and* port
+    (ca_adapter_net_ssl.c:1098), so a run from a fresh ephemeral port makes
+    it build a new peer, and building one re-runs the certificate setup
+    that the next packet uses (SetupCipher -> InitPKIX, :1535). Holding one
+    port across runs is what stops that repeating.
+    """
+    if _state['local_port'] is not None:
+        kw['local_port'] = _state['local_port']
+    return _orig_socket(host, port, **kw)
 
 
 def _patched_context(**kw):
@@ -175,6 +191,7 @@ def _patched_drive(connection, sock, **kw):
 
 probe._diagnostic_context = _patched_context
 probe._drive_dtls_handshake = _patched_drive
+probe.open_host_filtered_udp_socket = _patched_socket
 
 
 def _is_hello_verify_request(datagram):
@@ -446,6 +463,12 @@ def main(argv=None):
                     help='seconds to hold the cookie-bearing ClientHello back '
                          'after the HelloVerifyRequest arrives (default 0, '
                          'which reproduces the sub-millisecond reply)')
+    ap.add_argument('--local-port', type=int,
+                    help='bind every run to this UDP source port instead of '
+                         'a fresh ephemeral one, so the appliance reuses one '
+                         'peer rather than building a new one per run; pick '
+                         'something above 1024 and outside your ephemeral '
+                         'range, e.g. 26900')
     ap.add_argument('--no-health-gate', action='store_true')
     ap.add_argument('--list', action='store_true',
                     help='describe the variants and exit')
@@ -467,12 +490,15 @@ def main(argv=None):
 
     _state['clean_close'] = not args.no_clean_close
     _state['cookie_delay'] = args.cookie_delay
+    _state['local_port'] = args.local_port
     print(f'OpenSSL: {SSL.OpenSSL_version(SSL.SSLEAY_VERSION).decode()}')
     print(f'cipher list: {probe._DTLS_CIPHERS.decode()}')
     print(f'clean close: {_state["clean_close"]}   '
           f'health gate: {not args.no_health_gate}   '
           f'interval: {args.interval}s   '
-          f'cookie delay: {args.cookie_delay}s\n')
+          f'cookie delay: {args.cookie_delay}s   '
+          f'source port: '
+          f'{args.local_port if args.local_port else "ephemeral"}\n')
 
     if not self_check(chosen, args.cert, args.key):
         return 1
