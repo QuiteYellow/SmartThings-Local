@@ -29,6 +29,7 @@ that were linked from that thread, plus whatever they need to run standalone.
 | Directory | Thread | What it answers |
 | --- | --- | --- |
 | `pr-115-purepy-psk/` | [#115](https://github.com/QuiteYellow/SmartThings-Local/pull/115) | Whether a pure-Python DTLS 1.2 ECDHE-PSK client authenticates to an appliance using a binary PSK identity that contains a zero byte. |
+| `pr-121-psk-session/` | [#121](https://github.com/QuiteYellow/SmartThings-Local/pull/121) | Whether a PSK credential works through `DtlsCoapSession` rather than a standalone probe, and whether a second session on the same local port succeeds once the first released the appliance's peer entry. |
 | `issue-20-handshake-matrix/` | [#20](https://github.com/QuiteYellow/SmartThings-Local/issues/20) | Which part of the ClientHello, if any, an appliance cares about at the step where #20's washer stops answering the network. |
 
 A directory may vendor a copy of library code so the script runs without a
