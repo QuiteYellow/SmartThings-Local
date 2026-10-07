@@ -53,6 +53,14 @@ _OCF_CONTENT_FORMAT_VERSION = 2049
 _OCF_VERSION_1_0 = (2048).to_bytes(2, "big")
 _CONTENT = 0x45
 _MAX_DATAGRAM_BYTES = 8192
+# The least of a round's nominal window that still makes sending its requests
+# worthwhile. Each round puts three datagrams on the multicast group, so every
+# device on the segment pays for a round sent with no window to read a reply
+# in. The floor is a share of the caller's own budget rather than a fixed
+# number of milliseconds; the same fraction guards the DTLS probe's
+# retransmissions, for the same reason.
+_MIN_WINDOW_SHARE = 0.5
+
 _MAX_DATAGRAMS_PER_ROUND = 64
 _MAX_PORTS = 8
 
@@ -270,9 +278,30 @@ def discover_ocf_responder_ports(
     too_many_ports = False
 
     try:
+        nominal_window = timeout / rounds
         for round_number in range(rounds):
             if time.monotonic() >= deadline:
                 break
+            # Share what is left of the budget across the rounds that are
+            # left, rather than giving this round the fixed slice ending at
+            # `started + timeout * (round_number + 1) / rounds`. A select
+            # returns somewhat past the timeout it was given, and under fixed
+            # slices that overrun came out of the next round's window: with a
+            # short `timeout`, or `rounds` near its limit of four, one overrun
+            # consumes a whole slice, and the round then sent all three of its
+            # requests to the multicast group with no window left to read a
+            # reply in. Measured at a 30 ms slice and a 40 ms overrun, one
+            # round in three went out unread. The `deadline` check above still
+            # bounds the whole call, so redistributing never extends it.
+            now = time.monotonic()
+            round_window = (deadline - now) / (rounds - round_number)
+            if (round_number
+                    and round_window < nominal_window * _MIN_WINDOW_SHARE):
+                # Too little of the window survives to carry a reply, so these
+                # requests would cost every device on the segment a datagram
+                # for an answer that could not arrive in time.
+                break
+            round_deadline = now + round_window
             # Preserve the unfiltered modern and legacy requests used by the
             # installed appliance generations. Older media firmware can omit
             # usable endpoint policy from its large unfiltered directory but
@@ -304,10 +333,9 @@ def discover_ocf_responder_ports(
                 if sent != len(request):
                     continue
 
-            round_deadline = started + timeout * (round_number + 1) / rounds
             datagrams = 0
             while datagrams < _MAX_DATAGRAMS_PER_ROUND:
-                remaining = min(deadline, round_deadline) - time.monotonic()
+                remaining = round_deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 try:

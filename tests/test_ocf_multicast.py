@@ -82,6 +82,102 @@ def selectors_event_read():
     return 1
 
 
+class _VirtualClock:
+    """A monotonic clock the test advances itself.
+
+    The round budget is wall-clock arithmetic, and `_FakeSelector.select`
+    returns instantly, so the existing tests spend no time at all and cannot
+    see how the budget is divided. Virtual time makes that observable without
+    sleeping and without depending on the host's scheduler.
+    """
+
+    def __init__(self, now=1000.0):
+        self.now = float(now)
+
+    def monotonic(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class _TimedSelector(_FakeSelector):
+    """A selector whose waits spend virtual time and overshoot, as a poll does.
+
+    `overshoot` is the scheduler delay to simulate: the seconds `select`
+    takes beyond the timeout it was given. `windows` records the timeout each
+    wait was actually given, so a test can tell which rounds got one at all.
+    """
+
+    def __init__(self, active, clock, *, overshoot=0.0):
+        super().__init__(active)
+        self._clock = clock
+        self._overshoot = overshoot
+        self.windows = []
+
+    def select(self, timeout):
+        self.windows.append(timeout)
+        self._clock.advance((timeout or 0.0) + self._overshoot)
+        return super().select(timeout)
+
+
+@pytest.fixture
+def patch_timed_socket(monkeypatch):
+    """Install a silent socket whose selector waits spend virtual time."""
+
+    def install(*, overshoot):
+        clock = _VirtualClock()
+        active = _FakeSocket()
+        selector = _TimedSelector(active, clock, overshoot=overshoot)
+        monkeypatch.setattr(
+            "smartthings_local.protocol.ocf_multicast.socket.socket",
+            lambda *_args: active,
+        )
+        monkeypatch.setattr(
+            "smartthings_local.protocol.ocf_multicast.selectors.DefaultSelector",
+            lambda: selector,
+        )
+        monkeypatch.setattr(
+            "smartthings_local.protocol.ocf_multicast.time", clock
+        )
+        return active, selector
+
+    return install
+
+
+def test_every_round_sent_gets_a_window_to_read_a_reply_in(patch_timed_socket):
+    # `rounds` is allowed up to four, so a 120 ms budget gives 30 ms rounds,
+    # and a wait overshooting by 40 ms -- the worst a UDP read was measured
+    # to overshoot a 100 ms timeout on 2026-10-07 -- outlives its own round.
+    # Under the fixed slice `started + timeout * (round + 1) / rounds` every
+    # later round's deadline was then already in the past, and a round still
+    # sent all three of its requests to the multicast group before finding
+    # that out: three datagrams every device on the segment pays for, with
+    # nothing waiting for an answer.
+    active, selector = patch_timed_socket(overshoot=0.04)
+
+    result = discover_ocf_responder_ports(
+        _TARGET, interface_address=_INTERFACE, timeout=0.12, rounds=4)
+
+    assert result.ports == ()
+    rounds_sent, remainder = divmod(len(active.sent), 3)
+    assert remainder == 0
+    assert rounds_sent == 2                      # not the three it used to
+    assert len(selector.windows) == rounds_sent  # each one was waited for
+    assert all(w > 0.015 for w in selector.windows)
+
+
+def test_an_unhurried_run_divides_the_budget_as_before(patch_timed_socket):
+    # The guard must not cost a round when nothing overruns: at the library's
+    # own defaults every round keeps its full nominal window.
+    _active, selector = patch_timed_socket(overshoot=0.0)
+
+    discover_ocf_responder_ports(
+        _TARGET, interface_address=_INTERFACE, timeout=0.12, rounds=4)
+
+    assert selector.windows == [pytest.approx(0.03, abs=1e-6)] * 4
+
+
 def _response(
     datagram, _destination=None, *, host=_TARGET, port=43123, message_type=TYPE_NON
 ):
