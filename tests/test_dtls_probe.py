@@ -150,6 +150,66 @@ def _patch_sock(monkeypatch, fake):
     monkeypatch.setattr(p.socket, 'socket', lambda *a, **k: fake)
 
 
+class _VirtualClock:
+    """A monotonic clock the test advances itself.
+
+    The retransmission budget is wall-clock arithmetic, so asserting an exact
+    number of flights against `time.sleep` asserts the host's scheduler too:
+    a read that overran its slice on a loaded machine left the next attempt a
+    window of nanoseconds, and the probe answered `live` from a third flight
+    instead of the second. Virtual time pins the same guarantee without that
+    dependency, and without sleeping.
+    """
+
+    def __init__(self, now=1000.0):
+        self.now = float(now)
+
+    def monotonic(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class _TimedSock(_FakeSock):
+    """A fake socket whose timed-out reads spend virtual time.
+
+    `overshoot` is the scheduler delay to simulate: the seconds a read takes
+    beyond the timeout it was given, which is what pushes a later attempt
+    past its deadline. `windows` records the timeout each read was actually
+    given, so a test can tell a usable window from a sliver.
+    """
+
+    def __init__(self, responder, clock, *, overshoot=0.0):
+        super().__init__(responder)
+        self._clock = clock
+        self._overshoot = overshoot
+        self.windows = []
+
+    def _read(self):
+        self.recv_calls += 1
+        self.windows.append(self._timeout)
+        resp = self._responder(self)
+        if resp is None:
+            self._clock.advance(self._timeout + self._overshoot)
+            raise TimeoutError()
+        return resp
+
+    def recv(self, n):
+        return self._read()
+
+    # The host-filtered wrapper reads through recvfrom, so this is the
+    # override that actually runs; recv is kept for a direct caller.
+    def recvfrom(self, n):
+        return self._read(), ('127.0.0.1', 5684)
+
+
+def _patch_timed_sock(monkeypatch, fake, clock):
+    """Install `fake` and give the probe module `clock` as its time source."""
+    _patch_sock(monkeypatch, fake)
+    monkeypatch.setattr(p, 'time', clock)
+
+
 def test_stateless_probe_sends_exactly_one_clienthello(monkeypatch):
     # The §4.2.8 regression guard: a HelloVerifyRequest proves liveness,
     # and the stateless gate must stop there — never emitting the cookie'd
@@ -187,24 +247,93 @@ def test_stateless_warning_alert_proves_liveness_without_fatal_rejection(
 
 
 def test_retransmit_recovers_from_dropped_first_flight(monkeypatch):
-    # The first ClientHello is "lost" (recvfrom times out) until OpenSSL's
-    # retransmit timer fires a second flight; only then does the server
+    # The first ClientHello is "lost" (the read times out) until the
+    # retransmission budget fires a second flight; only then does the server
     # answer. A single dropped datagram must NOT read as DEAD.
-    fake = _FakeSock(lambda f: _hvr() if len(f.sends) >= 2
-                     else None)
-    _patch_sock(monkeypatch, fake)
+    clock = _VirtualClock()
+    fake = _TimedSock(lambda f: _hvr() if len(f.sends) >= 2 else None, clock)
+    _patch_timed_sock(monkeypatch, fake, clock)
+
     r = p.probe('127.0.0.1', 5684, stateless=True, retries=2, timeout=0.3)
+
     assert r.outcome == p.LIVE
     assert len(fake.sends) == 2          # initial + one retransmit
     assert fake.sends[0] == fake.sends[1]
 
 
+def test_an_overrun_read_shortens_the_next_window_instead_of_wasting_it(
+        monkeypatch):
+    # An overrun read used to leave the next attempt's fixed slice already in
+    # the past, so the retransmission went out with a window of nanoseconds,
+    # read nothing, and a third flight fetched the answer. What is left of
+    # `timeout` is shared across the attempts that are left instead, so the
+    # retransmission keeps a window it can actually be answered in.
+    clock = _VirtualClock()
+    fake = _TimedSock(
+        lambda f: _hvr() if len(f.sends) >= 2 else None, clock, overshoot=0.1)
+    _patch_timed_sock(monkeypatch, fake, clock)
+
+    result = p.probe_dtls_port('127.0.0.1', 5684, retries=2, timeout=0.3)
+
+    assert result.response_kind == p.HELLO_VERIFY_REQUEST
+    assert result.attempts == 2
+    assert len(fake.sends) == 2          # no third flight was needed
+    # Half of the 0.1 s nominal slice survived the overrun, and all of it
+    # went to the retransmission rather than to a sliver.
+    assert fake.windows[1] == pytest.approx(0.05, abs=1e-3)
+
+
+def test_a_small_slice_does_not_spend_the_budget_on_unread_flights(
+        monkeypatch):
+    # The reachable case, at the measured overshoot. `retries` is allowed up
+    # to four, so a 150 ms budget gives 30 ms slices, and a read overshooting
+    # by 40 ms -- the worst this machine measured on 2026-10-07 -- outlives
+    # its own slice. Under fixed slices every later deadline was then already
+    # in the past, so the loop sent all five flights and read after only the
+    # first: four ClientHellos to the appliance that nothing waited for.
+    clock = _VirtualClock()
+    fake = _TimedSock(lambda _f: None, clock, overshoot=0.04)
+    _patch_timed_sock(monkeypatch, fake, clock)
+
+    result = p.probe_dtls_port('127.0.0.1', 5684, retries=4, timeout=0.15)
+
+    assert result.response_kind is None
+    assert len(fake.sends) == 2          # not the full five
+    assert fake.recv_calls == 2          # and each one was waited for
+    assert all(w > 0.01 for w in fake.windows)
+
+
+def test_a_retransmission_is_not_sent_without_a_window_to_read_it(
+        monkeypatch):
+    # When the overrun leaves less than half a slice, no window worth reading
+    # in remains. `timeout` bounds total socket I/O so it cannot be extended,
+    # and a flight sent into a window too short to carry a reply is exactly
+    # the datagram a stateless probe exists to keep off the appliance. So it
+    # is not sent at all.
+    clock = _VirtualClock()
+    fake = _TimedSock(lambda _f: None, clock, overshoot=0.2)
+    _patch_timed_sock(monkeypatch, fake, clock)
+
+    result = p.probe_dtls_port('127.0.0.1', 5684, retries=2, timeout=0.3)
+
+    assert result.response_kind is None
+    assert result.error_code == 'no_dtls_response'
+    assert len(fake.sends) == 1          # the budget bought one flight
+    assert fake.recv_calls == 1          # and exactly one read window
+    assert result.attempts == 1          # the unsent flight is not counted
+
+
 def test_silent_port_is_dead_only_after_flight_budget(monkeypatch):
     # A truly silent port: DEAD, but only after the initial flight plus
-    # `retries` retransmits — not on the first unanswered datagram.
-    fake = _FakeSock(lambda f: None)
-    _patch_sock(monkeypatch, fake)
+    # `retries` retransmits — not on the first unanswered datagram. Each
+    # read here spends exactly the slice it was given, so every attempt in
+    # the budget keeps a window of its own.
+    clock = _VirtualClock()
+    fake = _TimedSock(lambda _f: None, clock)
+    _patch_timed_sock(monkeypatch, fake, clock)
+
     r = p.probe('127.0.0.1', 5684, stateless=True, retries=1, timeout=0.2)
+
     assert r.outcome == p.DEAD
     assert not r.is_dtls_server
     assert len(fake.sends) == 2          # initial + retries(1) retransmit
