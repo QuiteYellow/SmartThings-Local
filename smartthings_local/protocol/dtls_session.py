@@ -68,6 +68,7 @@ from .coap import (
     CF_CBOR,
     CONTENT_FORMAT,
     ETAG,
+    MAX_BLOCK2_PAYLOAD_BYTES,
     METHOD_DELETE,
     METHOD_GET,
     METHOD_POST,
@@ -520,7 +521,11 @@ class DtlsCoapSession:
 
     HANDSHAKE_TIMEOUT_S = 12.0
     READER_RECV_TIMEOUT_S = 1.0  # short so stop_event propagates quickly
-    MAX_BLOCKS = 32              # safety bound for Block2 fetches
+    # Safety bound for Block2 fetches: as many SZX-6 blocks as the shared
+    # MAX_BLOCK2_PAYLOAD_BYTES cap holds (64). At 32, a 33,884-byte
+    # /device/0?if=oic.if.b batch from an LCD_A311D_OV_QMD_EU_22K oven
+    # (34 blocks) failed with BlockwiseError although it was inside the cap.
+    MAX_BLOCKS = MAX_BLOCK2_PAYLOAD_BYTES >> (BLOCK_SZX + 4)
 
     def __init__(self, host, port, cert_path=None, key_path=None, *,
                  cert_pem=None, key_pem=None,
