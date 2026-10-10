@@ -22,6 +22,7 @@ from smartthings_local.protocol._dtls_psk import (
     DtlsPskClient,
     WantRead,
     ZeroReturn,
+    _MAX_PENDING_MESSAGES,
     _Transform,
 )
 
@@ -385,3 +386,64 @@ def test_parsers_survive_hostile_records(seed):
             c.recv(65535)
         except (WantRead, ZeroReturn, DtlsError):
             pass
+
+
+def test_a_reply_is_delivered_before_the_teardown_that_followed_it(established):
+    """One drain can hold both a genuine reply and the alert that ends the
+    session, and the reply authenticated first.
+
+    `recv()` drains every queued datagram, so a reply and a following fatal
+    alert are both processed before the caller sees either. Raising on the
+    failure first discarded an authenticated appliance response that the
+    caller never got a chance to read. mbedtls and OpenSSL avoid this by
+    returning after one record (ssl_tls.c:7261-7292).
+    """
+    peer = peer_of(KEY_BLOCK)
+    established.bio_write(
+        record(23, 1, 0, peer.protect(1, 0, 23, b"genuine appliance reply")))
+    established.bio_write(
+        record(21, 1, 1, peer.protect(1, 1, 21, bytes([2, 40]))))
+
+    assert established.recv() == b"genuine appliance reply"
+    with pytest.raises(DtlsError):
+        established.recv()
+
+
+def test_the_incomplete_message_table_is_bounded_at_the_documented_cap(client):
+    """_MAX_PENDING_MESSAGES partial messages are held, and no more."""
+    def fragment(msg_seq):
+        # Two bytes of a four-byte message, so the entry stays incomplete.
+        return (
+            bytes([1]) + (4).to_bytes(3, "big") + struct.pack("!H", msg_seq)
+            + (0).to_bytes(3, "big") + (2).to_bytes(3, "big") + b"\x00\x00"
+        )
+
+    for msg_seq in range(_MAX_PENDING_MESSAGES):
+        client._handle_handshake_fragment(fragment(msg_seq))
+    assert len(client._pending) == _MAX_PENDING_MESSAGES
+    assert client._failed is None
+
+    client._handle_handshake_fragment(fragment(_MAX_PENDING_MESSAGES))
+    assert len(client._pending) == _MAX_PENDING_MESSAGES
+    assert client._failed == "too many incomplete handshake messages"
+
+
+def test_a_full_table_still_reassembles_a_message_already_in_it(client):
+    """The cap bounds new entries, so it must not fail an in-flight one.
+
+    Capping the whole function rather than the insert would reject the tail
+    of a message the table already holds.
+    """
+    def fragment(msg_seq, frag_off, body):
+        return (
+            bytes([1]) + (4).to_bytes(3, "big") + struct.pack("!H", msg_seq)
+            + frag_off.to_bytes(3, "big") + len(body).to_bytes(3, "big") + body
+        )
+
+    for msg_seq in range(_MAX_PENDING_MESSAGES):
+        client._handle_handshake_fragment(fragment(msg_seq, 0, b"\x00\x00"))
+    assert len(client._pending) == _MAX_PENDING_MESSAGES
+
+    client._handle_handshake_fragment(fragment(0, 2, b"\x00\x00"))
+    assert client._failed is None
+    assert 0 not in client._pending
