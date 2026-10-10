@@ -233,6 +233,11 @@ def discover_ocf_responder_ports(
     link-local multicast group. Only a 2.05 response with a request token and
     the exact target source address contributes a candidate. One monotonic
     deadline bounds all rounds, and every socket is closed before return.
+
+    ``rounds`` is a ceiling. Each round takes a share of what is left of the
+    budget, and a round whose share is under half a nominal window is skipped
+    instead of putting its requests on the group with no window left to read
+    an answer in.
     """
 
     _target_address, target_key = _validate_address(target_address, "target_address")

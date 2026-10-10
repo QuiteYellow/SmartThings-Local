@@ -414,7 +414,11 @@ def probe_dtls_port(
     cannot emit a second ClientHello or allocate a server association.
 
     ``timeout`` bounds socket I/O after synchronous platform name resolution;
-    resolver timing remains controlled by the operating system.
+    resolver timing remains controlled by the operating system. ``retries``
+    is a ceiling: each attempt takes a share of what is left of ``timeout``,
+    and an attempt whose share is under half a nominal slice is dropped
+    rather than sent into a window too short to carry a reply, so a result
+    can report fewer ``attempts`` than ``retries + 1``.
     """
     _validate_liveness_options(port, retries, timeout, mtu)
     _validate_probe_family(family)

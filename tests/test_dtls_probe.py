@@ -283,6 +283,30 @@ def test_an_overrun_read_shortens_the_next_window_instead_of_wasting_it(
     assert fake.windows[1] == pytest.approx(0.05, abs=1e-3)
 
 
+@pytest.mark.parametrize(
+    'origin', [0.0, 3.0, 9.75, 100.0, 1000.5, 12345.678, 262144.0])
+def test_the_flight_count_does_not_turn_on_the_clock_origin(
+        monkeypatch, origin):
+    # The test above spends a whole nominal slice on the overrun, so what
+    # survives for the retransmission is about half a slice against a floor
+    # of exactly half: the closest to `_MIN_WINDOW_SHARE` any test here sits.
+    # Every window is a subtraction between two monotonic readings, and the
+    # absolute size of those readings decides how much precision the
+    # difference keeps, so a scenario that close to the floor is worth
+    # pinning at more than the one origin `_VirtualClock` defaults to. Each
+    # of these is a different exponent for that subtraction.
+    clock = _VirtualClock(origin)
+    fake = _TimedSock(
+        lambda f: _hvr() if len(f.sends) >= 2 else None, clock, overshoot=0.1)
+    _patch_timed_sock(monkeypatch, fake, clock)
+
+    result = p.probe_dtls_port('127.0.0.1', 5684, retries=2, timeout=0.3)
+
+    assert result.response_kind == p.HELLO_VERIFY_REQUEST
+    assert result.attempts == 2
+    assert len(fake.sends) == 2
+
+
 def test_a_small_slice_does_not_spend_the_budget_on_unread_flights(
         monkeypatch):
     # The reachable case, at the measured overshoot. `retries` is allowed up
