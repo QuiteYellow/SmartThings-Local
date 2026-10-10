@@ -360,9 +360,11 @@ def test_a_small_slice_does_not_spend_the_budget_on_unread_flights(
     # The reachable case, at the measured overshoot. `retries` is allowed up
     # to four, so a 150 ms budget gives 30 ms slices, and a read overshooting
     # by 40 ms -- the worst this machine measured on 2026-10-07 -- outlives
-    # its own slice. Under fixed slices every later deadline was then already
-    # in the past, so the loop sent all five flights and read after only the
-    # first: four ClientHellos to the appliance that nothing waited for.
+    # its own slice. One overrun outlives one slice but not two, so under
+    # fixed slices it pushed every second deadline into the past: the loop
+    # sent all five flights and read after only the first, third and fifth,
+    # leaving two ClientHellos that nothing waited for. Re-measured against
+    # v0.1.23 on 2026-10-10, which is where the five/three/two come from.
     clock = _VirtualClock()
     fake = _TimedSock(lambda _f: None, clock, overshoot=0.04)
     _patch_timed_sock(monkeypatch, fake, clock)
