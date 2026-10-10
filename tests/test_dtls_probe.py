@@ -5,6 +5,7 @@ import time
 import pytest
 
 from smartthings_local.protocol import dtls_probe as p
+from smartthings_local.protocol import endpoint as _endpoint
 
 
 def _rec(content_type, frag, *, epoch=0):
@@ -204,10 +205,46 @@ class _TimedSock(_FakeSock):
         return self._read(), ('127.0.0.1', 5684)
 
 
+# The least window a read must be given for the fake appliance to answer
+# into it. A HelloVerifyRequest round trip to two Samsung appliances over
+# Wi-Fi ran 89-158 ms (24 probes, 2026-10-07), so 10 ms is already far
+# below anything real, and a flight sent into less than that cannot be
+# answered. Without this a fake answers instantly into a window of
+# nanoseconds, which is the one thing a real device cannot do -- and it is
+# exactly the waste these tests exist to pin.
+_FAKE_MIN_ANSWERABLE_WINDOW = 0.01
+
+
+def _answers_from_the_retransmission(fake):
+    """A HelloVerifyRequest, but only to a retransmission given a real window.
+
+    `fake.windows[-1]` is the timeout the in-flight read was given, appended
+    by `_TimedSock._read` before this is called.
+    """
+    if len(fake.sends) < 2:
+        return None
+    if fake.windows[-1] <= _FAKE_MIN_ANSWERABLE_WINDOW:
+        return None
+    return _hvr()
+
+
 def _patch_timed_sock(monkeypatch, fake, clock):
-    """Install `fake` and give the probe module `clock` as its time source."""
+    """Install `fake` and give every clock on the read path `clock`.
+
+    Both modules have to be injected, not just the probe. The probe reaches
+    its socket through `endpoint.open_host_filtered_udp_socket`, and the
+    wrapper that returns re-derives its own read deadline from
+    `endpoint.time.monotonic()` before each `settimeout` (endpoint.py:235).
+    Leaving that one real meant the value handed to `settimeout` -- which is
+    what `_TimedSock` then advances virtual time by -- carried a few hundred
+    nanoseconds of real scheduling jitter. That is enough to decide a
+    comparison against `_MIN_WINDOW_SHARE`, so these tests turned on the
+    host's scheduler in exactly the way the fix under test removes from the
+    probe.
+    """
     _patch_sock(monkeypatch, fake)
     monkeypatch.setattr(p, 'time', clock)
+    monkeypatch.setattr(_endpoint, 'time', clock)
 
 
 def test_stateless_probe_sends_exactly_one_clienthello(monkeypatch):
@@ -251,7 +288,7 @@ def test_retransmit_recovers_from_dropped_first_flight(monkeypatch):
     # retransmission budget fires a second flight; only then does the server
     # answer. A single dropped datagram must NOT read as DEAD.
     clock = _VirtualClock()
-    fake = _TimedSock(lambda f: _hvr() if len(f.sends) >= 2 else None, clock)
+    fake = _TimedSock(_answers_from_the_retransmission, clock)
     _patch_timed_sock(monkeypatch, fake, clock)
 
     r = p.probe('127.0.0.1', 5684, stateless=True, retries=2, timeout=0.3)
@@ -268,39 +305,50 @@ def test_an_overrun_read_shortens_the_next_window_instead_of_wasting_it(
     # read nothing, and a third flight fetched the answer. What is left of
     # `timeout` is shared across the attempts that are left instead, so the
     # retransmission keeps a window it can actually be answered in.
+    #
+    # `retries=3` rather than 2 is what keeps this off the floor. A whole
+    # nominal slice has to go to the overrun for the old fixed slice to be
+    # exhausted, and with three attempts left to share what remains the
+    # survivor is 2/3 of a slice against a floor of 1/2 -- a third of a
+    # slice of headroom. At `retries=2` the survivor is exactly 1/2, equal
+    # to the floor, so which side of `_MIN_WINDOW_SHARE` it landed on came
+    # down to the last bits of a float subtraction.
     clock = _VirtualClock()
     fake = _TimedSock(
-        lambda f: _hvr() if len(f.sends) >= 2 else None, clock, overshoot=0.1)
+        _answers_from_the_retransmission, clock, overshoot=0.1)
     _patch_timed_sock(monkeypatch, fake, clock)
 
-    result = p.probe_dtls_port('127.0.0.1', 5684, retries=2, timeout=0.3)
+    result = p.probe_dtls_port('127.0.0.1', 5684, retries=3, timeout=0.4)
 
     assert result.response_kind == p.HELLO_VERIFY_REQUEST
     assert result.attempts == 2
     assert len(fake.sends) == 2          # no third flight was needed
-    # Half of the 0.1 s nominal slice survived the overrun, and all of it
-    # went to the retransmission rather than to a sliver.
-    assert fake.windows[1] == pytest.approx(0.05, abs=1e-3)
+    # The overrun consumed one 0.1 s nominal slice. The 0.2 s left was
+    # shared across the three attempts still to come, and the whole of that
+    # share went to the retransmission rather than to a sliver.
+    assert fake.windows[0] == pytest.approx(0.1, abs=1e-3)
+    assert fake.windows[1] == pytest.approx(0.2 / 3, abs=1e-3)
 
 
 @pytest.mark.parametrize(
     'origin', [0.0, 3.0, 9.75, 100.0, 1000.5, 12345.678, 262144.0])
 def test_the_flight_count_does_not_turn_on_the_clock_origin(
         monkeypatch, origin):
-    # The test above spends a whole nominal slice on the overrun, so what
-    # survives for the retransmission is about half a slice against a floor
-    # of exactly half: the closest to `_MIN_WINDOW_SHARE` any test here sits.
     # Every window is a subtraction between two monotonic readings, and the
     # absolute size of those readings decides how much precision the
-    # difference keeps, so a scenario that close to the floor is worth
-    # pinning at more than the one origin `_VirtualClock` defaults to. Each
-    # of these is a different exponent for that subtraction.
+    # difference keeps: at an origin of 262144 the same arithmetic loses
+    # about four more decimal digits than at zero. The scenario above has a
+    # third of a slice of headroom over `_MIN_WINDOW_SHARE`, which is many
+    # orders of magnitude more than that loss, and these pin that -- the
+    # flight count is decided by the budget arithmetic and not by where the
+    # host's clock happens to have been started. Each origin is a different
+    # exponent for that subtraction.
     clock = _VirtualClock(origin)
     fake = _TimedSock(
-        lambda f: _hvr() if len(f.sends) >= 2 else None, clock, overshoot=0.1)
+        _answers_from_the_retransmission, clock, overshoot=0.1)
     _patch_timed_sock(monkeypatch, fake, clock)
 
-    result = p.probe_dtls_port('127.0.0.1', 5684, retries=2, timeout=0.3)
+    result = p.probe_dtls_port('127.0.0.1', 5684, retries=3, timeout=0.4)
 
     assert result.response_kind == p.HELLO_VERIFY_REQUEST
     assert result.attempts == 2
