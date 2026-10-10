@@ -459,7 +459,7 @@ CoAP wire encoding/decoding (RFC 7252 + 7641 + 7959).
 #### `Block2Accumulator`
 
 ```python
-Block2Accumulator(token, *, max_blocks=32, max_payload_bytes=65536, accepted_content_formats=None)
+Block2Accumulator(token, *, max_blocks=64, max_payload_bytes=65536, accepted_content_formats=None)
 ```
 
 *class*: Bounded, token-stable Block2 representation accumulator.

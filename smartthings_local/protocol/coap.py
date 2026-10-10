@@ -44,11 +44,20 @@ OBSERVE_DEREGISTER = bytes([1])    # deregister
 # will honour and the only one the probes have validated end-to-end.
 BLOCK_SZX = 6
 
-# Shared bounds for callers that assemble untrusted Block2 responses.  Thirty-
-# two means exactly blocks 0..31; a response that advertises another block from
-# block 31 is rejected.  The payload cap applies to the fully assembled body.
-MAX_BLOCK2_BLOCKS = 32
+# Shared bounds for callers that assemble untrusted Block2 responses.  The
+# payload cap applies to the fully assembled body; the block count is that same
+# cap expressed in blocks of the size we ask for, so the two agree by
+# construction and neither can be reached before the other.  They disagreed
+# until #122, where a 34-block /device/0 batch was refused by a count of 32
+# while sitting well inside 64 KiB.  A count of N means exactly blocks 0..N-1;
+# a response that advertises another block from block N-1 is rejected.
+#
+# Deriving the count ties it to BLOCK_SZX: asking for smaller blocks would
+# raise it, since the bound being expressed is the assembled size rather than a
+# number of round trips.  A transfer that downshifts below BLOCK_SZX therefore
+# stops on the payload cap only if it is large, and on this count otherwise.
 MAX_BLOCK2_PAYLOAD_BYTES = 64 * 1024
+MAX_BLOCK2_BLOCKS = MAX_BLOCK2_PAYLOAD_BYTES // (1 << (BLOCK_SZX + 4))
 
 # ``classify_coap_response`` outcomes.  Strings keep the helper lightweight for
 # transports that already use their own event/state machinery.
@@ -361,7 +370,8 @@ def classify_coap_response(datagram, *, token=None, request_mid=None):
 class Block2Accumulator:
     """Bounded, token-stable Block2 representation accumulator.
 
-    At most ``max_blocks`` response blocks (32 by default) and
+    At most ``max_blocks`` response blocks (64 by default, which is the
+    default ``max_payload_bytes`` in blocks of the requested size) and
     ``max_payload_bytes`` assembled bytes (64 KiB by default) are accepted.
     Block offsets must remain contiguous.  A bounded SZX downshift is accepted
     because the appliance firmware may return the requested payload size while
