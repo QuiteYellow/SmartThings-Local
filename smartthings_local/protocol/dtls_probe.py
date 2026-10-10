@@ -49,6 +49,14 @@ from .endpoint import open_host_filtered_udp_socket
 # clear OpenSSL's queued shutdown rather than a whole flight.
 _SHUTDOWN_READ_SIZE = 4096
 
+# The least of a retransmission's nominal slice that still makes sending it
+# worthwhile. The caller sizes `timeout` for its own network, so this is a
+# share of that rather than a fixed number of milliseconds. For scale:
+# HelloVerifyRequest round trips to two Samsung appliances over Wi-Fi ran
+# 89-158 ms, medians 102 ms and 100 ms (24 probes, 2026-10-07), so a window
+# cut to a fraction of what the caller budgeted cannot carry a reply.
+_MIN_WINDOW_SHARE = 0.5
+
 # DTLS record content types (RFC 6347 §4.1)
 _CT_CHANGE_CIPHER_SPEC = 20
 _CT_ALERT = 21
@@ -307,7 +315,7 @@ def _classify_liveness_response(datagram):
 def _probe_dtls_port_with_flight(
         host, port, *, flight, timeout, retries, family):
     """Send one frozen ClientHello flight on a host-filtered UDP socket."""
-    attempt_budget = float(timeout) / (retries + 1)
+    nominal_budget = float(timeout) / (retries + 1)
     attempts = 0
     sock = None
     try:
@@ -315,14 +323,40 @@ def _probe_dtls_port_with_flight(
             host,
             port,
             family=family,
-            timeout=attempt_budget,
+            timeout=nominal_budget,
         )
         started = time.monotonic()
-        for attempts in range(1, retries + 2):
+        overall_deadline = started + float(timeout)
+        for attempt in range(1, retries + 2):
+            # Share what is left of `timeout` across the attempts that are
+            # left, rather than giving attempt N the fixed slice from
+            # `started + N * nominal_budget`. A read returns somewhat past
+            # the timeout it was given -- a UDP recvfrom here overshot a
+            # 100 ms timeout by a median 1.9 ms and up to 40 ms, idle or
+            # loaded (2026-10-07) -- and under fixed slices that overrun was
+            # taken out of the next attempt's window rather than absorbed.
+            # The overshoot is roughly constant while a slice is not, so a
+            # short `timeout`, or `retries` near its limit of four, makes a
+            # slice small enough for one overrun to consume it: the loop
+            # then sent a retransmission into a window of nanoseconds, read
+            # nothing, and needed a further flight to get the answer that
+            # was already due. Redistributing keeps every flight that is
+            # sent readable, without extending the bound `timeout`
+            # documents.
+            now = time.monotonic()
+            window = (overall_deadline - now) / (retries + 2 - attempt)
+            if attempt > 1 and window < nominal_budget * _MIN_WINDOW_SHARE:
+                # Too little of the slice survives to carry a reply, so this
+                # retransmission would cost the appliance a datagram for an
+                # answer that could not arrive in time. A stateless probe
+                # exists to keep exactly that off the device: stop, and
+                # report the attempts that carried a usable window.
+                break
+            attempt_deadline = now + window
+            attempts = attempt
             for record in flight:
                 if sock.send(record) != len(record):
                     raise OSError('short UDP send')
-            attempt_deadline = started + attempts * attempt_budget
             while True:
                 remaining = attempt_deadline - time.monotonic()
                 if remaining <= 0:
@@ -380,7 +414,11 @@ def probe_dtls_port(
     cannot emit a second ClientHello or allocate a server association.
 
     ``timeout`` bounds socket I/O after synchronous platform name resolution;
-    resolver timing remains controlled by the operating system.
+    resolver timing remains controlled by the operating system. ``retries``
+    is a ceiling: each attempt takes a share of what is left of ``timeout``,
+    and an attempt whose share is under half a nominal slice is dropped
+    rather than sent into a window too short to carry a reply, so a result
+    can report fewer ``attempts`` than ``retries + 1``.
     """
     _validate_liveness_options(port, retries, timeout, mtu)
     _validate_probe_family(family)
