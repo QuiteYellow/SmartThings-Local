@@ -6,7 +6,12 @@ recovered OwnerPSK identity containing a zero byte. See #115.
 
 Implements exactly the one ciphersuite these appliances offer for PSK, client
 side only. No X.509, no resumption, no renegotiation (the appliance disables
-it), no ciphersuite negotiation. Nothing imports this yet.
+it), no ciphersuite negotiation.
+
+This is live on the PSK path, not a spare part: `auth.py` imports
+`DtlsPskClient` and `PskAuth` builds one per connection, which is what
+`DtlsCoapSession.connect()` and the `dtls_probe` diagnostic get when the
+credential is a PSK. Read the timing note below with that in mind.
 
 Every wire decision below was read from the appliance firmware's own
 Mbed TLS 2.7.8 sources rather than from a specification. Line references are
@@ -654,11 +659,17 @@ class DtlsPskClient:
     ) -> bytes | None:
         if frag_off == 0 and len(body) == length:
             return body
-        if len(self._pending) > _MAX_PENDING_MESSAGES:
-            self._fail("too many incomplete handshake messages")
-            return None
         entry = self._pending.get(msg_seq)
         if entry is None or entry[0] != length:
+            # Only a fragment that opens a new msg_seq can grow the table, so
+            # only that one is capped. Guarding the whole function instead let
+            # the table reach _MAX_PENDING_MESSAGES + 1 under `>`, and would
+            # have failed a fragment of a message already being reassembled
+            # under `>=`. A length change on an existing msg_seq replaces its
+            # entry rather than adding one.
+            if entry is None and len(self._pending) >= _MAX_PENDING_MESSAGES:
+                self._fail("too many incomplete handshake messages")
+                return None
             entry = (length, bytearray(length), bytearray(length))
             self._pending[msg_seq] = entry
         _, buffer, seen = entry
@@ -835,11 +846,21 @@ class DtlsPskClient:
         return len(data)
 
     def recv(self, capacity: int = 65535) -> bytes:
-        """Return one decrypted application record."""
+        """Return one decrypted application record.
+
+        Buffered data is handed back before any failure or close is
+        reported. One call drains every queued datagram, so a reply and the
+        teardown that follows it can both be processed before the caller
+        sees either, and a reply that already authenticated is not the
+        caller's to lose. Both reference stacks get this for free by
+        processing one record per read: mbedtls_ssl_read returns after a
+        single mbedtls_ssl_read_record (ssl_tls.c:7261-7292), as does
+        OpenSSL, so neither can retract data it has already returned.
+
+        The failure is still raised, on the call after the buffer empties.
+        """
         if not self._appdata:
             self._drain_inbox()
-        if self._failed:
-            raise DtlsError(self._failed)
         if self._appdata:
             record = self._appdata.popleft()
             if len(record) > capacity:
@@ -847,6 +868,8 @@ class DtlsPskClient:
                 self._appdata.appendleft(record[capacity:])
                 return record[:capacity]
             return record
+        if self._failed:
+            raise DtlsError(self._failed)
         if self._peer_closed:
             raise ZeroReturn()
         raise WantRead()
