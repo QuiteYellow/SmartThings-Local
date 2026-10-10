@@ -63,6 +63,8 @@ from ..errors import BlockwiseError, MalformedMessageError
 from .coap import (
     BLOCK2_DUPLICATE,
     CF_CBOR,
+    MAX_BLOCK2_BLOCKS,
+    MAX_BLOCK2_PAYLOAD_BYTES,
     RESPONSE_MESSAGE,
     TYPE_CON,
     TYPE_NON,
@@ -82,9 +84,12 @@ __all__ = [
 _DISCOVERY_PORT = 5683
 _MAX_ENDPOINTS = 8
 _MAX_PORTS = 8
-_MAX_BLOCKS = 32
+# Both from coap, so the plaintext directory read is bounded exactly as a
+# session GET is. They were a local 32 and a local 65536 until #122 showed
+# the two disagreeing on the DTLS side.
+_MAX_BLOCKS = MAX_BLOCK2_BLOCKS
 _MAX_DATAGRAM_BYTES = 8192
-_MAX_PAYLOAD_BYTES = 65536
+_MAX_PAYLOAD_BYTES = MAX_BLOCK2_PAYLOAD_BYTES
 _MAX_LINKS = 256
 _MAX_ENDPOINT_URIS_PER_LINK = 32
 _MAX_REQUEST_OPTION_BYTES = 1024
