@@ -1,27 +1,33 @@
 """Washer descriptor (Samsung WW11DB7B34GWU3-class, DA_WM_TP1_21).
 
-Resource map captured 2026-07-02 with capture_resources.py — same
-DA_WM_TP1_21 platform as the dryer, so state/power/lock/remote/energy
-handling mirrors dryer.py. Washer-specific surfaces: water temperature,
-spin level and rinse cycles on /washer/vs/0 (each with a supported*
-list), cumulative water on /water/consumption/vs/0, and the course on
-/st/washercourse/vs/0.
-
-Course names: this washer reports Table_02, for which no code→name
-mapping has been captured yet (the dryer's Table_03 mapping came from
-dialing every course by hand). Until someone does the same here, the
-course is surfaced as the raw code, e.g. `Table_02_Course_1C`.
+Resource map captured 2026-07-02 with capture_resources.py. The
+operational-state, alarm, firmware and Wi-Fi handling is the dryer's,
+imported from dryer.py rather than copied, so a fix there reaches this
+class too: the remaining-time anchor and `finish_at`, the zeroed
+progress percentage while idle, and the alarm rule all come from there.
+Washer-specific surfaces: water temperature, spin level and rinse cycles
+on /washer/vs/0 (each with a supported* list), cumulative water on
+/water/consumption/vs/0, and the course on /st/washercourse/vs/0.
 
 Read-only for now: see WRITES_ENABLED.
 """
-import time
-
 from ..descriptor import (
+    WIFI_PATH,
+    WIFI_RSSI_SENSOR,
     ApplianceDescriptor,
     avail_base,
     avail_with_remote,
     device_block,
     encode,
+    wifi_rssi_dbm,
+)
+from .dryer import (
+    _SAMSUNG_STATE_TO_OCF,
+    _active_alarm_codes,
+    _int,
+    _num,
+    on_observation,
+    project,
 )
 from smartthings_local.ocf.poll_scheduler import PollTier
 
@@ -69,29 +75,69 @@ SPIN_LEVELS  = ['RinseHold', 'NoSpin', '400', '800', '1000', '1200', '1400']
 RINSE_CYCLES = ['0', '1', '2', '3', '4', '5']
 
 
-# --- Samsung-state → OCF currentMachineState ---------------------------
-_SAMSUNG_STATE_TO_OCF = {
-    'Ready':   'idle',
-    'Run':     'active',
-    'Running': 'active',
-    'Pause':   'pause',
-    'Paused':  'pause',
-    'End':     'idle',
+# --- Course table ------------------------------------------------------
+# Course names for Table_02, from LocalThings' `washer_cycle_table_02`
+# (custom_components/localthings/translations/en.json at
+# mbillow/localthings@0b268a9, MIT). They cross-checked it across several
+# Table_02 washers; the sources are listed in their
+# registry/capabilities/washer.py.
+#
+# Trimmed to the 23 courses this washer declares itself: the first byte
+# of each record in /course/vs/0 `supportedOptions` (washer-capture.json),
+# split at the width its header states, which is how LocalThings'
+# `_course_records` reads it. The codes are this washer's own; the names
+# are LocalThings', and only 0x1C ("Eco 40-60") has been seen selected
+# here. A code not in the table is published raw rather than given a
+# guessed name.
+COURSE_NAMES = {
+    'Table_02': {
+        0x1B: 'Cotton',
+        0x1C: 'Eco 40-60',
+        0x1D: 'Super Speed',
+        0x1E: "15' Quick Wash",
+        0x20: 'Hygiene Steam',
+        0x21: 'Colors',
+        0x22: 'Wool',
+        0x23: 'Outdoor',
+        0x24: 'Bedding',
+        0x25: 'Synthetics',
+        0x26: 'Delicates',
+        0x27: 'Rinse+Spin',
+        0x28: 'Drain/Spin',
+        0x29: 'Drum Clean+',
+        0x2D: 'Silent Wash',
+        0x2E: 'Baby Care',
+        0x2F: 'Activewear',
+        0x30: 'Cloudy Day',
+        0x32: 'Shirts',
+        0x33: 'Towels',
+        0x66: 'Denim',
+        0x8F: 'Intense Cold',
+        0x96: 'Less Microfiber',
+    },
 }
 
 
-def _num(v):
+def _decode_course(s):
+    """`Table_02_Course_1C` → `Eco 40-60`. Pass through verbatim if the
+    table or code isn't in the lookup."""
+    if not isinstance(s, str) or '_Course_' not in s:
+        return s
+    table_part, _, code_str = s.partition('_Course_')
+    table = COURSE_NAMES.get(table_part)
+    if not table:
+        return s
     try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
+        code = int(code_str, 16)
+    except ValueError:
+        return s
+    return table.get(code, s)
 
 
-def _int(v):
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return None
+# `progress` values this board declares in its own `supportedProgress`
+# list (washer-capture.json), with the firmware's literal "None" replaced
+# by the 'Idle' the bridge publishes. Used as the enum sensor's options.
+PROGRESS_OPTIONS = ('Idle', 'Weightsensing', 'Wash', 'Rinse', 'Spin', 'Finish')
 
 
 # --- flatten -----------------------------------------------------------
@@ -121,13 +167,19 @@ def flatten(links):
                      else g('/operational/state/0', 'currentMachineState'))
 
     progress = g('/operational/state/vs/0', 'x.com.samsung.da.progress')
-    job_state = progress or g('/operational/state/0', 'currentJobState')
     # HA's value_template treats the literal "None" as null (renders as
     # "Unknown"). Substitute something we can render verbatim.
-    if job_state in (None, 'None'):
-        job_state = 'Idle'
     if progress in (None, 'None'):
         progress = 'Idle'
+
+    # This board parks progressPercentage at "1" while Ready
+    # (washer-capture.json), as the dryer's does. It only means anything
+    # during a cycle.
+    progress_pct = _int(g('/operational/state/vs/0',
+                          'x.com.samsung.da.progressPercentage')
+                        or g('/operational/state/0', 'progressPercentage'))
+    if machine_state != 'active':
+        progress_pct = 0
 
     remaining = (g('/operational/state/vs/0',
                    'x.com.samsung.da.remainingTime')
@@ -148,18 +200,28 @@ def flatten(links):
     kids_bin  = (sam_kids != 'Ready') if sam_kids is not None else None
     rc_bin    = (str(sam_rc).lower() == 'true') if sam_rc is not None else None
 
+    # Empty `{}` at rest on this board (washer-capture.json).
+    alarm_code = _active_alarm_codes(g('/alarms/vs/0',
+                                       'x.com.samsung.da.items'))
+
+    fw_new = g('/otninformation/vs/0', 'x.com.samsung.da.newVersionAvailable')
+    fw_bin = (str(fw_new).lower() == 'true') if fw_new is not None else None
+
     return {
         'machine_state':         machine_state,
-        'job_state':             job_state,
         'progress':              progress,
-        'progress_percentage':   _int(g('/operational/state/vs/0',
-                                        'x.com.samsung.da.progressPercentage')
-                                       or g('/operational/state/0',
-                                            'progressPercentage')),
+        'progress_percentage':   progress_pct,
         'completion_time':       remaining,
         'completion_minutes':    rem_min,
         'delay_end_time':        g('/operational/state/vs/0',
                                    'x.com.samsung.da.delayEndTime'),
+        'alarm_code':            alarm_code,
+        'alarm_active':          alarm_code is not None,
+        # "Why did the cycle not start" — door open, no water, and so on.
+        # `None` on this board when nothing is wrong.
+        'job_beginning_status':  g('/wm/jobbeginingstatus/vs/0',
+                                   'x.com.samsung.da.currentStatus'),
+        'firmware_update_available': fw_bin,
         'power_state':           sam_power,
         'power_state_binary':    power_bin,
         'child_lock':            sam_kids,
@@ -172,53 +234,29 @@ def flatten(links):
         'energy_wh_cumulative':  int(cum_wh) if cum_wh is not None else None,
         'water_liters':          round(cum_water_ml / 1000.0, 1)
                                     if cum_water_ml is not None else None,
-        'washer_course':         g('/st/washercourse/vs/0',
-                                   'x.com.samsung.da.st.washerMode'),
+        'washer_course':         _decode_course(
+                                     g('/st/washercourse/vs/0',
+                                       'x.com.samsung.da.st.washerMode')),
         'water_temperature':     g('/washer/vs/0',
                                    'x.com.samsung.da.waterTemperature'),
         'spin_level':            g('/washer/vs/0',
                                    'x.com.samsung.da.spinLevel'),
         'rinse_cycles':          g('/washer/vs/0',
                                    'x.com.samsung.da.rinseCycles'),
-        'job_begin_status':      g('/wm/jobbeginingstatus/vs/0',
-                                   'x.com.samsung.da.currentStatus'),
         'diagnosis':             g('/diagnosis/vs/0',
                                    'x.com.samsung.da.diagnosisStart'),
         'country_code':          g('/configuration/vs/0',
                                    'x.com.samsung.da.countryCode'),
+        'wifi_rssi':             wifi_rssi_dbm(links),
     }
 
 
 # --- Remaining-time anchor + extrapolation ----------------------------
-# Same firmware behaviour as the dryer: /operational/state/vs/0 pushes
-# on state transitions but not on remainingTime ticks.
-
-def on_observation(state, href, rep):
-    if href != '/operational/state/vs/0':
-        return
-    rem = rep.get('x.com.samsung.da.remainingTime')
-    if not isinstance(rem, str):
-        return
-    try:
-        h, m, s = rem.split(':')
-        state['remaining_anchor'] = (time.time(),
-                                     int(h) * 3600 + int(m) * 60 + int(s))
-    except (ValueError, AttributeError):
-        pass
-
-
-def project(state, sensors):
-    anchor = state.get('remaining_anchor')
-    if sensors.get('machine_state') != 'active' or anchor is None:
-        return sensors
-    ts, total = anchor
-    remaining = max(0, int(total - (time.time() - ts)))
-    h, rest = divmod(remaining, 3600)
-    m, s = divmod(rest, 60)
-    sensors = dict(sensors)
-    sensors['completion_time'] = f"{h}:{m:02d}:{s:02d}"
-    sensors['completion_minutes'] = h * 60 + m + (1 if s > 0 else 0)
-    return sensors
+# on_observation and project are the dryer's, imported above: same
+# firmware behaviour (/operational/state/vs/0 pushes on transitions, not
+# on remainingTime ticks) and the same hot-poll cadence, so the same
+# anchor-on-change rule applies. They publish minute-resolution
+# completion fields plus `finish_at`, and drop the anchor at cycle end.
 
 
 # --- Log-line ----------------------------------------------------------
@@ -233,15 +271,22 @@ MODEL = 'OCF washer (TizenRT-iotivity)'
 
 # (key, friendly name, extra-config-dict)
 _SENSORS = [
-    ('machine_state',       'Machine state',       {'icon': 'mdi:washing-machine'}),
-    ('job_state',           'Job state',           {}),
-    ('progress',            'Progress',            {}),
+    ('machine_state',       'Machine state',
+        {'icon': 'mdi:washing-machine', 'device_class': 'enum',
+         'options': ['idle', 'active', 'pause']}),
+    ('progress',            'Progress',
+        {'device_class': 'enum', 'options': list(PROGRESS_OPTIONS)}),
     ('progress_percentage', 'Progress percent',
         {'unit_of_measurement': '%', 'state_class': 'measurement'}),
     ('completion_time',     'Completion time',     {'icon': 'mdi:timer-sand'}),
     ('completion_minutes',  'Remaining minutes',
         {'unit_of_measurement': 'min', 'device_class': 'duration',
          'state_class': 'measurement'}),
+    # Absolute finish time. HA renders a timestamp sensor as a live
+    # relative countdown; the fields above stay minute-resolution so
+    # they do not churn the recorder.
+    ('finish_at',           'Finishes at',
+        {'device_class': 'timestamp'}),
     ('delay_end_time',      'Delay end time',      {'icon': 'mdi:timer'}),
     ('power_state',         'Power state',         {}),
     ('power_watts',         'Power',
@@ -254,9 +299,15 @@ _SENSORS = [
         {'unit_of_measurement': 'L', 'device_class': 'water',
          'state_class': 'total_increasing'}),
     ('washer_course',       'Course',              {'icon': 'mdi:format-list-bulleted'}),
-    ('job_begin_status',    'Job begin status',    {}),
-    ('diagnosis',           'Diagnosis',           {}),
-    ('country_code',        'Country code',        {}),
+    ('alarm_code',          'Alarm code',
+        {'icon': 'mdi:alert', 'entity_category': 'diagnostic'}),
+    ('job_beginning_status', 'Job beginning status',
+        {'icon': 'mdi:play-circle-outline', 'entity_category': 'diagnostic'}),
+    ('diagnosis',           'Diagnosis',
+        {'entity_category': 'diagnostic'}),
+    ('country_code',        'Country code',
+        {'entity_category': 'diagnostic'}),
+    WIFI_RSSI_SENSOR,
 ]
 
 # The /washer/vs/0 settings as plain sensors, published in place of the
@@ -267,20 +318,26 @@ _SETTING_SENSORS = [
     ('rinse_cycles',      'Rinse cycles',      {'icon': 'mdi:water-sync'}),
 ]
 
-# (key, friendly name, value_template, device_class)
+# (key, friendly name, value_template, device_class, extras)
 _BINARY_SENSORS = [
     ('running', 'Running',
         "{{ 'ON' if value_json.machine_state == 'active' else 'OFF' }}",
-        'running'),
+        'running', {}),
     ('power_switch', 'Power switch',
         "{{ 'ON' if value_json.power_state_binary else 'OFF' }}",
-        'power'),
+        'power', {}),
     ('child_lock_active', 'Child lock',
         "{{ 'ON' if value_json.child_lock_binary else 'OFF' }}",
-        'lock'),
+        'lock', {}),
     ('remote_control_enabled', 'Remote control',
         "{{ 'ON' if value_json.remote_control_binary else 'OFF' }}",
-        'connectivity'),
+        'connectivity', {}),
+    ('alarm_active', 'Alarm active',
+        "{{ 'ON' if value_json.alarm_active else 'OFF' }}",
+        'problem', {}),
+    ('firmware_update_available', 'Firmware update available',
+        "{{ 'ON' if value_json.firmware_update_available else 'OFF' }}",
+        'update', {'entity_category': 'diagnostic'}),
 ]
 
 # MQTT command-topic suffixes. The bridge subscribes to <prefix>/cmd/#
@@ -339,7 +396,7 @@ def build_discovery(topic_prefix, ha_prefix, device_name):
         out.append((f"{ha_prefix}/sensor/{topic_prefix}/{key}/config",
                     encode(cfg)))
 
-    for key, name, template, dclass in _BINARY_SENSORS:
+    for key, name, template, dclass, extra in _BINARY_SENSORS:
         cfg = {
             'name':           name,
             'unique_id':      f"{topic_prefix}_{key}",
@@ -352,6 +409,7 @@ def build_discovery(topic_prefix, ha_prefix, device_name):
             'availability':   avail_base(avail_topic),
             'device':         dev,
         }
+        cfg.update(extra)
         out.append((f"{ha_prefix}/binary_sensor/{topic_prefix}/{key}/config",
                     encode(cfg)))
 
@@ -476,6 +534,14 @@ WASHER_POLL_TIERS = [
             ('water', 'consumption', 'vs', '0'),
             ('diagnosis', 'vs', '0'),
         ),
+    ),
+    # Off the /device/0 batch, so the sweep never refreshes it. Paced as
+    # a diagnostic, as on the dryer.
+    PollTier(
+        name='wifi',
+        interval_s=120.0,
+        timeout_s=6.0,
+        paths=(WIFI_PATH,),
     ),
     PollTier(
         name='sweep',
