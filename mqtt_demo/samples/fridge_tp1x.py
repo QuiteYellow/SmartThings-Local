@@ -9,9 +9,13 @@ extrapolation hooks.
 Temperatures are exposed twice by the firmware: OCF-standard numeric
 resources (/temperature/{current,desired}/{cooler,freezer}/0) and the
 Samsung items array on /temperatures/vs/0. Reads prefer the numeric OCF
-resources; setpoint WRITES go through the /temperatures/vs/0 items
-array read-modify-write, mirroring the oven's proven pattern (Samsung's
-write semantics on the items array are replace-not-merge).
+resources. Each carries its own unit (`units` on the OCF resource,
+`x.com.samsung.da.unit` on an item), and LocalThings found the same
+fields in °F on some fridges, so a reading is converted from the unit
+it states rather than assumed to be °C. Setpoint WRITES go through the
+/temperatures/vs/0 items array read-modify-write, mirroring the oven's
+proven pattern (Samsung's write semantics on the items array are
+replace-not-merge).
 
 Not the same class as fridge.py: that one is the older ARTIK051 family,
 with a different resource tree (/doors/vs/0, /mode/vs/0, /sabbath/vs/0)
@@ -71,6 +75,24 @@ def _num(v):
         return None
 
 
+def _to_celsius(value, unit):
+    """`value` in the unit the resource states → °C, or None.
+
+    'C'/'Celsius' and 'F'/'Fahrenheit' are the two spellings seen
+    (OCF `units` and the Samsung item's `unit`). A missing or other unit
+    gives None: HA's unit is fixed at discovery as °C, so publishing a
+    number in an unknown unit would be wrong without looking wrong."""
+    v = _num(value)
+    u = str(unit or '').strip().upper()
+    if v is None:
+        return None
+    if u.startswith('C'):
+        return v
+    if u.startswith('F'):
+        return round((v - 32) * 5 / 9, 1)
+    return None
+
+
 def _temps_item(links, description):
     """Find the /temperatures/vs/0 item with the given description
     ('Freezer' / 'Fridge'). Returns the item dict or None."""
@@ -89,11 +111,14 @@ def flatten(links):
     g = lambda href, k, default=None: (links.get(href) or {}).get(k, default)
 
     def temp(kind, side, description, field):
-        v = _num(g(f'/temperature/{kind}/{side}/0', 'temperature'))
+        rep = links.get(f'/temperature/{kind}/{side}/0') or {}
+        v = _to_celsius(rep.get('temperature'), rep.get('units'))
         if v is not None:
             return v
         item = _temps_item(links, description)
-        return _num(item.get(field)) if item else None
+        if not item:
+            return None
+        return _to_celsius(item.get(field), item.get('x.com.samsung.da.unit'))
 
     fridge_c         = temp('current', 'cooler',  'Fridge',  'x.com.samsung.da.current')
     fridge_target_c  = temp('desired', 'cooler',  'Fridge',  'x.com.samsung.da.desired')
@@ -116,11 +141,9 @@ def flatten(links):
 
     return {
         'fridge_temp_c':         fridge_c,
-        'fridge_target_c':       int(fridge_target_c)
-                                    if fridge_target_c is not None else None,
+        'fridge_target_c':       fridge_target_c,
         'freezer_temp_c':        freezer_c,
-        'freezer_target_c':      int(freezer_target_c)
-                                    if freezer_target_c is not None else None,
+        'freezer_target_c':      freezer_target_c,
         'door_cooler':           door_cooler,
         'door_freezer':          door_freezer,
         'any_door_open':         doors_open,
@@ -381,6 +404,12 @@ def command_handlers(state=None):
                 return None
             for it in items:
                 if it.get('x.com.samsung.da.description') == description:
+                    # The payload and bounds are °C. A board reporting
+                    # °F would read the same number as °F, so refuse
+                    # rather than convert a write nobody has measured.
+                    unit = str(it.get('x.com.samsung.da.unit') or '')
+                    if not unit.strip().upper().startswith('C'):
+                        return None
                     it['x.com.samsung.da.desired'] = str(temp)
                     break
             else:
