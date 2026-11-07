@@ -1,4 +1,5 @@
-"""Wi-Fi RSSI from /rm/wifi/vs/0, shared by the dryer and oven descriptors.
+"""Wi-Fi RSSI from /rm/wifi/vs/0, shared by the dryer, oven and washer
+descriptors.
 
 The two boards measured (docs/appliance-resources.md, 2026-09-18) report
 the same field in different shapes: the dryer wraps it in a one-element
