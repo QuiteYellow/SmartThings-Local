@@ -84,7 +84,10 @@ APPLIANCE_2_NAME=Samsung Oven
 ```
 
 Each `APPLIANCE_<n>_CLASS` must match a key in
-`mqtt_demo.samples.DESCRIPTORS`: currently `dryer`, `oven`, and `fridge`.
+`mqtt_demo.samples.DESCRIPTORS`: currently `dryer`, `oven`, `fridge`, `washer`,
+and `fridge_tp1x`. The last two are read-only for now; see `WRITES_ENABLED` in
+their modules. `fridge` is the older ARTIK051 family (`REF_17K`); pick
+`fridge_tp1x` for a fridge whose model string starts `TP1X_REF`.
 
 ---
 
@@ -251,7 +254,7 @@ Notes specific to this firmware family:
 | Key | Meaning |
 |---|---|
 | `APPLIANCE_COUNT` | Number of `APPLIANCE_<n>_*` blocks to read (1-indexed) |
-| `APPLIANCE_<n>_CLASS` | Descriptor name: `dryer`, `oven`, `fridge` |
+| `APPLIANCE_<n>_CLASS` | Descriptor name: `dryer`, `oven`, `fridge`, `washer`, `fridge_tp1x` |
 | `APPLIANCE_<n>_IP` | LAN IP of the appliance |
 | `APPLIANCE_<n>_OCF_PORT` | Optional. Blank → ask `/oic/res` on 5683 for the secure port, then fall back to sweeping standard 5684 and the dynamic range 49152–49160; every candidate is gated by a stateless ClientHello either way. Set it to pin and gate one specific port (dryer=49155, oven=49154, fridge=49155) |
 | `APPLIANCE_<n>_TOPIC` | MQTT topic prefix (also the HA device identifier; changing it re-keys the device) |

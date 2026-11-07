@@ -6,6 +6,20 @@ services:
     container_name: smartthings-local
     restart: unless-stopped
 
+    # The bridge logs to stdout only, so rotation is Docker's job, and
+    # the json-file driver's default is no limit at all unless the
+    # host's daemon.json sets one. A running cycle logs about a line a
+    # second (the projected countdown changes on every hot poll), and
+    # DEBUG_BRIDGE=1 logs every representation, so an unbounded log
+    # does fill a disk. 3 x 10 MB holds roughly a week at normal levels
+    # (an estimate from the log calls, not a measurement); raise
+    # max-size for longer. Applies when the container is recreated.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
     # Host networking, and it carries weight here beyond tidiness.
     # Docker's bridge NAT keys its conntrack entry on the port dialled, so
     # a reply arriving from any other port reads as an unrelated new
@@ -55,5 +69,13 @@ services:
     # All runtime config is in .env. env_file passes every variable
     # straight into the container, so adding a new appliance is a
     # .env edit only — no compose change.
+    #
+    # SMARTTHINGS_LOCAL_ENV_FILE moves that file out of the checkout.
+    # `--env-file` alone does not: it feeds the ${...} interpolation
+    # above but never reaches the container. Set this key inside the
+    # file you pass, and one flag drives both:
+    #   docker compose --env-file /opt/smartthings-local/bridge.env up -d
+    # Prefixed for the same reason as SMARTTHINGS_LOCAL_APPDATA_DIR: a
+    # shell-exported value wins over the file.
     env_file:
-      - .env
+      - ${SMARTTHINGS_LOCAL_ENV_FILE:-.env}

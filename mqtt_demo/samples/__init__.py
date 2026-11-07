@@ -13,6 +13,8 @@ from ..descriptor import ApplianceDescriptor
 from .dryer import DRYER
 from .oven import OVEN
 from .fridge import FRIDGE
+from .washer import WASHER
+from .fridge_tp1x import FRIDGE_TP1X
 
 
 
@@ -20,6 +22,8 @@ DESCRIPTORS: dict[str, ApplianceDescriptor] = {
     DRYER.name: DRYER,
     OVEN.name:  OVEN,
     FRIDGE.name: FRIDGE,
+    WASHER.name: WASHER,
+    FRIDGE_TP1X.name: FRIDGE_TP1X,
 }
 
 
