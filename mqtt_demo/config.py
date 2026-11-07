@@ -35,6 +35,25 @@ def _load_env_file(filename='.env'):
 _load_env_file('.env')
 
 
+_FRAGMENT_LENGTHS = (0, 512, 1024, 2048, 4096)
+
+
+def _fragment_length():
+    """Read DTLS_FRAGMENT_LENGTH, or 0 when it is unset.
+
+    A typo stops the process rather than silently reverting to a default
+    nobody asked for, which is the contract the other knobs here keep. Only
+    the four RFC 6066 sizes are offerable, so anything else is a typo even
+    when it parses as a number.
+    """
+    value = int(os.getenv('DTLS_FRAGMENT_LENGTH', '0'))
+    if value not in _FRAGMENT_LENGTHS:
+        raise ValueError(
+            'DTLS_FRAGMENT_LENGTH must be one of '
+            f'{_FRAGMENT_LENGTHS[1:]}, or 0 to leave it off')
+    return value
+
+
 def _resolve_cert(env_key, basename):
     """Cert lookup: explicit env > /config/<basename> (Docker mount) >
     ./certs/<basename> (bare-metal dev)."""
@@ -59,6 +78,7 @@ class SharedConfig:
     HEALTH_INTERVAL_S: int
     PING_INTERVAL_S: int
     WRITE_MAX_ATTEMPTS: int
+    DTLS_FRAGMENT_LENGTH: int
     CLOCK_SYNC_INTERVAL_H: float
 
     @classmethod
@@ -75,6 +95,13 @@ class SharedConfig:
             HEALTH_INTERVAL_S=int(os.getenv('HEALTH_INTERVAL_S', '60')),
             PING_INTERVAL_S=int(os.getenv('PING_INTERVAL_S', '25')),
             WRITE_MAX_ATTEMPTS=int(os.getenv('WRITE_MAX_ATTEMPTS', '1')),
+            # DTLS max_fragment_length to offer, or 0 to stay on pyOpenSSL.
+            # Non-zero routes the handshake through the package's own
+            # certificate engine, which is the only way to send the
+            # extension; see docs/certificates.md. Default 0, because these
+            # appliances complete a handshake without it and the engine has
+            # only met appliances that already worked.
+            DTLS_FRAGMENT_LENGTH=_fragment_length(),
             # Hours between appliance clock writes; 0 disables the sync
             # and its button. Only appliance classes whose descriptor
             # declares a clock_sync spec are affected.
