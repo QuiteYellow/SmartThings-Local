@@ -75,14 +75,18 @@ stateless DTLS probe before attempting authentication.
 
 ## Tested combinations
 
-| Appliance class | Model family | Confirmed |
-|---|---|---|
-| Washer | WW11DG (`DA_WM_TP2_20_COMMON`, `mnid=0AJT`) | All entities. Contributed by [@indykoning](https://github.com/indykoning) (PR #13); tested via [`mbillow/localthings`](https://github.com/mbillow/localthings) |
-| Dryer | DV5000T (`DA_WM_TP2_20_COMMON`, `mnid=0AJT`); DV90T (same `mnid=0AJT`) | All entities, ≤1s hot-tier poll (OBSERVE accelerates when online) |
-| Oven | NV7000BS-class (`TP1X_DA-KS-OVEN-0107X`, `mnid=0AJT`) | All entities; hot-tier poll covers door + operational state regardless of cloud reachability |
-| Fridge | ARTIK051_REF_17K (`DA-REF-ART-COMMON-1_20201124`) | Contributed by [@aminorjourney](https://github.com/aminorjourney) (PR #1). Older firmware family; port 49155, minimal `/oic/res` with full tree under `/device/0` |
+A captured resource map and a descriptor that has run against the appliance are two different things, so each row says which one it rests on.
 
-Other appliances on the same firmware family (dishwashers, AC units) almost certainly speak the same protocol: the auth path and read primitives are common, and a washer on the shared `DA_WM_TP2_20_COMMON` controller is already confirmed above. You'd write one new descriptor for the `localthings` registry.
+| Appliance class | Model family | Status |
+|---|---|---|
+| Washer (no descriptor here) | WW11DG (`DA_WM_TP2_20_COMMON`, `mnid=0AJT`) | All entities. Contributed by [@indykoning](https://github.com/indykoning) (PR #13); confirmed through [`mbillow/localthings`](https://github.com/mbillow/localthings), which is where that board's support lives |
+| Washer (`washer`) | WW11DB7B34GWU3-class (`DA_WM_TP1_21`) | Resource map captured on a live unit 2026-07-02 with `capture_resources.py`. Contributed by [@dalbrekt](https://github.com/dalbrekt) (PR #127). The descriptor has not itself run against the appliance; its tests pin the mapping on synthetic links. Ships read-only — no write has been sent through it. Course codes are `Table_02`, named from localthings' catalogue |
+| Dryer (`dryer`) | DV5000T (`DA_WM_TP2_20_COMMON`, `mnid=0AJT`); DV90T (same `mnid=0AJT`) | All entities, ≤1s hot-tier poll (OBSERVE accelerates when online) |
+| Oven (`oven`) | NV7000BS-class (`TP1X_DA-KS-OVEN-0107X`, `mnid=0AJT`) | All entities; hot-tier poll covers door + operational state regardless of cloud reachability |
+| Fridge (`fridge`) | ARTIK051_REF_17K (`DA-REF-ART-COMMON-1_20201124`) | Contributed by [@aminorjourney](https://github.com/aminorjourney) (PR #1). Older firmware family; port 49155, minimal `/oic/res` with full tree under `/device/0` |
+| Fridge (`fridge_tp1x`) | `TP1X_REF_21K`-class | Resource map captured on a live unit 2026-07-02 with `capture_resources.py`. Contributed by [@dalbrekt](https://github.com/dalbrekt) (PR #127). The descriptor has not itself run against the appliance. Ships read-only — the setpoint write follows the oven's items-array pattern and has not been sent to a fridge. Readings convert from the unit each resource states |
+
+Other appliances on the same firmware family (dishwashers, AC units) almost certainly speak the same protocol: the auth path and read primitives are common, and a washer on the shared `DA_WM_TP2_20_COMMON` controller is already confirmed above. What such an appliance needs is one new descriptor: in the `localthings` registry for production support, or here when it reaches a firmware family the samples do not.
 
 The Bespoke AI Laundry Combo `WD53DBA900HZ[A1]` on Tizen 7 software
 `20260416.215549` is a known OCF-PKI profile, but is not yet supported by the
@@ -97,4 +101,4 @@ Descriptors are firmware-family-specific. Each descriptor hardcodes the resource
 
 **What this means in practice:** if you set `APPLIANCE_<n>_CLASS=fridge` on a fridge that speaks a different firmware family than the one this descriptor was built for, the bridge will start and connect fine, but many sensors will publish as unknown and some controls won't work. Nothing catastrophic. You just get a half-broken HA device card.
 
-If your appliance model doesn't match a row in the tested table above, it may still work if it's on the same firmware family; otherwise you'd write a new descriptor (see "Adding a new appliance class" below). The ARTIK051 fridge and the newer RF9000B-class fridge, for example, expose different resource models (collection-resource vs per-instance-resource) and can't share a descriptor even though they're both "fridges".
+If your appliance model doesn't match a row in the tested table above, it may still work if it's on the same firmware family; otherwise you'd write a new descriptor (see ["Adding appliance support"](../README.md#adding-appliance-support) in the README). The ARTIK051 fridge and the newer RF9000B-class fridge, for example, expose different resource models (collection-resource vs per-instance-resource) and can't share a descriptor even though they're both "fridges".
