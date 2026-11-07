@@ -552,6 +552,12 @@ WASHER_POLL_TIERS = [
     ),
     # Off the /device/0 batch, so the sweep never refreshes it. Paced as
     # a diagnostic, as on the dryer.
+    #
+    # The resource is measured on the dryer and the oven, not on this
+    # board. It sits outside the batch, so the capture this descriptor
+    # was written from cannot show it either way. If this board does not
+    # carry it, the cost is one logged error per poll and an empty
+    # sensor.
     PollTier(
         name='wifi',
         interval_s=120.0,
