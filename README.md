@@ -711,10 +711,12 @@ mqtt_demo/                           MQTT bridge demo (consumes smartthings_loca
   descriptor.py                      ApplianceDescriptor dataclass + HA discovery helpers
   clock_sync.py                      Periodic appliance clock write (write-only resource, host-clock gated)
   samples/
-    __init__.py                      Sample DESCRIPTORS registry (frozen reference implementations)
+    __init__.py                      Sample DESCRIPTORS registry
     dryer.py                         Dryer descriptor (paths, flatten, discovery, commands)
     oven.py                          Oven descriptor
     fridge.py                        Fridge descriptor (ARTIK051 firmware family)
+    washer.py                        Washer descriptor (DA_WM_TP1_21; read-only)
+    fridge_tp1x.py                   Fridge descriptor (TP1X firmware family; read-only)
   Dockerfile                         Container build (python:3.11-slim + 3 deps)
   docker-compose.yml                 One service: smartthings-local
   deploy.sh                          tar + ssh + docker compose up --build
@@ -732,15 +734,11 @@ tests/                               pytest suite (CoAP wire, state cache, impor
 
 ## Adding appliance support
 
-The three descriptors in `mqtt_demo/samples/` (dryer, oven, fridge) are
-frozen reference implementations: enough to exercise both the newer
-Tizen RT 3.x family and the older ARTIK051 family, proving the
-`smartthings_local` library layers generalize across firmware generations.
-They are not updated for new appliance models.
+The descriptors in `mqtt_demo/samples/` are reference implementations. Between them they exercise TP2x- and TP1x-era boards and the older ARTIK051 family, which is how this demo shows the `smartthings_local` layers generalize across firmware generations. They are not a capability registry, and none of them is maintained against a model range.
 
-**To add support for a new appliance, submit it to
-[localthings](https://github.com/mbillow/localthings)**, which owns
-the capability registry and Home Assistant integration.
+A descriptor is welcome here when it reaches a firmware family or a wire behaviour the existing ones do not, because that is what makes it useful as a reference. `washer.py` and `fridge_tp1x.py` arrived that way, and both ship read-only: their write paths stay off until someone measures them on the hardware.
+
+**For production appliance support, use [localthings](https://github.com/mbillow/localthings)**, which owns the capability registry and the Home Assistant integration, and covers far more models than these samples.
 
 ---
 

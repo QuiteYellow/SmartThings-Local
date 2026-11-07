@@ -93,7 +93,7 @@ to issues [#16](https://github.com/QuiteYellow/SmartThings-Local/issues/16) and
 
 ## Firmware families: a limitation
 
-Descriptors are firmware-family-specific. Each descriptor hardcodes the resource layout of one firmware family: which hrefs it polls, which fields it reads, which write surfaces it exposes. There's no runtime feature detection. The three sample descriptors here (`mqtt_demo/samples/`) are frozen references.
+Descriptors are firmware-family-specific. Each descriptor hardcodes the resource layout of one firmware family: which hrefs it polls, which fields it reads, which write surfaces it exposes. There's no runtime feature detection. The sample descriptors here (`mqtt_demo/samples/`) are references for one family each, not a registry that adapts to a model.
 
 **What this means in practice:** if you set `APPLIANCE_<n>_CLASS=fridge` on a fridge that speaks a different firmware family than the one this descriptor was built for, the bridge will start and connect fine, but many sensors will publish as unknown and some controls won't work. Nothing catastrophic. You just get a half-broken HA device card.
 
