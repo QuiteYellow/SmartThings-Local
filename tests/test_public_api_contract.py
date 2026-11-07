@@ -299,6 +299,7 @@ def test_dtls_session_keeps_current_consumer_methods():
         "get",
         "join",
         "abort",
+        "negotiated_fragment_length",
         "pace",
         "ping",
         "post",

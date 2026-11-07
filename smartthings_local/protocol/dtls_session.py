@@ -47,6 +47,7 @@ from ..errors import (
     PeerInitiatedHandshakeError,
     SessionClosedError,
     SessionError,
+    FragmentLimitTimeoutError,
     SessionIdentifierError,
     SessionResetError,
     SessionTimeoutError,
@@ -56,6 +57,7 @@ from . import coap as _coap
 from .auth import (
     AuthenticationProvider,
     CertificateAuth,
+    _connection_factory,
     SamsungServerProfile,
     ServerCertificateAuth,
 )
@@ -744,18 +746,16 @@ class DtlsCoapSession:
         engine other than pyOpenSSL can be reached without an isinstance
         fork spreading through connect() and the reader loop.
 
-        A provider may carry a private ``_create_dtls_connection`` factory,
-        which owns its own engine and never sees an ``SSL.Context``. Found
-        by ``getattr`` rather than declared on ``AuthenticationProvider``:
-        that Protocol is ``runtime_checkable`` and ``__init__`` gates on
-        ``isinstance``, so a required method would reject every third-party
-        provider that has not grown one. A provider that deliberately
-        supplies the hook is therefore routed whether or not this package
-        ships it, which does not make it a supported public extension API --
-        a real one would be designed separately.
+        A provider may answer ``create_dtls_connection``, owning its own
+        engine and never seeing an ``SSL.Context``. That is
+        :class:`~smartthings_local.protocol.auth.DtlsConnectionProvider`, and
+        the connection it returns is
+        :class:`~smartthings_local.protocol.auth.DtlsConnection`. Both are
+        supported API; the private ``_create_dtls_connection`` this package
+        used first is still consulted, with a ``DeprecationWarning``.
 
-        The contract the hook has to meet, for anyone experimenting with
-        another engine:
+        The contract the connection has to meet, which those two types state
+        in full:
 
         - Return a fresh connection for this attempt, already in client
           state, with ``mtu`` applied.
@@ -772,7 +772,7 @@ class DtlsCoapSession:
         on a slow PEM read is not interrupted; what the checks guarantee is
         that no socket is created once cancellation is set.
         """
-        factory = getattr(self.auth, "_create_dtls_connection", None)
+        factory = _connection_factory(self.auth)
         if factory is not None:
             conn = factory(mtu=self.mtu)
             if self._lifecycle_cancel.is_set() or \
@@ -1963,7 +1963,7 @@ class DtlsCoapSession:
                 # owns the session before sending.
                 self._check_live()
                 if time.monotonic() >= deadline:
-                    raise SessionTimeoutError()
+                    raise self._read_timeout(num)
                 self._send_dgram(datagram)
                 while True:
                     with self._state_lock:
@@ -1990,7 +1990,7 @@ class DtlsCoapSession:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         if acknowledged:
-                            raise SessionTimeoutError()
+                            raise self._read_timeout(num)
                         break
                     per_wait = (
                         remaining if acknowledged
@@ -1998,7 +1998,7 @@ class DtlsCoapSession:
                     )
                     if not self._wait_live(ev, per_wait):
                         if acknowledged:
-                            raise SessionTimeoutError()
+                            raise self._read_timeout(num)
                         break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or attempt == _BLOCK_MAX_ATTEMPTS - 1:
@@ -2006,7 +2006,7 @@ class DtlsCoapSession:
                         "GET %s /%s block %d: timed out after %d attempt(s)",
                         self.host, '/'.join(path_segs), num, attempt + 1,
                     )
-                    raise SessionTimeoutError()
+                    raise self._read_timeout(num)
                 logger.debug(
                     "GET %s /%s block %d: attempt %d/%d timeout, retrying",
                     self.host, '/'.join(path_segs), num,
@@ -2014,7 +2014,37 @@ class DtlsCoapSession:
                 )
         finally:
             self._unregister_pending_request(tok, mid, exchange)
-        raise SessionTimeoutError()
+        raise self._read_timeout(num)
+
+    @property
+    def negotiated_fragment_length(self):
+        """The DTLS fragment length in force, or None.
+
+        None covers three different situations and deliberately does not
+        separate them: no session, an engine that cannot negotiate a length,
+        and a server that declined to echo one. A caller that needs to know
+        which asks before connecting.
+
+        These appliances cannot send a record larger than a negotiated length,
+        so this is the ceiling on any single representation a read can return.
+        """
+        connection = self.conn
+        if connection is None:
+            return None
+        return getattr(connection, "negotiated_fragment_length", None)
+
+    def _read_timeout(self, block_number):
+        """Return the error for a read that gave up, typed where it can be.
+
+        A first block that drew nothing, with a fragment length in force, is
+        the shape of a representation the appliance cannot send at all. A later
+        block means blocks were arriving, so the deadline was the binding
+        constraint and the plain timeout is the honest answer.
+        """
+        limit = self.negotiated_fragment_length
+        if limit is not None and not block_number:
+            return FragmentLimitTimeoutError(limit)
+        return SessionTimeoutError()
 
     def _wait_live(self, ev, per_wait):
         """Wait for one response, giving up early if the reader dies

@@ -40,7 +40,13 @@ from dataclasses import dataclass
 from OpenSSL import SSL
 
 from ..errors import ProbeError
-from .auth import PskAuth, _DTLS_CIPHERS, _OCF_ROOT_CA, _load_pem_chain
+from .auth import (
+    PskAuth,
+    _connection_factory,
+    _DTLS_CIPHERS,
+    _OCF_ROOT_CA,
+    _load_pem_chain,
+)
 from .coap import split_dtls
 from .dtls_handshake import _drive_dtls_handshake, _validate_mtu
 from .endpoint import open_host_filtered_udp_socket
@@ -835,7 +841,7 @@ def _diagnostic_connection(
     alert rather than a local verdict, and an engine with no X.509 reaches
     that by construction instead of by re-asserting accept-any.
     """
-    factory = getattr(auth, "_create_dtls_connection", None)
+    factory = _connection_factory(auth)
     if factory is not None:
         return factory(mtu=mtu)
 

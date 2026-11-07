@@ -105,6 +105,40 @@ class HandshakePeerCleanupError(SessionTimeoutError):
     message = 'handshake peer cleanup was sent'
 
 
+class FragmentLimitTimeoutError(SessionTimeoutError):
+    """A read gave up on its first block while a fragment length was in force.
+
+    These appliances cannot send a record larger than a negotiated
+    `max_fragment_length`, so a resource whose representation exceeds it never
+    arrives at all. Reported on mbillow/localthings#504 by @fredrikbae, who
+    measured it on a TP1X board: the response never comes and the session is
+    unusable afterwards.
+
+    **This names the conditions, not a proven cause.** What the library knows
+    is that the first block of the transfer drew nothing and that a fragment
+    length was negotiated. An appliance that has powered its radio down
+    produces the same silence. What separates the two is whether other, smaller
+    resources on the same device still answer, and that is the caller's to
+    decide -- which is the reason this carries the limit rather than asserting
+    the reason.
+
+    A timeout on a later block stays an ordinary :class:`SessionTimeoutError`:
+    blocks were arriving, so the representation fits and the deadline was the
+    binding constraint.
+
+    Subclasses :class:`SessionTimeoutError`, so existing handlers are
+    unaffected.
+    """
+
+    code = 'fragment_limit_timeout'
+    message = 'first block drew nothing under a negotiated fragment length'
+
+    def __init__(self, fragment_length=None):
+        super().__init__()
+        #: The negotiated length in bytes, or None when it was unavailable.
+        self.fragment_length = fragment_length
+
+
 class SessionClosedError(SessionError):
     """An operation was attempted on a closed session."""
 
