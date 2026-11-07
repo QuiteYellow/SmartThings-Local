@@ -340,6 +340,17 @@ _BINARY_SENSORS = [
         'update', {'entity_category': 'diagnostic'}),
 ]
 
+# Discovery topics this descriptor published before the rebase onto the
+# current dryer, and no longer does. An empty retained payload on each
+# tells HA to remove the entity; without it the broker keeps serving the
+# old config forever. No release ever carried them, so this reaches only
+# an install that ran the branch.
+# (platform, key)
+_RETIRED = [
+    ('sensor', 'job_state'),          # duplicated `progress`
+    ('sensor', 'job_begin_status'),   # renamed `job_beginning_status`
+]
+
 # MQTT command-topic suffixes. The bridge subscribes to <prefix>/cmd/#
 # and dispatches by suffix.
 CMD_OPERATIONAL  = 'cmd/operational_state'
@@ -412,6 +423,10 @@ def build_discovery(topic_prefix, ha_prefix, device_name):
         cfg.update(extra)
         out.append((f"{ha_prefix}/binary_sensor/{topic_prefix}/{key}/config",
                     encode(cfg)))
+
+    # Before the early return below, so a read-only build clears these too.
+    for platform, key in _RETIRED:
+        out.append(_retire(ha_prefix, topic_prefix, platform, key))
 
     if not WRITES_ENABLED:
         for key, *_ in _BUTTONS:

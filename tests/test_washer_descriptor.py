@@ -51,6 +51,17 @@ def test_writable_discovery_retires_setting_sensors():
         assert disc[f'homeassistant/select/wm/{key}/config'] != b''
 
 
+def test_discovery_retires_the_renamed_sensors():
+    """`job_state` and `job_begin_status` were published before the
+    rebase onto the current dryer. An install that ran that revision
+    keeps both entities until the retained config is cleared, so the
+    clearing has to happen in either write mode."""
+    for writes in (False, True):
+        disc = _discovery(writes=writes)
+        for key in ('job_state', 'job_begin_status'):
+            assert disc[f'homeassistant/sensor/wm/{key}/config'] == b''
+
+
 def test_flatten():
     s = washer.flatten({
         '/operational/state/vs/0': {'x.com.samsung.da.state': 'Run',
