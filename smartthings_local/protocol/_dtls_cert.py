@@ -103,8 +103,15 @@ _HASHES = {2: hashes.SHA1, 4: hashes.SHA256, 5: hashes.SHA384, 6: hashes.SHA512}
 _SIG_RSA = 1
 _SIG_ECDSA = 3
 
-# RFC 6066 section 4. 512 is the smallest offer and the one measured to move
-# these appliances' flight under the MTU.
+# RFC 6066 section 4, and the default is a ceiling rather than a floor.
+#
+# A negotiated length has to be small enough that the appliance's own flight
+# fits one Ethernet frame, which is the fault being fixed, and as large as
+# possible because the same length caps every response it can send. Measured
+# by @fredrikbae on a TP1X board (mbillow/localthings#504): offering 512 drew
+# a largest datagram of 525 B and offering 1024 drew 1037 B, both inside the
+# MTU, while 2048 would put it past. So 1024 is the largest workable value and
+# 512 only halves the response budget.
 _MFL_CODES = {512: 1, 1024: 2, 2048: 3, 4096: 4}
 
 # A chain longer than this is a peer wasting our memory, not an appliance.
@@ -185,7 +192,9 @@ class DtlsCertClient(_DtlsClientBase):
 
     `max_fragment_length` is the whole reason this engine exists. None omits
     the extension, which is the behaviour that drops #20's appliances off the
-    network.
+    network. The default is the largest value that still keeps the appliance's
+    flight inside one frame, because the same figure caps every response it can
+    send back.
     """
 
     def __init__(
@@ -194,7 +203,7 @@ class DtlsCertClient(_DtlsClientBase):
         private_key,
         *,
         mtu: int = 1400,
-        max_fragment_length: int | None = 512,
+        max_fragment_length: int | None = 1024,
         verify_peer_chain=None,
     ) -> None:
         if not isinstance(chain_der, (list, tuple)) or not chain_der:

@@ -55,3 +55,43 @@ A completed handshake does not prove the certificate authorized, because these a
 Rotating the published UUID would require coordinated cloud certificate, ACL, and device identity changes across the compatible firmware families. `AC14K_M` has been public for years and remains accepted by the appliances listed in [docs/appliance-compatibility.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/appliance-compatibility.md), but it is already rejected by other 2026 appliance profiles. Do not extrapolate this certificate path to an untested model.
 
 > **Legacy path:** earlier versions used a per-hub-UUID cert via an anonymous `/oic/sec/doxm` read escalation. That still works on the dryer-family firmware but isn't necessary: the cert minted here authenticates against the compatible families above, and survives device resets. The old `bootstrap.py` for the legacy flow was removed when the package was renamed; see git history if you need it.
+
+## Appliances that drop off the network during the handshake
+
+Some units leave the network for about ten seconds whenever they have to put a handshake flight on the wire that will not fit one Ethernet frame. Their own flight is that size, so they never finish a handshake, and the logs stay silent about why: the client records a timeout while the appliance's smart-connect indicator blinks. This is [issue #20](https://github.com/QuiteYellow/SmartThings-Local/issues/20) and [mbillow/localthings#504](https://github.com/mbillow/localthings/issues/504), four appliances between them.
+
+A client can steer around it. DTLS carries a `max_fragment_length` extension, and a unit that honours it splits its flight at the DTLS layer, so every datagram stays inside one frame. Measured on both appliances on issue #20 on 2026-10-25: each probe that omitted the extension took the unit off the network for nine to ten seconds, and both probes that offered it drew the appliance's whole flight with no loss.
+
+`openssl s_client` sends the extension with `-maxfraglen`, so OpenSSL itself supports it. The Python bindings are where it stops. `cryptography` publishes neither `SSL_CTX_set_tlsext_max_fragment_length` nor the `SSL_CTX_ctrl` that macro goes through, and it links OpenSSL statically with those symbols hidden, so there is no route to them from `pyOpenSSL` either.
+
+Hence a DTLS client belonging to this package, which `FragmentingCertificateAuth` carries:
+
+```python
+from smartthings_local.protocol.auth import FragmentingCertificateAuth
+
+auth = FragmentingCertificateAuth.from_files("client.pem", "client.key")
+```
+
+Add `server_profile=SamsungServerProfile.bound_device(certificate_uuid)` when you hold the appliance's hardware leaf UUID and want it pinned.
+
+Three things to know before choosing it.
+
+*Opt-in only.* Nothing in this package selects this provider, and the usual certificate path still runs on pyOpenSSL. The engine has met no appliance yet. It is tested against OpenSSL acting as the server, on the dependency floor and on current, which is weaker evidence than hardware.
+
+*A server profile is optional, as it is on `CertificateAuth`.* Without one, the peer's chain is verified against the bundled OCF root and nothing further is pinned, which is what the pyOpenSSL path does with a profileless context. With one, the profile's role, subject and UUID checks apply on top. Nothing per-appliance is needed either way: the client certificate's own subject UUID is a constant that does not rotate, and a profile pins the appliance's hardware leaf UUID, which is a separate identity and differs between units.
+
+*Only the carrier changes.* Trust still rests on the bundled OCF root plus any extra CA the profile holds, and the leaf must satisfy the same role, subject and UUID checks. The engine restates none of those rules; it calls the profile and acts on the verdict.
+
+An appliance that already finishes a handshake gains nothing from this provider. It is for the units that stall.
+
+## What an integration needs from the library
+
+Three pieces of supported API come with the engine, for a Home Assistant integration or anything else driving it.
+
+**`DtlsConnectionProvider`** is the seam. A credential whose carrier is not pyOpenSSL answers `create_dtls_connection(*, mtu)` and returns a `DtlsConnection`; `DtlsCoapSession` and `diagnose_dtls_handshake` use it in place of building a context. Both types are in `docs/api.md`, and `DtlsConnection` states the whole surface the library drives, which is eight methods. An earlier private spelling, `_create_dtls_connection`, is still consulted and raises a `DeprecationWarning`.
+
+**`DtlsCoapSession.negotiated_fragment_length`** reports the limit in force, or `None`. Because these appliances cannot send a record larger than a negotiated length, this is the ceiling on any single representation a read can return. Check it before reading a resource you expect to be large, since the read will otherwise stall at its first block.
+
+**`FragmentLimitTimeoutError`** is raised when a read gives up on its *first* block while a fragment length is in force. It subclasses `SessionTimeoutError`, so existing handlers are unaffected, and it carries `.fragment_length`.
+
+That last one establishes exactly one thing: the first block drew nothing while a limit was negotiated. An appliance that has powered its radio down produces the same silence, so the error names the conditions rather than proving a cause. What separates the two is whether smaller resources on the same device still answer, and that is the caller's to decide. A timeout on a later block stays an ordinary `SessionTimeoutError`, because blocks were arriving and the deadline was the binding constraint.
