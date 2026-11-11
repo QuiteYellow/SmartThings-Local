@@ -1,9 +1,13 @@
-"""Per-call Block2 byte cap on DtlsCoapSession.get().
+"""Per-call Block2 caps on DtlsCoapSession.get().
 
-get() takes ``max_payload_bytes`` for a single large read the caller asked
-for. ``None`` keeps the cap every other read gets. The block count stays at
-the session's ``MAX_BLOCKS``, so the default caps still refuse a transfer of
-more than 64 blocks whatever the byte cap is.
+get() takes ``max_payload_bytes`` and ``max_blocks`` for a single large read
+the caller asked for. ``None`` keeps the caps every other read gets, and the
+two are independent: either one ends a transfer on its own.
+
+The small-block cases model a server that answers block 0 at the 1024 bytes
+requested while advertising a smaller SZX, then serves the rest at that size.
+At 64-byte blocks the default block count is reached at about 5 KB, far
+inside the default byte cap, which is why the block count is a parameter too.
 """
 
 from __future__ import annotations
@@ -130,7 +134,7 @@ def test_explicit_none_is_the_default():
     session, sent, _tokens = _serve(_body(MAX_BLOCK2_PAYLOAD_BYTES + 1))
 
     with pytest.raises(BlockwiseError):
-        _get(session, max_payload_bytes=None)
+        _get(session, max_payload_bytes=None, max_blocks=None)
     assert len(sent) == MAX_BLOCK2_BLOCKS
 
 
@@ -166,6 +170,52 @@ def test_max_payload_bytes_alone_stops_at_the_default_block_cap():
     assert len(sent) == MAX_BLOCK2_BLOCKS
 
 
+def test_max_blocks_alone_completes_a_small_block_transfer():
+    blocks = 4 * MAX_BLOCK2_BLOCKS
+    body = _small_block_body(blocks)
+    assert len(body) < MAX_BLOCK2_PAYLOAD_BYTES
+    session, sent, _tokens = _serve(body, szx=_SMALL_SZX)
+
+    assert _get(session, max_blocks=blocks) == (0x45, body)
+    assert len(sent) == blocks
+
+
+def test_max_blocks_alone_leaves_the_default_byte_cap_in_place():
+    # Enough blocks allowed, but the body is over 64 KiB.
+    body = _body(MAX_BLOCK2_PAYLOAD_BYTES + _LARGE)
+    session, _sent, _tokens = _serve(body)
+
+    with pytest.raises(BlockwiseError):
+        _get(session, max_blocks=4 * MAX_BLOCK2_BLOCKS)
+
+
+# ---- both raised -----------------------------------------------------------
+
+
+def test_both_raised_complete_a_transfer_over_both_default_caps():
+    blocks = 2 * MAX_BLOCK2_BLOCKS
+    body = _body(blocks * _LARGE)
+    assert len(body) > MAX_BLOCK2_PAYLOAD_BYTES
+    session, sent, _tokens = _serve(body)
+
+    assert _get(
+        session, max_payload_bytes=len(body), max_blocks=blocks,
+    ) == (0x45, body)
+    assert len(sent) == blocks
+
+
+def test_both_raised_complete_a_large_small_block_transfer():
+    blocks = (MAX_BLOCK2_PAYLOAD_BYTES * 2 - _LARGE) // _SMALL + 1
+    body = _small_block_body(blocks)
+    assert len(body) == 2 * MAX_BLOCK2_PAYLOAD_BYTES
+    session, sent, _tokens = _serve(body, szx=_SMALL_SZX)
+
+    assert _get(
+        session, max_payload_bytes=len(body), max_blocks=blocks,
+    ) == (0x45, body)
+    assert len(sent) == blocks
+
+
 # ---- caps set below what the transfer needs --------------------------------
 
 
@@ -176,6 +226,22 @@ def test_max_payload_bytes_below_the_transfer_fails_like_the_default():
     with pytest.raises(BlockwiseError):
         _get(session, max_payload_bytes=len(body) - 1)
     assert len(sent) == 3
+
+
+def test_max_blocks_below_the_transfer_fails_like_the_default():
+    body = _small_block_body(10)
+    session, sent, _tokens = _serve(body, szx=_SMALL_SZX)
+
+    with pytest.raises(BlockwiseError):
+        _get(session, max_blocks=9)
+    assert len(sent) == 9
+
+
+def test_max_blocks_equal_to_the_transfer_is_enough():
+    body = _small_block_body(10)
+    session, _sent, _tokens = _serve(body, szx=_SMALL_SZX)
+
+    assert _get(session, max_blocks=10) == (0x45, body)
 
 
 # ---- subclass override -----------------------------------------------------
@@ -203,6 +269,13 @@ def test_subclass_max_blocks_applies_when_only_bytes_are_raised():
     assert len(sent) == 8
 
 
+def test_explicit_max_blocks_overrides_the_subclass():
+    body = _body(9 * _LARGE)
+    session, _sent, _tokens = _serve(body, session_cls=_EightBlockSession)
+
+    assert _get(session, max_blocks=9) == (0x45, body)
+
+
 # ---- validation ------------------------------------------------------------
 
 
@@ -215,7 +288,7 @@ _INVALID = [
 ]
 
 
-@pytest.mark.parametrize("name", ["max_payload_bytes"])
+@pytest.mark.parametrize("name", ["max_payload_bytes", "max_blocks"])
 @pytest.mark.parametrize("value, error", _INVALID)
 def test_invalid_cap_raises_before_anything_is_sent(name, value, error):
     body = _body(2 * _LARGE)
@@ -242,6 +315,19 @@ def test_raised_caps_do_not_outlive_the_call():
 
 
 # ---- ETag restart ----------------------------------------------------------
+
+
+def test_etag_restart_uses_the_callers_block_cap():
+    blocks = 2 * MAX_BLOCK2_BLOCKS
+    body = _small_block_body(blocks)
+    session, sent, tokens = _serve(
+        body, szx=_SMALL_SZX, etag_change_on_first_token=True)
+
+    assert _get(session, max_blocks=blocks) == (0x45, body)
+    # The first transfer stopped at block 1 on the ETag change; the second
+    # ran to the end under a fresh token, past the default block cap.
+    assert len(tokens) == 2
+    assert len(sent) == 2 + blocks
 
 
 def test_etag_restart_with_default_caps_still_hits_the_block_cap():
