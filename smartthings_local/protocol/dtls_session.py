@@ -350,6 +350,17 @@ def _validated_observe_query_overrides(queries_by_href, target_hrefs):
     return result
 
 
+def _validated_block2_limit(value, *, name):
+    """Return a per-call Block2 cap, or None to keep the default."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f'{name} must be a positive integer or None')
+    if value <= 0:
+        raise ValueError(f'{name} must be a positive integer or None')
+    return value
+
+
 def _validated_extra_options(extra_options):
     """Return bounded, ordered options not owned by the request methods."""
     if isinstance(extra_options, (str, bytes, bytearray, memoryview)):
@@ -1825,7 +1836,8 @@ class DtlsCoapSession:
 
     # ---- request primitives ------------------------------------------
 
-    def get(self, path_segs, query=(), timeout=10.0, *, extra_options=()):
+    def get(self, path_segs, query=(), timeout=10.0, *, extra_options=(),
+            max_payload_bytes=None):
         """Token-stable Block2 GET. Returns (code, payload_bytes).
 
         Reuses one CoAP token across every block of a multi-block
@@ -1836,19 +1848,34 @@ class DtlsCoapSession:
         Requests ask with Accept 60 (``application/cbor``) and ``ACCEPT``
         is a managed option, so ``extra_options`` cannot select another
         dialect. The appliances measured here decline Accept 10000 with
-        4.06, so that is a deliberate closure and not a gap."""
+        4.06, so that is a deliberate closure and not a gap.
+
+        ``max_payload_bytes`` raises the assembled-payload cap for this
+        call only. ``None``, the default, keeps the cap every other read
+        gets (``MAX_BLOCK2_PAYLOAD_BYTES``). It is for a large read the
+        caller asked for, such as a file transfer, and not for polling.
+
+        The block count stays at ``MAX_BLOCKS``, which is the default
+        byte cap in 1024-byte blocks, so carrying a transfer past 64 KiB
+        also needs a subclass that raises ``MAX_BLOCKS``. A value that is
+        not a positive ``int`` raises ``TypeError`` or ``ValueError``
+        before anything is sent."""
         self._check_live()
         path_segs = _validated_text_options(
             path_segs, name='path_segs', allow_empty=False)
         query = _validated_text_options(
             query, name='query', allow_empty=False)
         extra_options = _validated_extra_options(extra_options)
+        max_payload_bytes = _validated_block2_limit(
+            max_payload_bytes, name='max_payload_bytes')
         code, blob, _blocks, _tok = self._blockwise_get(
-            path_segs, query, timeout, extra_options=extra_options)
+            path_segs, query, timeout, extra_options=extra_options,
+            max_payload_bytes=max_payload_bytes)
         return code, blob
 
     def _blockwise_get(
-            self, path_segs, query=(), timeout=10.0, *, extra_options=()):
+            self, path_segs, query=(), timeout=10.0, *, extra_options=(),
+            max_payload_bytes=None):
         """Shared token-stable Block2 reassembly (RFC 7959 §2.4).
 
         Returns (code, payload, block_count, token). The last two are
@@ -1865,16 +1892,22 @@ class DtlsCoapSession:
         Restarts once if the server's ETag changes mid-transfer, then
         gives up: RFC 7959 §2.4 requires the client to compare ETags
         when the server supplies them. None of the tested appliances
-        emit option 4, so on those this is inert."""
+        emit option 4, so on those this is inert.
+
+        ``max_payload_bytes`` is get()'s per-call cap, already validated;
+        ``None`` keeps the default. The restart uses the same cap as the
+        first attempt."""
         try:
             return self._blockwise_get_once(
-                path_segs, query, timeout, extra_options)
+                path_segs, query, timeout, extra_options,
+                max_payload_bytes)
         except _EtagChanged:
             logger.debug("GET %s /%s: ETag changed mid-transfer, restarting",
                          self.host, '/'.join(path_segs))
         try:
             return self._blockwise_get_once(
-                path_segs, query, timeout, extra_options)
+                path_segs, query, timeout, extra_options,
+                max_payload_bytes)
         except _EtagChanged:
             logger.debug(
                 "GET %s /%s: representation kept changing mid-transfer",
@@ -1882,11 +1915,16 @@ class DtlsCoapSession:
             raise BlockwiseError() from None
 
     def _blockwise_get_once(
-            self, path_segs, query, timeout, extra_options):
+            self, path_segs, query, timeout, extra_options,
+            max_payload_bytes=None):
         """One attempt at a full Block2 transfer. Raises _EtagChanged if
         the server's representation changed while we were reassembling."""
         tok = self._next_tok()
-        accumulator = Block2Accumulator(tok, max_blocks=self.MAX_BLOCKS)
+        limits = {}
+        if max_payload_bytes is not None:
+            limits['max_payload_bytes'] = max_payload_bytes
+        accumulator = Block2Accumulator(
+            tok, max_blocks=self.MAX_BLOCKS, **limits)
         etag = None
         deadline = time.monotonic() + timeout
         while not accumulator.complete:
