@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import ExtensionOID
 from OpenSSL import SSL, _util, crypto
 
-from ._dtls_cert import DtlsCertClient
+from ._dtls_cert import DtlsCertClient, _validate_max_fragment_length
 from ._dtls_psk import DtlsPskClient
 
 logger = logging.getLogger(__name__)
@@ -81,8 +81,11 @@ def _connection_factory(auth):
     """Return a provider's connection factory, or None.
 
     Prefers the supported :meth:`DtlsConnectionProvider.create_dtls_connection`
-    and falls back to the private name this package used before it, warning
-    once per provider class. The fallback exists because a downstream
+    and falls back to the private name this package used before it, with a
+    ``FutureWarning``. That category, unlike ``DeprecationWarning``, is shown
+    by the default filters whatever frame it is attributed to, and the frame
+    here is package code. The default filters also show it once per call
+    site, not once per provider class. The fallback exists because a downstream
     integration shipped against the private hook and runs in production; that
     is exactly the fragility making it public is meant to end, so breaking it
     in the same release would be a strange way to fix it.
@@ -97,7 +100,7 @@ def _connection_factory(auth):
         f"{type(auth).__name__} supplies {_LEGACY_CONNECTION_HOOK}, which was "
         "never supported API. Rename it to create_dtls_connection and declare "
         "DtlsConnectionProvider; the private name will stop being consulted.",
-        DeprecationWarning,
+        FutureWarning,
         stacklevel=3,
     )
     return legacy
@@ -703,8 +706,10 @@ class FragmentingCertificateAuth(CertificateAuth):
     to pin rather than to this constructor.
 
     Nothing in this package selects this provider. A caller opts in, which is
-    deliberate: the default certificate path stays on pyOpenSSL until this
-    engine has met an appliance.
+    deliberate. On 2026-10-26 the engine completed handshakes on a Samsung
+    dryer and oven, with and without a fragment length. Both of those
+    appliances already work on pyOpenSSL, so the units that stall, which are
+    the reason for this provider, are still untested with it.
     """
 
     __slots__ = ("_max_fragment_length",)
@@ -726,6 +731,9 @@ class FragmentingCertificateAuth(CertificateAuth):
             private_key_pem=private_key_pem,
             server_profile=server_profile,
         )
+        # The engine's own rule, applied here so that a bad value raises at
+        # this call and not at the first connect.
+        _validate_max_fragment_length(max_fragment_length)
         object.__setattr__(self, "_max_fragment_length", max_fragment_length)
 
     @classmethod
@@ -775,13 +783,27 @@ class FragmentingCertificateAuth(CertificateAuth):
 
         Satisfies :class:`DtlsConnectionProvider`.
         """
+        return self._new_client(mtu, self._verify_peer_chain)
+
+    def _create_diagnostic_connection(self, *, mtu: int):
+        """Return a connection that leaves the trust decision to the peer.
+
+        For `diagnose_dtls_handshake` only. A diagnostic reports the
+        appliance's own alert, so it must not refuse the chain locally. The
+        engine skips the chain check when it gets no callback
+        (`DtlsCertClient._send_client_flight`). It still checks the
+        ServerKeyExchange signature against the leaf.
+        """
+        return self._new_client(mtu, None)
+
+    def _new_client(self, mtu, verify_peer_chain):
         chain_der, key = self._load_client_credential()
         return DtlsCertClient(
             chain_der,
             key,
             mtu=mtu,
             max_fragment_length=self._max_fragment_length,
-            verify_peer_chain=self._verify_peer_chain,
+            verify_peer_chain=verify_peer_chain,
         )
 
     def _load_client_credential(self):
@@ -833,6 +855,15 @@ class FragmentingCertificateAuth(CertificateAuth):
                 store.add_cert(
                     crypto.load_certificate(crypto.FILETYPE_PEM, certificate)
                 )
+        # The pyOpenSSL path refuses a server leaf whose extended key usage
+        # lacks serverAuth. Measured 2026-11-13 with a synthetic chain, on the
+        # dependency floor and on current: only the leaf's EKU differed, and
+        # serverAuth completed while clientAuth alone failed verification.
+        # X509StoreContext sets no purpose, so set the SSL-server one here.
+        if _util.lib.X509_STORE_set_purpose(
+            store._store, _util.lib.X509_PURPOSE_SSL_SERVER
+        ) != 1:
+            raise RuntimeError("OpenSSL rejected the server certificate purpose")
         crypto.X509StoreContext(
             store, parsed[0], chain=parsed[1:] or None
         ).verify_certificate()

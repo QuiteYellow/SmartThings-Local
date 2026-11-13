@@ -125,6 +125,47 @@ _BLOCK_ACK_TIMEOUT  = 4.0
 _MAX_BLOCK1_BODY_BYTES = 512 * 1024
 _MAX_BLOCK1_REQUESTS = 1024
 
+# The length of the token _next_tok mints. _request_size builds with the same
+# length, so a size computed before the token exists is the size sent.
+_REQUEST_TOKEN_BYTES = 4
+
+
+def _request_size(options, payload):
+    """Return the length of a CON request with these options and payload."""
+    return len(build_coap(
+        TYPE_CON, METHOD_POST, 0, bytes(_REQUEST_TOKEN_BYTES), options,
+        payload))
+
+
+def _block1_szx(base_options, extra_options, body_length, limit):
+    """Return the first Block1 SZX: BLOCK_SZX, or less to fit ``limit``.
+
+    The size is checked for the largest message of the upload: Size1, which
+    only block 0 carries, together with a 3-byte Block1 value, which only a
+    late block needs. A server can lower the SZX later but never raise it,
+    so every later block fits too. Raises ValueError when no SZX fits, or
+    when the SZX that fits needs more than _MAX_BLOCK1_REQUESTS blocks, so a
+    body that cannot finish is refused before its first block.
+    """
+    if limit is None:
+        return BLOCK_SZX
+    size_width = max(1, (body_length.bit_length() + 7) // 8)
+    options = list(base_options)
+    options.append((SIZE1, body_length.to_bytes(size_width, 'big')))
+    options.extend(extra_options)
+    for szx in range(BLOCK_SZX, -1, -1):
+        block = 1 << (szx + 4)
+        sized = options + [(BLOCK1, block_value(1 << 16, 1, szx))]
+        if _request_size(sized, bytes(block)) <= limit:
+            if -(-body_length // block) > _MAX_BLOCK1_REQUESTS:
+                raise ValueError(
+                    'body_cbor needs more Block1 requests than allowed at '
+                    f'the negotiated fragment length of {limit}')
+            return szx
+    raise ValueError(
+        f'no Block1 size fits the negotiated fragment length of {limit}')
+
+
 # Base per-attempt wait for a write retransmission, doubled per attempt
 # (RFC 7252 §4.2). Retransmission itself is off by default: a device that
 # is already dropping under load turns one lost write into several, and
@@ -1251,7 +1292,7 @@ class DtlsCoapSession:
             self._tok_counter = (self._tok_counter + 1) & 0xFFFFFFFF
             # 4-byte tokens — fits within tkl=8 cap with headroom and
             # avoids collisions across long-running OBSERVE subscriptions.
-            return self._tok_counter.to_bytes(4, 'big')
+            return self._tok_counter.to_bytes(_REQUEST_TOKEN_BYTES, 'big')
 
     def _next_available_observe_tok_locked(self):
         """Return an unused 8-byte Observe token.
@@ -1362,6 +1403,14 @@ class DtlsCoapSession:
             if (self._lifecycle_cancel.is_set() and not orderly_close_send) or \
                     self.conn is None:
                 raise SessionClosedError()
+            # The engine refuses an over-length record with a bare SSL.Error,
+            # which no caller here handles. Refuse it first, with a type a
+            # caller can catch, and before anything is sent.
+            limit = getattr(self.conn, 'negotiated_fragment_length', None)
+            if limit is not None and len(datagram) > limit:
+                raise ValueError(
+                    f'a CoAP message of {len(datagram)} bytes exceeds the '
+                    f'negotiated fragment length of {limit}')
             send_failed = False
             try:
                 self.conn.send(datagram)
@@ -2126,6 +2175,13 @@ class DtlsCoapSession:
         Larger bodies use token-stable Block1 framing. ``body_cbor`` must
         already be encoded.
 
+        With a negotiated fragment length, every CoAP message must fit in it
+        whole, header and options included. A body that does not fit one
+        message then uses Block1, at the largest block size that fits. These
+        appliances have not been measured with Block1 blocks smaller than
+        1024 bytes. If even 16-byte blocks do not fit, ``ValueError`` is
+        raised before anything is sent.
+
         timeout bounds the whole call, pacing included, so post() returns
         within it rather than within it plus a rate-limit interval.
 
@@ -2151,7 +2207,11 @@ class DtlsCoapSession:
             opts.append((URI_QUERY, q.encode()))
         opts.append((CONTENT_FORMAT, CF_CBOR))
         opts.append((ACCEPT, CF_CBOR))
-        if len(body_cbor) > block_size:
+        limit = self.negotiated_fragment_length
+        if len(body_cbor) > block_size or (
+                limit is not None
+                and _request_size(opts + list(extra_options), body_cbor)
+                > limit):
             return self._post_blockwise(
                 path_segs,
                 body_cbor,
@@ -2261,10 +2321,12 @@ class DtlsCoapSession:
             self, path_segs, body_cbor, base_options, extra_options, *,
             timeout):
         """Upload one bounded body with token-stable Block1 framing."""
+        szx = _block1_szx(
+            base_options, extra_options, len(body_cbor),
+            self.negotiated_fragment_length)
         tok = self._next_tok()
         deadline = time.monotonic() + timeout
         offset = 0
-        szx = BLOCK_SZX
         request_count = 0
 
         while offset < len(body_cbor):

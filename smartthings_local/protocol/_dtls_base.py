@@ -94,6 +94,7 @@ _MAX_HELLO_VERIFY = 5
 
 _ALERT_CLOSE_NOTIFY = 0
 _ALERT_FATAL = 2
+_ALERT_HANDSHAKE_FAILURE = 40
 _ALERT_WARNING = 1
 
 
@@ -198,6 +199,7 @@ class _DtlsClientBase:
         self._peer_closed = False
         self._hello_verify_count = 0
         self._failed: str | None = None
+        self._abandon_alert = b""
 
     # -- subclass hooks --------------------------------------------------
 
@@ -680,6 +682,39 @@ class _DtlsClientBase:
         if self._failed is None:
             self._failed = reason
             logger.debug("DTLS session failed: %s", reason)
+
+    def _abandon(self, reason: str) -> None:
+        """Fail a handshake that we stop, and keep the alert that ends it.
+
+        A failure that only sets `_failed` sends nothing, so the peer keeps
+        its handshake state for this client. An epoch-zero fatal
+        `handshake_failure` ends that state on TizenRT's `iotivity_1.2-rel`
+        fork: mbedTLS 2.7.8 returns `MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE` for
+        it (`ssl_tls.c:4310-4312`), and the fork's `SSL_CHECK_FAIL` calls
+        `RemovePeerFromList` for that code (`ca_adapter_net_ssl.c:215-249`,
+        used at `:2234`). This is read in code, not measured on an appliance.
+
+        The alert is kept apart from the outbox, because the handshake driver
+        stops reading the outbox when `do_handshake` raises. The driver
+        collects it with `_take_abandon_alert`.
+        """
+        if self._failed is None and self._send_epoch == 0:
+            start = len(self._outbox)
+            try:
+                self._emit_record(
+                    _CT_ALERT, bytes([_ALERT_FATAL, _ALERT_HANDSHAKE_FAILURE])
+                )
+            except DtlsError:
+                pass
+            else:
+                self._abandon_alert = bytes(self._outbox[start:])
+                del self._outbox[start:]
+        self._fail(reason)
+
+    def _take_abandon_alert(self) -> bytes:
+        """Return the alert that `_abandon` kept, once, or b"" if none."""
+        alert, self._abandon_alert = self._abandon_alert, b""
+        return alert
 
     # -- application data ------------------------------------------------
 

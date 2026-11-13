@@ -114,6 +114,14 @@ _SIG_ECDSA = 3
 # 512 only halves the response budget.
 _MFL_CODES = {512: 1, 1024: 2, 2048: 3, 4096: 4}
 
+
+def _validate_max_fragment_length(value) -> None:
+    """Raise unless `value` is a length RFC 6066 defines, or None."""
+    if value is not None and (type(value) is not int or value not in _MFL_CODES):
+        raise ValueError(
+            f"max_fragment_length must be one of {sorted(_MFL_CODES)} or None"
+        )
+
 # A chain longer than this is a peer wasting our memory, not an appliance.
 # The two units measured on 2026-10-25 both send two certificates.
 _MAX_CHAIN_CERTS = 8
@@ -212,14 +220,7 @@ class DtlsCertClient(_DtlsClientBase):
             raise TypeError("every chain_der entry must be non-empty bytes")
         if len(chain_der) > _MAX_CHAIN_CERTS:
             raise ValueError(f"chain_der must hold at most {_MAX_CHAIN_CERTS} entries")
-        if max_fragment_length is not None and (
-            type(max_fragment_length) is not int
-            or max_fragment_length not in _MFL_CODES
-        ):
-            raise ValueError(
-                "max_fragment_length must be one of "
-                f"{sorted(_MFL_CODES)} or None"
-            )
+        _validate_max_fragment_length(max_fragment_length)
         if not hasattr(private_key, "sign"):
             raise TypeError("private_key must be a cryptography private key")
         super().__init__(mtu=mtu)
@@ -395,18 +396,18 @@ class DtlsCertClient(_DtlsClientBase):
         """Certificate, ClientKeyExchange, CertificateVerify, CCS, Finished."""
         if self._verify_peer_chain is not None:
             if not self._peer_chain:
-                self._fail("peer presented no certificate to verify")
+                self._abandon("peer presented no certificate to verify")
                 return
             try:
                 self._verify_peer_chain(list(self._peer_chain))
             except Exception as exc:  # noqa: BLE001 - the callback owns the reason
-                self._fail(f"peer certificate rejected: {type(exc).__name__}")
+                self._abandon(f"peer certificate rejected: {type(exc).__name__}")
                 return
         signature_algorithm = None
         if self._certificate_requested:
             signature_algorithm = self._client_signature_algorithm()
             if signature_algorithm is None:
-                self._fail("no offered signature algorithm matches our key")
+                self._abandon("no offered signature algorithm matches our key")
                 return
 
         self._start_flight()
@@ -501,8 +502,10 @@ class DtlsCertClient(_DtlsClientBase):
         ones (RFC 6066 section 4), and an over-length record is what a peer
         answers with `record_overflow`. Splitting here is not available: one
         CoAP message is one record on this transport, so a split would hand
-        the appliance two half-messages. The caller is told the limit instead,
-        and `post()` already has Block1 for a body that needs it.
+        the appliance two half-messages. The caller is told the limit instead.
+        `DtlsCoapSession` sizes its messages to the limit before they reach
+        this method: `post()` picks a Block1 size that fits, and any request
+        that still does not fit raises `ValueError` before it is sent.
         """
         limit = self.negotiated_fragment_length
         if limit is not None and len(data) > limit:

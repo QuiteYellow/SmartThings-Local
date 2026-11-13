@@ -836,11 +836,20 @@ def _diagnostic_connection(
     accepts it either way and nothing further down would notice a credential
     being handed to the wrong engine.
 
-    Nothing is relaxed for a provider that brings its own engine, because
-    there is nothing to relax: a diagnostic must report the appliance's own
-    alert rather than a local verdict, and an engine with no X.509 reaches
-    that by construction instead of by re-asserting accept-any.
+    A diagnostic must report the appliance's own alert rather than a local
+    verdict. A provider whose engine verifies a chain therefore has to build
+    a connection that does not, and this package's
+    ``FragmentingCertificateAuth`` does that through
+    ``_create_diagnostic_connection``, which is asked first. Without that
+    hook, the engine would refuse an untrusted chain before its own flight,
+    and the caller would get a local error instead of the appliance's alert.
+    An engine with no X.509, such as ``PskAuth``'s, needs no hook. A
+    third-party engine is used as it is built: this module cannot relax a
+    check it does not own.
     """
+    diagnostic = getattr(auth, '_create_diagnostic_connection', None)
+    if diagnostic is not None:
+        return diagnostic(mtu=mtu)
     factory = _connection_factory(auth)
     if factory is not None:
         return factory(mtu=mtu)

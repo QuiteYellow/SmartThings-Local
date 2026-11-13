@@ -76,7 +76,7 @@ Add `server_profile=SamsungServerProfile.bound_device(certificate_uuid)` when yo
 
 Three things to know before choosing it.
 
-*Opt-in only.* Nothing in this package selects this provider, and the usual certificate path still runs on pyOpenSSL. The engine has met no appliance yet. It is tested against OpenSSL acting as the server, on the dependency floor and on current, which is weaker evidence than hardware.
+*Opt-in only.* Nothing in this package selects this provider, and the usual certificate path still runs on pyOpenSSL. On 2026-10-26 it completed handshakes on a Samsung dryer and oven, with and without a fragment length, and read the same resource in the same time as pyOpenSSL. Both of those appliances already work on pyOpenSSL, so the units that stall are still untested with it. It is also tested against OpenSSL acting as the server, on the dependency floor and on current.
 
 *A server profile is optional, as it is on `CertificateAuth`.* Without one, the peer's chain is verified against the bundled OCF root and nothing further is pinned, which is what the pyOpenSSL path does with a profileless context. With one, the profile's role, subject and UUID checks apply on top. Nothing per-appliance is needed either way: the client certificate's own subject UUID is a constant that does not rotate, and a profile pins the appliance's hardware leaf UUID, which is a separate identity and differs between units.
 
@@ -88,7 +88,7 @@ An appliance that already finishes a handshake gains nothing from this provider.
 
 Three pieces of supported API come with the engine, for a Home Assistant integration or anything else driving it.
 
-**`DtlsConnectionProvider`** is the seam. A credential whose carrier is not pyOpenSSL answers `create_dtls_connection(*, mtu)` and returns a `DtlsConnection`; `DtlsCoapSession` and `diagnose_dtls_handshake` use it in place of building a context. Both types are in `docs/api.md`, and `DtlsConnection` states the whole surface the library drives, which is eight methods. An earlier private spelling, `_create_dtls_connection`, is still consulted and raises a `DeprecationWarning`.
+**`DtlsConnectionProvider`** is the seam. A credential whose carrier is not pyOpenSSL answers `create_dtls_connection(*, mtu)` and returns a `DtlsConnection`; `DtlsCoapSession` and `diagnose_dtls_handshake` use it in place of building a context. Both types are in `docs/api.md`, and `DtlsConnection` states the whole surface the library drives, which is eight methods. An earlier private spelling, `_create_dtls_connection`, is still consulted and emits a `FutureWarning`, which the default warning filters show.
 
 **`DtlsCoapSession.negotiated_fragment_length`** reports the limit in force, or `None`. Because these appliances cannot send a record larger than a negotiated length, this is the ceiling on any single representation a read can return. Check it before reading a resource you expect to be large, since the read will otherwise stall at its first block.
 

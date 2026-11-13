@@ -8,7 +8,7 @@ MFL fork for the same reason. So the seam is now
 `DtlsConnectionProvider.create_dtls_connection`, returning a
 `DtlsConnection`, and both are in the published contract.
 
-The private name is still consulted, with a `DeprecationWarning`. A fork
+The private name is still consulted, with a `FutureWarning`. A fork
 running in production shipped against it, and breaking that in the release
 that fixes the fragility would be a strange way to fix it.
 
@@ -201,7 +201,7 @@ def test_the_private_hook_still_works_and_warns():
     connection = _Connection()
     provider = _LegacyProvider(connection)
     session = _session(provider)
-    with pytest.warns(DeprecationWarning, match="create_dtls_connection"):
+    with pytest.warns(FutureWarning, match="create_dtls_connection"):
         assert session._new_dtls_connection(None) is connection
     assert provider.mtus == [session.mtu]
 
@@ -249,7 +249,7 @@ def test_the_diagnostic_still_honours_the_private_hook_and_warns():
 
     connection = _Connection()
     provider = _LegacyProvider(connection)
-    with pytest.warns(DeprecationWarning, match="create_dtls_connection"):
+    with pytest.warns(FutureWarning, match="create_dtls_connection"):
         assert dtls_probe._diagnostic_connection(
             auth=provider, cert_pem=None, key_pem=None,
             cert_path=None, key_path=None, mtu=1200,

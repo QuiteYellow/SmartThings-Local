@@ -192,6 +192,28 @@ class _HvrPeerCleanupTranscript:
         )
 
 
+def _send_abandon_alert(connection, sock, on_record_sent):
+    """Send the alert that a pure-Python engine kept when it gave up.
+
+    Only this package's engines keep one (`_DtlsClientBase._abandon`), so a
+    pyOpenSSL connection, which has no `_take_abandon_alert`, is unchanged.
+    Best effort: the handshake error is the result the caller gets, and
+    nothing here may replace it.
+    """
+    take = getattr(connection, '_take_abandon_alert', None)
+    if take is None:
+        return
+    alert = take()
+    if not alert:
+        return
+    try:
+        sock.send(alert)
+    except OSError:
+        return
+    if on_record_sent is not None:
+        on_record_sent(alert)
+
+
 class _HandshakeCancelled(Exception):
     """Internal signal that a handshake wake socket became readable."""
 
@@ -225,6 +247,9 @@ def _drive_dtls_handshake(
             return True
         except SSL.WantReadError:
             pass
+        except SSL.Error:
+            _send_abandon_alert(connection, sock, on_record_sent)
+            raise
 
         try:
             output = connection.bio_read(_MAX_DATAGRAM_SIZE)

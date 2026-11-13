@@ -3,7 +3,8 @@
 `FragmentingCertificateAuth` exists for one extension. What these tests hold
 down is that choosing it does not weaken anything: the chain is still verified
 against the profile's own anchors, the profile's role and UUID rules still
-decide, and a session with no profile cannot be built at all.
+decide, and a session with no profile verifies the chain and pins nothing,
+as `CertificateAuth` does.
 
 The synthetic three-level chain comes from `test_certificate_profiles.py`, so
 the subject shape under test is the one the profile rules were written for.
