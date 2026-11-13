@@ -350,6 +350,17 @@ def _validated_observe_query_overrides(queries_by_href, target_hrefs):
     return result
 
 
+def _validated_block2_limit(value, *, name):
+    """Return a per-call Block2 cap, or None to keep the default."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f'{name} must be a positive integer or None')
+    if value <= 0:
+        raise ValueError(f'{name} must be a positive integer or None')
+    return value
+
+
 def _validated_extra_options(extra_options):
     """Return bounded, ordered options not owned by the request methods."""
     if isinstance(extra_options, (str, bytes, bytearray, memoryview)):
@@ -1825,7 +1836,8 @@ class DtlsCoapSession:
 
     # ---- request primitives ------------------------------------------
 
-    def get(self, path_segs, query=(), timeout=10.0, *, extra_options=()):
+    def get(self, path_segs, query=(), timeout=10.0, *, extra_options=(),
+            max_payload_bytes=None, max_blocks=None):
         """Token-stable Block2 GET. Returns (code, payload_bytes).
 
         Reuses one CoAP token across every block of a multi-block
@@ -1836,19 +1848,38 @@ class DtlsCoapSession:
         Requests ask with Accept 60 (``application/cbor``) and ``ACCEPT``
         is a managed option, so ``extra_options`` cannot select another
         dialect. The appliances measured here decline Accept 10000 with
-        4.06, so that is a deliberate closure and not a gap."""
+        4.06, so that is a deliberate closure and not a gap.
+
+        ``max_payload_bytes`` and ``max_blocks`` raise the two reassembly
+        caps for this call only. ``None``, the default for both, keeps
+        the caps every other read gets: ``MAX_BLOCK2_PAYLOAD_BYTES``
+        assembled bytes and ``MAX_BLOCKS`` blocks (a subclass override of
+        ``MAX_BLOCKS`` still applies). They are for a large read the
+        caller asked for, such as a file transfer, and not for polling.
+
+        The two are independent and either one ends the transfer. Raising
+        one leaves the other at its default. ``MAX_BLOCKS`` assumes the
+        1024-byte blocks requested, so when the server negotiates smaller
+        blocks, ``max_blocks`` is usually the cap reached first. A value
+        that is not a positive ``int`` raises ``TypeError`` or
+        ``ValueError`` before anything is sent."""
         self._check_live()
         path_segs = _validated_text_options(
             path_segs, name='path_segs', allow_empty=False)
         query = _validated_text_options(
             query, name='query', allow_empty=False)
         extra_options = _validated_extra_options(extra_options)
+        max_payload_bytes = _validated_block2_limit(
+            max_payload_bytes, name='max_payload_bytes')
+        max_blocks = _validated_block2_limit(max_blocks, name='max_blocks')
         code, blob, _blocks, _tok = self._blockwise_get(
-            path_segs, query, timeout, extra_options=extra_options)
+            path_segs, query, timeout, extra_options=extra_options,
+            max_payload_bytes=max_payload_bytes, max_blocks=max_blocks)
         return code, blob
 
     def _blockwise_get(
-            self, path_segs, query=(), timeout=10.0, *, extra_options=()):
+            self, path_segs, query=(), timeout=10.0, *, extra_options=(),
+            max_payload_bytes=None, max_blocks=None):
         """Shared token-stable Block2 reassembly (RFC 7959 §2.4).
 
         Returns (code, payload, block_count, token). The last two are
@@ -1865,16 +1896,22 @@ class DtlsCoapSession:
         Restarts once if the server's ETag changes mid-transfer, then
         gives up: RFC 7959 §2.4 requires the client to compare ETags
         when the server supplies them. None of the tested appliances
-        emit option 4, so on those this is inert."""
+        emit option 4, so on those this is inert.
+
+        ``max_payload_bytes`` and ``max_blocks`` are get()'s per-call
+        caps, already validated; ``None`` keeps the defaults. The restart
+        uses the same caps as the first attempt."""
         try:
             return self._blockwise_get_once(
-                path_segs, query, timeout, extra_options)
+                path_segs, query, timeout, extra_options,
+                max_payload_bytes, max_blocks)
         except _EtagChanged:
             logger.debug("GET %s /%s: ETag changed mid-transfer, restarting",
                          self.host, '/'.join(path_segs))
         try:
             return self._blockwise_get_once(
-                path_segs, query, timeout, extra_options)
+                path_segs, query, timeout, extra_options,
+                max_payload_bytes, max_blocks)
         except _EtagChanged:
             logger.debug(
                 "GET %s /%s: representation kept changing mid-transfer",
@@ -1882,11 +1919,17 @@ class DtlsCoapSession:
             raise BlockwiseError() from None
 
     def _blockwise_get_once(
-            self, path_segs, query, timeout, extra_options):
+            self, path_segs, query, timeout, extra_options,
+            max_payload_bytes=None, max_blocks=None):
         """One attempt at a full Block2 transfer. Raises _EtagChanged if
         the server's representation changed while we were reassembling."""
         tok = self._next_tok()
-        accumulator = Block2Accumulator(tok, max_blocks=self.MAX_BLOCKS)
+        if max_blocks is None:
+            max_blocks = self.MAX_BLOCKS
+        limits = {'max_blocks': max_blocks}
+        if max_payload_bytes is not None:
+            limits['max_payload_bytes'] = max_payload_bytes
+        accumulator = Block2Accumulator(tok, **limits)
         etag = None
         deadline = time.monotonic() + timeout
         while not accumulator.complete:
