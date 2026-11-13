@@ -1850,7 +1850,7 @@ class DtlsCoapSession:
         dialect. The appliances measured here decline Accept 10000 with
         4.06, so that is a deliberate closure and not a gap.
 
-        ``max_payload_bytes`` and ``max_blocks`` raise the two reassembly
+        ``max_payload_bytes`` and ``max_blocks`` set the two reassembly
         caps for this call only. ``None``, the default for both, keeps
         the caps every other read gets: ``MAX_BLOCK2_PAYLOAD_BYTES``
         assembled bytes and ``MAX_BLOCKS`` blocks (a subclass override of
@@ -1862,7 +1862,11 @@ class DtlsCoapSession:
         1024-byte blocks requested, so when the server negotiates smaller
         blocks, ``max_blocks`` is usually the cap reached first. A value
         that is not a positive ``int`` raises ``TypeError`` or
-        ``ValueError`` before anything is sent."""
+        ``ValueError`` before anything is sent.
+
+        ``timeout`` bounds the whole transfer, not each block. Every block
+        waits for the session rate limit, five requests a second by
+        default, so a large ``max_blocks`` needs a longer ``timeout``."""
         self._check_live()
         path_segs = _validated_text_options(
             path_segs, name='path_segs', allow_empty=False)
