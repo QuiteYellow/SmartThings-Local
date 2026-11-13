@@ -33,7 +33,6 @@ from smartthings_local.protocol.dtls_probe import (
     probe_dtls_port,
     probe_dtls_ports,
 )
-from smartthings_local.protocol.auth import FragmentingCertificateAuth
 from smartthings_local.protocol.coap import fmt_code
 from smartthings_local.protocol.ocf_discovery import discover_ocf_secure_ports
 from smartthings_local.protocol.dtls_session import DtlsCoapSession
@@ -549,24 +548,10 @@ class PushBridge:
 
     def session_once(self):
         port = self._resolve_port()
-        # DTLS_FRAGMENT_LENGTH routes the handshake through the package's
-        # own certificate engine, which is the only path that can offer
-        # max_fragment_length. Left at 0 this is the pyOpenSSL path these
-        # appliances have always used, byte for byte.
-        if self.shared.DTLS_FRAGMENT_LENGTH:
-            credential = {'auth': FragmentingCertificateAuth.from_files(
-                self.shared.CERT_PATH,
-                self.shared.KEY_PATH,
-                max_fragment_length=self.shared.DTLS_FRAGMENT_LENGTH,
-            )}
-        else:
-            credential = {
-                'cert_path': self.shared.CERT_PATH,
-                'key_path': self.shared.KEY_PATH,
-            }
         sess = DtlsCoapSession(
             self.app.ip, port,
-            **credential,
+            cert_path=self.shared.CERT_PATH,
+            key_path=self.shared.KEY_PATH,
             on_observe_delivery=self._on_observe_delivery,
             local_port=DTLS_LOCAL_PORT_BASE + self.app.index,
             write_max_attempts=self.shared.WRITE_MAX_ATTEMPTS,

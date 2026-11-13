@@ -325,16 +325,3 @@ One limit is worth knowing whatever the appliance. A timestamp far outside its c
 | `button` | 3 (start/pause/stop) | 2 (stop, sync clock) |
 
 Gated control entities use HA's `availability_mode: all` against `<prefix>/availability` AND `<prefix>/remote_available`. Flip Remote Control on the appliance's front panel and those entities un-grey in HA.\n
-## `DTLS_FRAGMENT_LENGTH`
-
-Offers a DTLS `max_fragment_length` and routes the handshake through this package's own certificate engine, which is the only path that can send the extension. Unset or `0` keeps the pyOpenSSL path these appliances have always used.
-
-Prefer 1024, the largest value that still keeps the appliance's flight inside one frame; the same figure caps every response it can send, so a smaller one only costs you reads. Set it at all only for an appliance that drops off the network mid-handshake. Some units leave the network for about ten seconds whenever they have to put a handshake flight on the wire that will not fit one Ethernet frame, which is [issue #20](https://github.com/QuiteYellow/SmartThings-Local/issues/20); offering the extension makes such a unit split its flight instead. An appliance that already completes a handshake gains nothing.
-
-```sh
-DTLS_FRAGMENT_LENGTH=1024     # 512, 1024, 2048 or 4096; 0 or unset is off
-```
-
-Any other value stops the process at startup. A typo is therefore loud, and it can never quietly become a default nobody asked for.
-
-Two things to know before setting it. The engine's hardware evidence is a dryer and an oven that already worked, where it read the same resource in the same time as pyOpenSSL; the failing case it exists for remains untested. And a negotiated fragment length bounds application records as well as handshake ones. A write that does not fit one message under the value goes out in Block1 blocks small enough to fit, and Block1 below 1024-byte blocks has not been measured on these appliances. The two writes this bridge makes are small CBOR maps, well inside 1024 bytes.

@@ -65,9 +65,6 @@ def test_session_once_passes_it_through(monkeypatch):
     b.shared = types.SimpleNamespace(
         CERT_PATH='/tmp/cert.pem', KEY_PATH='/tmp/key.pem',
         WRITE_MAX_ATTEMPTS=4,
-        # Stands in for SharedConfig, so it carries every field the bridge
-        # reads. 0 is the default and keeps the pyOpenSSL path.
-        DTLS_FRAGMENT_LENGTH=0,
     )
     b.log = logging.getLogger('test-bridge')
     b._on_notification = lambda *a: None
