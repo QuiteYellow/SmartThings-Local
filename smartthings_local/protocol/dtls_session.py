@@ -793,7 +793,7 @@ class DtlsCoapSession:
         the connection it returns is
         :class:`~smartthings_local.protocol.auth.DtlsConnection`. Both are
         supported API; the private ``_create_dtls_connection`` this package
-        used first is still consulted, with a ``DeprecationWarning``.
+        used first is still consulted, with a ``FutureWarning``.
 
         The contract the connection has to meet, which those two types state
         in full:
@@ -2076,6 +2076,11 @@ class DtlsCoapSession:
 
         These appliances cannot send a record larger than a negotiated length,
         so this is the ceiling on any single representation a read can return.
+
+        A completed handshake does not mean the length is in force. A server
+        that does not echo the extension still completes it, and this is then
+        None. A caller that offered a length and depends on it compares this
+        with the length offered after ``connect()``.
         """
         connection = self.conn
         if connection is None:
@@ -2179,8 +2184,11 @@ class DtlsCoapSession:
         whole, header and options included. A body that does not fit one
         message then uses Block1, at the largest block size that fits. These
         appliances have not been measured with Block1 blocks smaller than
-        1024 bytes. If even 16-byte blocks do not fit, ``ValueError`` is
-        raised before anything is sent.
+        1024 bytes. ``ValueError`` is raised before anything is sent if even
+        16-byte blocks do not fit, or if the body needs more than 1024
+        blocks of the size that fits. Smaller blocks therefore lower the
+        largest body: at a length of 512 the blocks are 256 bytes, so the
+        limit is 256 KiB, not 512 KiB.
 
         timeout bounds the whole call, pacing included, so post() returns
         within it rather than within it plus a rate-limit interval.

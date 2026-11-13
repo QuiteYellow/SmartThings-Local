@@ -268,15 +268,15 @@ class DtlsCertClient(_DtlsClientBase):
         """Read the extensions the server echoed, and hold it to the MFL."""
         echoed = _parse_hello_extensions(body, offset)
         if echoed is None:
-            self._fail("malformed ServerHello extensions")
+            self._abandon("malformed ServerHello extensions")
             return
         if 0x0001 in echoed:
             value = echoed[0x0001]
             if self._mfl is None:
-                self._fail("server echoed a fragment length that was not offered")
+                self._abandon("server echoed a fragment length that was not offered")
                 return
             if value != bytes([_MFL_CODES[self._mfl]]):
-                self._fail("server echoed a different fragment length")
+                self._abandon("server echoed a different fragment length")
                 return
             self._mfl_agreed = True
 
@@ -299,21 +299,21 @@ class DtlsCertClient(_DtlsClientBase):
         if self._state != "got_server_hello":
             return
         if self._peer_chain:
-            self._fail("server sent more than one Certificate")
+            self._abandon("server sent more than one Certificate")
             return
         chain = _parse_certificate_list(body)
         if chain is None:
-            self._fail("malformed Certificate message")
+            self._abandon("malformed Certificate message")
             return
         if not chain:
-            self._fail("server sent an empty certificate chain")
+            self._abandon("server sent an empty certificate chain")
             return
         if len(chain) > _MAX_CHAIN_CERTS:
-            self._fail("server certificate chain is too long")
+            self._abandon("server certificate chain is too long")
             return
         public_key = _leaf_public_key(chain[0])
         if public_key is None:
-            self._fail("server leaf certificate did not parse")
+            self._abandon("server leaf certificate did not parse")
             return
         self._peer_chain = chain
         self._peer_public_key = public_key
@@ -329,36 +329,36 @@ class DtlsCertClient(_DtlsClientBase):
         if self._state != "got_server_hello":
             return
         if self._peer_public_key is None:
-            self._fail("ServerKeyExchange arrived before the certificate")
+            self._abandon("ServerKeyExchange arrived before the certificate")
             return
         if len(body) < 4:
-            self._fail("short ServerKeyExchange")
+            self._abandon("short ServerKeyExchange")
             return
         if body[0] != _ECCURVETYPE_NAMED:
-            self._fail("server offered a non-named curve")
+            self._abandon("server offered a non-named curve")
             return
         curve = int.from_bytes(body[1:3], "big")
         if curve != _NAMED_CURVE_SECP256R1:
-            self._fail(f"server offered unexpected curve 0x{curve:04x}")
+            self._abandon(f"server offered unexpected curve 0x{curve:04x}")
             return
         point_len = body[3]
         point = body[4:4 + point_len]
         if len(point) != point_len or point_len == 0:
-            self._fail("malformed server ECDH point")
+            self._abandon("malformed server ECDH point")
             return
         params = body[:4 + point_len]
         rest = body[4 + point_len:]
         if len(rest) < 4:
-            self._fail("ServerKeyExchange carries no signature")
+            self._abandon("ServerKeyExchange carries no signature")
             return
         hash_id, sig_id = rest[0], rest[1]
         sig_len = int.from_bytes(rest[2:4], "big")
         signature = rest[4:4 + sig_len]
         if len(signature) != sig_len or not signature:
-            self._fail("malformed ServerKeyExchange signature")
+            self._abandon("malformed ServerKeyExchange signature")
             return
         if (hash_id, sig_id) not in _SIGNATURE_OFFER:
-            self._fail(
+            self._abandon(
                 f"server signed with an algorithm that was not offered "
                 f"({hash_id},{sig_id})"
             )
@@ -367,13 +367,13 @@ class DtlsCertClient(_DtlsClientBase):
         if not _verify_signature(
             self._peer_public_key, hash_id, sig_id, signature, signed
         ):
-            self._fail("ServerKeyExchange signature did not verify")
+            self._abandon("ServerKeyExchange signature did not verify")
             return
         try:
             # Rejects points that are malformed or not on the curve.
             ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), point)
         except ValueError:
-            self._fail("server ECDH point is not on secp256r1")
+            self._abandon("server ECDH point is not on secp256r1")
             return
         self._peer_point = point
         self._private_key = ec.generate_private_key(ec.SECP256R1())
@@ -385,7 +385,7 @@ class DtlsCertClient(_DtlsClientBase):
             return
         parsed = _parse_certificate_request(body)
         if parsed is None:
-            self._fail("malformed CertificateRequest")
+            self._abandon("malformed CertificateRequest")
             return
         self._certificate_requested = True
         self._request_sig_algs = parsed

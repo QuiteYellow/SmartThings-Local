@@ -157,3 +157,11 @@ def test_the_size_helper_matches_a_real_token():
     options = [(11, b"resource")]
     assert dtls_session._request_size(options, b"body") == len(
         build_coap(0, 2, 0, token, options, b"body"))
+
+
+def test_at_512_the_largest_body_is_256_kib():
+    """The block count cap meets 256-byte blocks before the 512 KiB cap."""
+    session, _sizes, requests = _session(512)
+    with pytest.raises(ValueError, match="more Block1 requests"):
+        session.post(["resource"], b"x" * (256 * 1024 + 1))
+    assert requests == []

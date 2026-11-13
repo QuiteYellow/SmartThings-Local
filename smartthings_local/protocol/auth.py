@@ -674,6 +674,22 @@ class CertificateAuth:
         return identity
 
 
+def _set_server_purpose(store) -> None:
+    """Verify `store`'s chains for the SSL-server purpose, or raise.
+
+    The binding is looked up, as the curve setter's is, so a `cryptography`
+    build without it raises a RuntimeError that names the cause.
+    """
+    set_purpose = getattr(_util.lib, "X509_STORE_set_purpose", None)
+    purpose = getattr(_util.lib, "X509_PURPOSE_SSL_SERVER", None)
+    if set_purpose is None or purpose is None:
+        raise RuntimeError(
+            "this OpenSSL binding cannot set the server certificate purpose"
+        )
+    if set_purpose(store._store, purpose) != 1:
+        raise RuntimeError("OpenSSL rejected the server certificate purpose")
+
+
 class FragmentingCertificateAuth(CertificateAuth):
     """Client-certificate authentication on this package's own DTLS engine.
 
@@ -734,6 +750,10 @@ class FragmentingCertificateAuth(CertificateAuth):
         # The engine's own rule, applied here so that a bad value raises at
         # this call and not at the first connect.
         _validate_max_fragment_length(max_fragment_length)
+        # The same for the purpose binding. Inside a handshake the engine
+        # reports only the exception type, so a missing binding has to
+        # surface here, where its reason reaches the caller.
+        _set_server_purpose(crypto.X509Store())
         object.__setattr__(self, "_max_fragment_length", max_fragment_length)
 
     @classmethod
@@ -860,10 +880,7 @@ class FragmentingCertificateAuth(CertificateAuth):
         # dependency floor and on current: only the leaf's EKU differed, and
         # serverAuth completed while clientAuth alone failed verification.
         # X509StoreContext sets no purpose, so set the SSL-server one here.
-        if _util.lib.X509_STORE_set_purpose(
-            store._store, _util.lib.X509_PURPOSE_SSL_SERVER
-        ) != 1:
-            raise RuntimeError("OpenSSL rejected the server certificate purpose")
+        _set_server_purpose(store)
         crypto.X509StoreContext(
             store, parsed[0], chain=parsed[1:] or None
         ).verify_certificate()

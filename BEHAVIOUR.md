@@ -9,7 +9,9 @@ Each line is a behaviour someone chose on purpose, and why. If a result contradi
 ## The certificate engine
 
 - `FragmentingCertificateAuth` is opt-in, and nothing in the package selects it. Its hardware evidence is two appliances that already work on pyOpenSSL, and the units it exists for (#20) are untested with it. (2026-11-07)
-- When the engine refuses the peer before its own flight, it sends one epoch-zero fatal `handshake_failure`. Otherwise the peer keeps a half-open handshake for this client. TizenRT's `iotivity_1.2-rel` fork frees that state on a fatal alert, which is read in code and not measured. (2026-11-13)
+- When either pure-Python engine, certificate or PSK, refuses a server message before its own flight, it sends one epoch-zero fatal `handshake_failure`. Otherwise the peer keeps a half-open handshake for this client. Measured on a dryer on 2026-11-13, after a refusal at the server's Certificate: with the alert, a retry from the same port completed at once; without it, the dryer resent its old flight to every new ClientHello from that port for more than 10 minutes. (2026-11-13)
+- A fatal alert from the peer, and a local limit (sequence space, outbound buffer), end the handshake with no alert. The peer has already ended it, or the refusal is not about what the peer sent. (2026-11-13)
+- Neither engine refuses a received record longer than the negotiated fragment length. The oven measured on 2026-10-26 echoes the extension and still sends its handshake flight in longer records, so the check would fail that handshake. It waits until hardware needs it. (2026-11-13)
 - The engine verifies the server chain for the SSL-server purpose. The pyOpenSSL path refuses a leaf whose EKU lacks serverAuth, and the two paths must give the same trust answer. (2026-11-13)
 
 ## Requests

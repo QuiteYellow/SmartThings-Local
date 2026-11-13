@@ -264,30 +264,30 @@ class DtlsPskClient(_DtlsClientBase):
         # ssl_cli.c:2692 -- psk_identity_hint first, then ServerECDHParams,
         # and no signature for a PSK key exchange.
         if len(body) < 2:
-            self._fail("short ServerKeyExchange")
+            self._abandon("short ServerKeyExchange")
             return
         hint_len = int.from_bytes(body[0:2], "big")
         offset = 2 + hint_len
         if offset + 4 > len(body):
-            self._fail("malformed ServerKeyExchange")
+            self._abandon("malformed ServerKeyExchange")
             return
         if body[offset] != _ECCURVETYPE_NAMED:
-            self._fail("server offered a non-named curve")
+            self._abandon("server offered a non-named curve")
             return
         curve = int.from_bytes(body[offset + 1:offset + 3], "big")
         if curve != _NAMED_CURVE_SECP256R1:
-            self._fail(f"server offered unexpected curve 0x{curve:04x}")
+            self._abandon(f"server offered unexpected curve 0x{curve:04x}")
             return
         point_len = body[offset + 3]
         point = body[offset + 4:offset + 4 + point_len]
         if len(point) != point_len or point_len == 0:
-            self._fail("malformed server ECDH point")
+            self._abandon("malformed server ECDH point")
             return
         try:
             # Rejects points that are malformed or not on the curve.
             ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), point)
         except ValueError:
-            self._fail("server ECDH point is not on secp256r1")
+            self._abandon("server ECDH point is not on secp256r1")
             return
         self._peer_point = point
         self._private_key = ec.generate_private_key(ec.SECP256R1())

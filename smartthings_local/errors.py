@@ -118,9 +118,12 @@ class FragmentLimitTimeoutError(SessionTimeoutError):
     is that the first block of the transfer drew nothing and that a fragment
     length was negotiated. An appliance that has powered its radio down
     produces the same silence. What separates the two is whether other, smaller
-    resources on the same device still answer, and that is the caller's to
-    decide -- which is the reason this carries the limit rather than asserting
-    the reason.
+    resources on the same device answer on a *fresh* session. Asking on the
+    session that raised this separates nothing: on the TP1X boards @fredrikbae
+    measured, that session stops answering everything, small resources
+    included, so both cases look the same there. The decision is the caller's,
+    which is the reason this carries the limit rather than asserting the
+    reason.
 
     A timeout on a later block stays an ordinary :class:`SessionTimeoutError`:
     blocks were arriving, so the representation fits and the deadline was the

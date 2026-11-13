@@ -497,7 +497,7 @@ class _DtlsClientBase:
             if body_start + frag_len > len(payload) or frag_off + frag_len > length:
                 return
             if length > _MAX_HANDSHAKE_MESSAGE:
-                self._fail("handshake message too large")
+                self._abandon("handshake message too large")
                 return
             body = payload[body_start:body_start + frag_len]
             offset = body_start + frag_len
@@ -511,7 +511,7 @@ class _DtlsClientBase:
             complete = self._reassemble(msg_type, msg_seq, length, frag_off, body)
             if complete is not None:
                 if len(self._ready) >= _MAX_PENDING_MESSAGES:
-                    self._fail("too many out-of-order handshake messages")
+                    self._abandon("too many out-of-order handshake messages")
                     return
                 self._ready[msg_seq] = (msg_type, complete)
                 self._deliver_ready()
@@ -545,7 +545,7 @@ class _DtlsClientBase:
             # under `>=`. A length change on an existing msg_seq replaces its
             # entry rather than adding one.
             if entry is None and len(self._pending) >= _MAX_PENDING_MESSAGES:
-                self._fail("too many incomplete handshake messages")
+                self._abandon("too many incomplete handshake messages")
                 return None
             entry = (length, bytearray(length), bytearray(length))
             self._pending[msg_seq] = entry
@@ -607,7 +607,7 @@ class _DtlsClientBase:
         if self._state == "sent_cookie_hello":
             self._hello_verify_count += 1
             if self._hello_verify_count > _MAX_HELLO_VERIFY:
-                self._fail("server kept re-issuing HelloVerifyRequest")
+                self._abandon("server kept re-issuing HelloVerifyRequest")
                 return
             if cookie == self._cookie:
                 # An identical cookie does not say why it arrived. Our answer
@@ -636,25 +636,25 @@ class _DtlsClientBase:
         if self._state not in ("sent_hello", "sent_cookie_hello"):
             return
         if len(body) < 35:
-            self._fail("short ServerHello")
+            self._abandon("short ServerHello")
             return
         if body[0:2] != _VERSION:
-            self._fail("server selected a version other than DTLS 1.2")
+            self._abandon("server selected a version other than DTLS 1.2")
             return
         self._server_random = body[2:34]
         offset = 34
         session_len = body[offset]
         offset += 1 + session_len
         if offset + 3 > len(body):
-            self._fail("malformed ServerHello")
+            self._abandon("malformed ServerHello")
             return
         suite = int.from_bytes(body[offset:offset + 2], "big")
         if suite not in self._offered_suites():
-            self._fail(f"server selected unexpected ciphersuite 0x{suite:04x}")
+            self._abandon(f"server selected unexpected ciphersuite 0x{suite:04x}")
             return
         self._suite = suite
         if body[offset + 2] != 0:
-            self._fail("server selected a compression method")
+            self._abandon("server selected a compression method")
             return
         self._on_server_hello(body, offset + 3)
         if self._failed:
@@ -692,7 +692,9 @@ class _DtlsClientBase:
         fork: mbedTLS 2.7.8 returns `MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE` for
         it (`ssl_tls.c:4310-4312`), and the fork's `SSL_CHECK_FAIL` calls
         `RemovePeerFromList` for that code (`ca_adapter_net_ssl.c:215-249`,
-        used at `:2234`). This is read in code, not measured on an appliance.
+        used at `:2234`). Measured on a dryer on 2026-11-13: after a refusal
+        at the server's Certificate, a retry from the same port completed at
+        once with the alert, and failed for more than 10 minutes without it.
 
         The alert is kept apart from the outbox, because the handshake driver
         stops reading the outbox when `do_handshake` raises. The driver

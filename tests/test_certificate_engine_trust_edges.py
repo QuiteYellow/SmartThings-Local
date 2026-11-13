@@ -259,3 +259,29 @@ def test_a_valid_fragment_length_is_kept(chain, value):
         mtu=1400
     )
     assert client._mfl == value
+
+
+# -- a missing purpose binding names itself --------------------------------
+
+
+@pytest.mark.parametrize(
+    "missing", ["X509_STORE_set_purpose", "X509_PURPOSE_SSL_SERVER"]
+)
+def test_a_missing_purpose_binding_raises_at_construction(
+    chain, monkeypatch, missing
+):
+    from smartthings_local.protocol import auth as auth_module
+
+    real = auth_module._util.lib
+
+    class _Lib:
+        def __getattr__(self, name):
+            if name == missing:
+                raise AttributeError(name)
+            return getattr(real, name)
+
+    monkeypatch.setattr(
+        auth_module, "_util", SimpleNamespace(lib=_Lib())
+    )
+    with pytest.raises(RuntimeError, match="server certificate purpose"):
+        _provider(chain)
