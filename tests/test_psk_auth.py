@@ -93,7 +93,7 @@ def test_a_nul_identity_builds_a_provider_and_a_session_connection():
     provider = PskAuth(identity=identity, key=_KEY)
 
     assert PskAuth.validate_identity(identity) is None
-    assert provider._create_dtls_connection(mtu=1200) is not None
+    assert provider.create_dtls_connection(mtu=1200) is not None
 
 
 def test_openssl_path_refuses_a_nul_identity_rather_than_truncating_it():
@@ -441,7 +441,7 @@ def test_psk_handshake_rejection_does_not_expose_credentials():
         patch.object(auth_module, "_util", _fake_openssl_util(lambda *_: None)),
         patch.object(
             PskAuth,
-            "_create_dtls_connection",
+            "create_dtls_connection",
             lambda _self, *, mtu: connection,
         ),
         patch.object(

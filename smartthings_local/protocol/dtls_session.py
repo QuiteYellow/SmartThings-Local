@@ -47,6 +47,7 @@ from ..errors import (
     PeerInitiatedHandshakeError,
     SessionClosedError,
     SessionError,
+    FragmentLimitTimeoutError,
     SessionIdentifierError,
     SessionResetError,
     SessionTimeoutError,
@@ -56,6 +57,7 @@ from . import coap as _coap
 from .auth import (
     AuthenticationProvider,
     CertificateAuth,
+    _connection_factory,
     SamsungServerProfile,
     ServerCertificateAuth,
 )
@@ -122,6 +124,47 @@ _BLOCK_MAX_ATTEMPTS = 3
 _BLOCK_ACK_TIMEOUT  = 4.0
 _MAX_BLOCK1_BODY_BYTES = 512 * 1024
 _MAX_BLOCK1_REQUESTS = 1024
+
+# The length of the token _next_tok mints. _request_size builds with the same
+# length, so a size computed before the token exists is the size sent.
+_REQUEST_TOKEN_BYTES = 4
+
+
+def _request_size(options, payload):
+    """Return the length of a CON request with these options and payload."""
+    return len(build_coap(
+        TYPE_CON, METHOD_POST, 0, bytes(_REQUEST_TOKEN_BYTES), options,
+        payload))
+
+
+def _block1_szx(base_options, extra_options, body_length, limit):
+    """Return the first Block1 SZX: BLOCK_SZX, or less to fit ``limit``.
+
+    The size is checked for the largest message of the upload: Size1, which
+    only block 0 carries, together with a 3-byte Block1 value, which only a
+    late block needs. A server can lower the SZX later but never raise it,
+    so every later block fits too. Raises ValueError when no SZX fits, or
+    when the SZX that fits needs more than _MAX_BLOCK1_REQUESTS blocks, so a
+    body that cannot finish is refused before its first block.
+    """
+    if limit is None:
+        return BLOCK_SZX
+    size_width = max(1, (body_length.bit_length() + 7) // 8)
+    options = list(base_options)
+    options.append((SIZE1, body_length.to_bytes(size_width, 'big')))
+    options.extend(extra_options)
+    for szx in range(BLOCK_SZX, -1, -1):
+        block = 1 << (szx + 4)
+        sized = options + [(BLOCK1, block_value(1 << 16, 1, szx))]
+        if _request_size(sized, bytes(block)) <= limit:
+            if -(-body_length // block) > _MAX_BLOCK1_REQUESTS:
+                raise ValueError(
+                    'body_cbor needs more Block1 requests than allowed at '
+                    f'the negotiated fragment length of {limit}')
+            return szx
+    raise ValueError(
+        f'no Block1 size fits the negotiated fragment length of {limit}')
+
 
 # Base per-attempt wait for a write retransmission, doubled per attempt
 # (RFC 7252 §4.2). Retransmission itself is off by default: a device that
@@ -755,18 +798,16 @@ class DtlsCoapSession:
         engine other than pyOpenSSL can be reached without an isinstance
         fork spreading through connect() and the reader loop.
 
-        A provider may carry a private ``_create_dtls_connection`` factory,
-        which owns its own engine and never sees an ``SSL.Context``. Found
-        by ``getattr`` rather than declared on ``AuthenticationProvider``:
-        that Protocol is ``runtime_checkable`` and ``__init__`` gates on
-        ``isinstance``, so a required method would reject every third-party
-        provider that has not grown one. A provider that deliberately
-        supplies the hook is therefore routed whether or not this package
-        ships it, which does not make it a supported public extension API --
-        a real one would be designed separately.
+        A provider may answer ``create_dtls_connection``, owning its own
+        engine and never seeing an ``SSL.Context``. That is
+        :class:`~smartthings_local.protocol.auth.DtlsConnectionProvider`, and
+        the connection it returns is
+        :class:`~smartthings_local.protocol.auth.DtlsConnection`. Both are
+        supported API; the private ``_create_dtls_connection`` this package
+        used first is still consulted, with a ``FutureWarning``.
 
-        The contract the hook has to meet, for anyone experimenting with
-        another engine:
+        The contract the connection has to meet, which those two types state
+        in full:
 
         - Return a fresh connection for this attempt, already in client
           state, with ``mtu`` applied.
@@ -783,7 +824,7 @@ class DtlsCoapSession:
         on a slow PEM read is not interrupted; what the checks guarantee is
         that no socket is created once cancellation is set.
         """
-        factory = getattr(self.auth, "_create_dtls_connection", None)
+        factory = _connection_factory(self.auth)
         if factory is not None:
             conn = factory(mtu=self.mtu)
             if self._lifecycle_cancel.is_set() or \
@@ -1262,7 +1303,7 @@ class DtlsCoapSession:
             self._tok_counter = (self._tok_counter + 1) & 0xFFFFFFFF
             # 4-byte tokens — fits within tkl=8 cap with headroom and
             # avoids collisions across long-running OBSERVE subscriptions.
-            return self._tok_counter.to_bytes(4, 'big')
+            return self._tok_counter.to_bytes(_REQUEST_TOKEN_BYTES, 'big')
 
     def _next_available_observe_tok_locked(self):
         """Return an unused 8-byte Observe token.
@@ -1373,6 +1414,14 @@ class DtlsCoapSession:
             if (self._lifecycle_cancel.is_set() and not orderly_close_send) or \
                     self.conn is None:
                 raise SessionClosedError()
+            # The engine refuses an over-length record with a bare SSL.Error,
+            # which no caller here handles. Refuse it first, with a type a
+            # caller can catch, and before anything is sent.
+            limit = getattr(self.conn, 'negotiated_fragment_length', None)
+            if limit is not None and len(datagram) > limit:
+                raise ValueError(
+                    f'a CoAP message of {len(datagram)} bytes exceeds the '
+                    f'negotiated fragment length of {limit}')
             send_failed = False
             try:
                 self.conn.send(datagram)
@@ -2010,7 +2059,7 @@ class DtlsCoapSession:
                 # owns the session before sending.
                 self._check_live()
                 if time.monotonic() >= deadline:
-                    raise SessionTimeoutError()
+                    raise self._read_timeout(num)
                 self._send_dgram(datagram)
                 while True:
                     with self._state_lock:
@@ -2037,7 +2086,7 @@ class DtlsCoapSession:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         if acknowledged:
-                            raise SessionTimeoutError()
+                            raise self._read_timeout(num)
                         break
                     per_wait = (
                         remaining if acknowledged
@@ -2045,7 +2094,7 @@ class DtlsCoapSession:
                     )
                     if not self._wait_live(ev, per_wait):
                         if acknowledged:
-                            raise SessionTimeoutError()
+                            raise self._read_timeout(num)
                         break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or attempt == _BLOCK_MAX_ATTEMPTS - 1:
@@ -2053,7 +2102,7 @@ class DtlsCoapSession:
                         "GET %s /%s block %d: timed out after %d attempt(s)",
                         self.host, '/'.join(path_segs), num, attempt + 1,
                     )
-                    raise SessionTimeoutError()
+                    raise self._read_timeout(num)
                 logger.debug(
                     "GET %s /%s block %d: attempt %d/%d timeout, retrying",
                     self.host, '/'.join(path_segs), num,
@@ -2061,7 +2110,42 @@ class DtlsCoapSession:
                 )
         finally:
             self._unregister_pending_request(tok, mid, exchange)
-        raise SessionTimeoutError()
+        raise self._read_timeout(num)
+
+    @property
+    def negotiated_fragment_length(self):
+        """The DTLS fragment length in force, or None.
+
+        None covers three different situations and deliberately does not
+        separate them: no session, an engine that cannot negotiate a length,
+        and a server that declined to echo one. A caller that needs to know
+        which asks before connecting.
+
+        These appliances cannot send a record larger than a negotiated length,
+        so this is the ceiling on any single representation a read can return.
+
+        A completed handshake does not mean the length is in force. A server
+        that does not echo the extension still completes it, and this is then
+        None. A caller that offered a length and depends on it compares this
+        with the length offered after ``connect()``.
+        """
+        connection = self.conn
+        if connection is None:
+            return None
+        return getattr(connection, "negotiated_fragment_length", None)
+
+    def _read_timeout(self, block_number):
+        """Return the error for a read that gave up, typed where it can be.
+
+        A first block that drew nothing, with a fragment length in force, is
+        the shape of a representation the appliance cannot send at all. A later
+        block means blocks were arriving, so the deadline was the binding
+        constraint and the plain timeout is the honest answer.
+        """
+        limit = self.negotiated_fragment_length
+        if limit is not None and not block_number:
+            return FragmentLimitTimeoutError(limit)
+        return SessionTimeoutError()
 
     def _wait_live(self, ev, per_wait):
         """Wait for one response, giving up early if the reader dies
@@ -2143,6 +2227,16 @@ class DtlsCoapSession:
         Larger bodies use token-stable Block1 framing. ``body_cbor`` must
         already be encoded.
 
+        With a negotiated fragment length, every CoAP message must fit in it
+        whole, header and options included. A body that does not fit one
+        message then uses Block1, at the largest block size that fits. These
+        appliances have not been measured with Block1 blocks smaller than
+        1024 bytes. ``ValueError`` is raised before anything is sent if even
+        16-byte blocks do not fit, or if the body needs more than 1024
+        blocks of the size that fits. Smaller blocks therefore lower the
+        largest body: at a length of 512 the blocks are 256 bytes, so the
+        limit is 256 KiB, not 512 KiB.
+
         timeout bounds the whole call, pacing included, so post() returns
         within it rather than within it plus a rate-limit interval.
 
@@ -2168,7 +2262,11 @@ class DtlsCoapSession:
             opts.append((URI_QUERY, q.encode()))
         opts.append((CONTENT_FORMAT, CF_CBOR))
         opts.append((ACCEPT, CF_CBOR))
-        if len(body_cbor) > block_size:
+        limit = self.negotiated_fragment_length
+        if len(body_cbor) > block_size or (
+                limit is not None
+                and _request_size(opts + list(extra_options), body_cbor)
+                > limit):
             return self._post_blockwise(
                 path_segs,
                 body_cbor,
@@ -2278,10 +2376,12 @@ class DtlsCoapSession:
             self, path_segs, body_cbor, base_options, extra_options, *,
             timeout):
         """Upload one bounded body with token-stable Block1 framing."""
+        szx = _block1_szx(
+            base_options, extra_options, len(body_cbor),
+            self.negotiated_fragment_length)
         tok = self._next_tok()
         deadline = time.monotonic() + timeout
         offset = 0
-        szx = BLOCK_SZX
         request_count = 0
 
         while offset < len(body_cbor):

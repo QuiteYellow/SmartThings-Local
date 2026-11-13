@@ -76,6 +76,14 @@ Public, redacted exception types for smartthings-local.
 
 *exception*: An endpoint could not be resolved, bound, or connected.
 
+#### `FragmentLimitTimeoutError`
+
+```python
+FragmentLimitTimeoutError(fragment_length=None)
+```
+
+*exception*: A read gave up on its first block while a fragment length was in force.
+
 #### `HandshakePeerCleanupError`
 
 *exception*: A cleanup alert was sent for an HVR-only half-open DTLS peer.
@@ -148,6 +156,46 @@ CertificateAuth(*, certificate_path: str | os.PathLike[str] | None = None, priva
 - `from_files(cls, certificate_path: str | os.PathLike[str], private_key_path: str | os.PathLike[str], *, server_profile: SamsungServerProfile | None = None) -> CertificateAuth`: Create a provider backed by certificate-chain and key files.
 - `from_memory(cls, certificate_pem: str, private_key_pem: str, *, server_profile: SamsungServerProfile | None = None) -> CertificateAuth`: Create a provider backed by an in-memory PEM chain and key.
 
+#### `DtlsConnection`
+
+```python
+DtlsConnection(*args, **kwargs)
+```
+
+*class*: The connection surface this package drives, as a supported contract.
+
+- `DTLSv1_get_timeout()`: Seconds until the current flight should be retransmitted.
+- `DTLSv1_handle_timeout()`: Requeue the current flight and back off.
+- `bio_read(capacity: int = 65535) -> bytes`: Return pending outbound bytes, or raise `WantRead`.
+- `bio_write(datagram: bytes) -> int`: Hand one inbound datagram to the engine.
+- `do_handshake() -> None`: Advance the handshake, raising `WantRead` until it completes.
+- `recv(capacity: int = 65535) -> bytes`: Return one decrypted application record.
+- `send(data: bytes) -> int`: Encrypt and queue one application record.
+- `shutdown() -> None`: Queue a close_notify, which frees the appliance's peer entry.
+
+#### `DtlsConnectionProvider`
+
+```python
+DtlsConnectionProvider(*args, **kwargs)
+```
+
+*class*: An :class:`AuthenticationProvider` that also builds its own connection.
+
+- `configure_context(context: OpenSSL.SSL.Context) -> None`: Configure a context while this provider remains session-owned.
+- `create_dtls_connection(*, mtu: int) -> DtlsConnection`: Return a fresh connection for one attempt, in client state.
+
+#### `FragmentingCertificateAuth`
+
+```python
+FragmentingCertificateAuth(*, server_profile: SamsungServerProfile | None = None, max_fragment_length: int = 1024, certificate_path: str | os.PathLike[str] | None = None, private_key_path: str | os.PathLike[str] | None = None, certificate_pem: str | None = None, private_key_pem: str | None = None)
+```
+
+*class*: Client-certificate authentication on this package's own DTLS engine.
+
+- `create_dtls_connection(*, mtu: int)`: Return a DTLS connection carrying this credential.
+- `from_files(cls, certificate_path: str | os.PathLike[str], private_key_path: str | os.PathLike[str], *, server_profile: SamsungServerProfile | None = None, max_fragment_length: int = 1024) -> FragmentingCertificateAuth`: Create a provider backed by certificate-chain and key files.
+- `from_memory(cls, certificate_pem: str, private_key_pem: str, *, server_profile: SamsungServerProfile | None = None, max_fragment_length: int = 1024) -> FragmentingCertificateAuth`: Create a provider backed by an in-memory PEM chain and key.
+
 #### `PskAuth`
 
 ```python
@@ -157,6 +205,7 @@ PskAuth(*, identity: bytes, key: bytes)
 *class*: DTLS authentication using an existing OCF PSK credential.
 
 - `configure_context(context: OpenSSL.SSL.Context) -> None`: Configure one context for the narrow Samsung OCF PSK profile.
+- `create_dtls_connection(*, mtu: int)`: Return a DTLS connection carrying this credential.
 - `validate_identity(identity: bytes) -> None`: Raise unless `identity` is one a session can put on the wire.
 
 #### `SamsungServerProfile`

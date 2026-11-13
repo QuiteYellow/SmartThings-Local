@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
+from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import ExtensionOID
 from OpenSSL import SSL, _util, crypto
 
+from ._dtls_cert import DtlsCertClient, _validate_max_fragment_length
 from ._dtls_psk import DtlsPskClient
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,123 @@ class AuthenticationProvider(Protocol):
 
     def configure_context(self, context: SSL.Context) -> None:
         """Configure a context while this provider remains session-owned."""
+
+
+_LEGACY_CONNECTION_HOOK = "_create_dtls_connection"
+
+
+def _connection_factory(auth):
+    """Return a provider's connection factory, or None.
+
+    Prefers the supported :meth:`DtlsConnectionProvider.create_dtls_connection`
+    and falls back to the private name this package used before it, with a
+    ``FutureWarning``. That category, unlike ``DeprecationWarning``, is shown
+    by the default filters whatever frame it is attributed to, and the frame
+    here is package code. The default filters also show it once per call
+    site, not once per provider class. The fallback exists because a downstream
+    integration shipped against the private hook and runs in production; that
+    is exactly the fragility making it public is meant to end, so breaking it
+    in the same release would be a strange way to fix it.
+    """
+    factory = getattr(auth, "create_dtls_connection", None)
+    if factory is not None:
+        return factory
+    legacy = getattr(auth, _LEGACY_CONNECTION_HOOK, None)
+    if legacy is None:
+        return None
+    warnings.warn(
+        f"{type(auth).__name__} supplies {_LEGACY_CONNECTION_HOOK}, which was "
+        "never supported API. Rename it to create_dtls_connection and declare "
+        "DtlsConnectionProvider; the private name will stop being consulted.",
+        FutureWarning,
+        stacklevel=3,
+    )
+    return legacy
+
+
+@runtime_checkable
+class DtlsConnection(Protocol):
+    """The connection surface this package drives, as a supported contract.
+
+    A provider that supplies its own engine returns something shaped like
+    this. The eight methods are the whole surface: `dtls_handshake` drives
+    `bio_write`, `bio_read`, `do_handshake` and the two timeout verbs,
+    `DtlsCoapSession` adds `send` and `recv`, and both the session and the
+    diagnostic call `shutdown` to release the appliance's peer entry.
+
+    `set_connect_state` and `set_ciphertext_mtu` are deliberately absent. They
+    belong to the context path, and a factory returns a connection already in
+    client state with its MTU applied, so there is nothing left for a caller
+    to set.
+
+    The two `DTLSv1_` names carry pyOpenSSL's capitalisation because the same
+    handshake driver drives pyOpenSSL and this package's own engines, and one
+    driver cannot hold two spellings. Renaming them would be a breaking change
+    for no behaviour.
+
+    Required behaviour, which the type cannot express:
+
+    - `bio_read` raises `WantRead` when no datagram is pending, rather than
+      returning empty bytes.
+    - `do_handshake` raises `WantRead` until the handshake completes.
+    - `recv` returns buffered application data before reporting a failure or a
+      close, and raises `ZeroReturn` on an orderly close.
+    - The connection owns no socket and starts no network I/O. The caller owns
+      the socket, the deadline, cancellation and publishing the session.
+    """
+
+    def bio_write(self, datagram: bytes) -> int:
+        """Hand one inbound datagram to the engine."""
+
+    def bio_read(self, capacity: int = 65535) -> bytes:
+        """Return pending outbound bytes, or raise `WantRead`."""
+
+    def do_handshake(self) -> None:
+        """Advance the handshake, raising `WantRead` until it completes."""
+
+    def send(self, data: bytes) -> int:
+        """Encrypt and queue one application record."""
+
+    def recv(self, capacity: int = 65535) -> bytes:
+        """Return one decrypted application record."""
+
+    def shutdown(self) -> None:
+        """Queue a close_notify, which frees the appliance's peer entry."""
+
+    def DTLSv1_get_timeout(self):  # noqa: N802 - see the class docstring
+        """Seconds until the current flight should be retransmitted."""
+
+    def DTLSv1_handle_timeout(self):  # noqa: N802 - see the class docstring
+        """Requeue the current flight and back off."""
+
+
+@runtime_checkable
+class DtlsConnectionProvider(Protocol):
+    """An :class:`AuthenticationProvider` that also builds its own connection.
+
+    Supported public API. A credential whose carrier is not pyOpenSSL answers
+    `create_dtls_connection`, and `DtlsCoapSession` and
+    `diagnose_dtls_handshake` use it in place of building a context. This is
+    the interface #120 left open when it put the construction behind one
+    private hook per caller, and both consumers of that hook asked for it to
+    become supported rather than private: a private name tells a downstream
+    integration it has broken only after a release.
+
+    `configure_context` stays in the contract, so a provider still satisfies
+    :class:`AuthenticationProvider` and the context path remains available to
+    a caller that wants it. That also keeps the session's existing `isinstance`
+    gate meaningful rather than something to be worked around.
+
+    A provider is free to implement this and nothing in this package requires
+    it, so a third-party :class:`AuthenticationProvider` that has not grown the
+    method is unaffected.
+    """
+
+    def configure_context(self, context: SSL.Context) -> None:
+        """Configure a context while this provider remains session-owned."""
+
+    def create_dtls_connection(self, *, mtu: int) -> DtlsConnection:
+        """Return a fresh connection for one attempt, in client state."""
 
 
 class SamsungServerRole(Enum):
@@ -555,6 +674,239 @@ class CertificateAuth:
         return identity
 
 
+def _set_server_purpose(store) -> None:
+    """Verify `store`'s chains for the SSL-server purpose, or raise.
+
+    The binding is looked up, as the curve setter's is, so a `cryptography`
+    build without it raises a RuntimeError that names the cause.
+    """
+    set_purpose = getattr(_util.lib, "X509_STORE_set_purpose", None)
+    purpose = getattr(_util.lib, "X509_PURPOSE_SSL_SERVER", None)
+    if set_purpose is None or purpose is None:
+        raise RuntimeError(
+            "this OpenSSL binding cannot set the server certificate purpose"
+        )
+    if set_purpose(store._store, purpose) != 1:
+        raise RuntimeError("OpenSSL rejected the server certificate purpose")
+
+
+class FragmentingCertificateAuth(CertificateAuth):
+    """Client-certificate authentication on this package's own DTLS engine.
+
+    Same credentials, same server profile, same trust rules as
+    :class:`CertificateAuth`. The difference is the carrier: the handshake runs
+    on `_dtls_cert.DtlsCertClient` rather than pyOpenSSL, so the ClientHello
+    can offer `max_fragment_length`.
+
+    That extension is the only reason to choose this provider. The washer and
+    dryer on issue #20 leave the network for about ten seconds whenever they
+    have to put a handshake flight on the wire that will not fit one frame, and
+    theirs will not. Measured on both units on 2026-10-25: four of four
+    probes without the extension took the unit off the network, and both
+    probes with it drew the appliance's whole flight and dropped nothing.
+    pyOpenSSL cannot send it, and neither can any other Python binding of
+    OpenSSL, because `cryptography` exposes no
+    `SSL_CTX_set_tlsext_max_fragment_length` and no `SSL_CTX_ctrl` to reach the
+    macro through.
+
+    `server_profile` is optional, exactly as on :class:`CertificateAuth`, and
+    means the same thing on both. Without one, the peer's chain is verified
+    against the bundled OCF root and nothing further is pinned, which is what
+    the pyOpenSSL path does when its context carries no profile. With one, the
+    profile's role, subject and UUID checks apply on top.
+
+    Nothing per-appliance is needed either way. The client certificate's own
+    subject UUID is a constant that does not rotate (`setup_cert.py`), and a
+    profile pins the *appliance's* hardware leaf UUID, which is a different
+    identity and differs between units, so it belongs to a caller that has one
+    to pin rather than to this constructor.
+
+    Nothing in this package selects this provider. A caller opts in, which is
+    deliberate. On 2026-10-26 the engine completed handshakes on a Samsung
+    dryer and oven, with and without a fragment length. Both of those
+    appliances already work on pyOpenSSL, so the units that stall, which are
+    the reason for this provider, are still untested with it.
+    """
+
+    __slots__ = ("_max_fragment_length",)
+
+    def __init__(
+        self,
+        *,
+        server_profile: SamsungServerProfile | None = None,
+        max_fragment_length: int = 1024,
+        certificate_path: str | PathLike[str] | None = None,
+        private_key_path: str | PathLike[str] | None = None,
+        certificate_pem: str | None = None,
+        private_key_pem: str | None = None,
+    ) -> None:
+        super().__init__(
+            certificate_path=certificate_path,
+            private_key_path=private_key_path,
+            certificate_pem=certificate_pem,
+            private_key_pem=private_key_pem,
+            server_profile=server_profile,
+        )
+        # The engine's own rule, applied here so that a bad value raises at
+        # this call and not at the first connect.
+        _validate_max_fragment_length(max_fragment_length)
+        # The same for the purpose binding. Inside a handshake the engine
+        # reports only the exception type, so a missing binding has to
+        # surface here, where its reason reaches the caller.
+        _set_server_purpose(crypto.X509Store())
+        object.__setattr__(self, "_max_fragment_length", max_fragment_length)
+
+    @classmethod
+    def from_files(
+        cls,
+        certificate_path: str | PathLike[str],
+        private_key_path: str | PathLike[str],
+        *,
+        server_profile: SamsungServerProfile | None = None,
+        max_fragment_length: int = 1024,
+    ) -> FragmentingCertificateAuth:
+        """Create a provider backed by certificate-chain and key files.
+
+        Overridden only to carry `max_fragment_length`; the inherited factory
+        has no parameter for it.
+        """
+        return cls(
+            certificate_path=certificate_path,
+            private_key_path=private_key_path,
+            server_profile=server_profile,
+            max_fragment_length=max_fragment_length,
+        )
+
+    @classmethod
+    def from_memory(
+        cls,
+        certificate_pem: str,
+        private_key_pem: str,
+        *,
+        server_profile: SamsungServerProfile | None = None,
+        max_fragment_length: int = 1024,
+    ) -> FragmentingCertificateAuth:
+        """Create a provider backed by an in-memory PEM chain and key."""
+        return cls(
+            certificate_pem=certificate_pem,
+            private_key_pem=private_key_pem,
+            server_profile=server_profile,
+            max_fragment_length=max_fragment_length,
+        )
+
+    def __repr__(self) -> str:
+        """Return a representation that never includes credential material."""
+        return "FragmentingCertificateAuth()"
+
+    def create_dtls_connection(self, *, mtu: int):
+        """Return a DTLS connection carrying this credential.
+
+        Satisfies :class:`DtlsConnectionProvider`.
+        """
+        return self._new_client(mtu, self._verify_peer_chain)
+
+    def _create_diagnostic_connection(self, *, mtu: int):
+        """Return a connection that leaves the trust decision to the peer.
+
+        For `diagnose_dtls_handshake` only. A diagnostic reports the
+        appliance's own alert, so it must not refuse the chain locally. The
+        engine skips the chain check when it gets no callback
+        (`DtlsCertClient._send_client_flight`). It still checks the
+        ServerKeyExchange signature against the leaf.
+        """
+        return self._new_client(mtu, None)
+
+    def _new_client(self, mtu, verify_peer_chain):
+        chain_der, key = self._load_client_credential()
+        return DtlsCertClient(
+            chain_der,
+            key,
+            mtu=mtu,
+            max_fragment_length=self._max_fragment_length,
+            verify_peer_chain=verify_peer_chain,
+        )
+
+    def _load_client_credential(self):
+        """Return our chain as DER, leaf first, and the private key."""
+        if self._certificate_pem is not None:
+            chain_pem = self._certificate_pem.encode()
+            key_pem = self._private_key_pem.encode()
+        else:
+            chain_pem = Path(self._certificate_path).read_bytes()
+            key_pem = Path(self._private_key_path).read_bytes()
+        certificates = _PEM_CERT_RE.findall(chain_pem)
+        if not certificates:
+            raise ValueError("no certificate found in the client chain")
+        chain_der = [
+            crypto.load_certificate(crypto.FILETYPE_PEM, block)
+            .to_cryptography()
+            .public_bytes(serialization.Encoding.DER)
+            for block in certificates
+        ]
+        key = serialization.load_pem_private_key(key_pem, password=None)
+        return chain_der, key
+
+    def _verify_peer_chain(self, chain_der: list[bytes]) -> None:
+        """Verify the peer's chain, then apply any profile's identity rules.
+
+        Raises to refuse, which is what the engine's callback contract asks
+        for. The chain is always verified, against the bundled OCF root plus
+        any additional CA a profile carries. A profile then adds its leaf
+        check, `SamsungServerProfile._verify_peer`, so the role, subject and
+        UUID rules are not restated here. With no profile this matches what
+        the pyOpenSSL path does: OpenSSL's chain verdict and no pin.
+
+        Certificates are parsed by OpenSSL rather than by `cryptography`,
+        because Samsung's factory leaves are not accepted by a `cryptography`
+        reparse that OpenSSL has already verified (#33).
+        """
+        if not chain_der:
+            raise ValueError("peer sent no certificate")
+        parsed = [
+            crypto.load_certificate(crypto.FILETYPE_ASN1, der) for der in chain_der
+        ]
+        store = crypto.X509Store()
+        for block in _PEM_CERT_RE.findall(Path(_OCF_ROOT_CA).read_bytes()):
+            store.add_cert(crypto.load_certificate(crypto.FILETYPE_PEM, block))
+        if self._server_profile is not None:
+            for certificate in (
+                self._server_profile._additional_ca_certificates or ()
+            ):
+                store.add_cert(
+                    crypto.load_certificate(crypto.FILETYPE_PEM, certificate)
+                )
+        # The pyOpenSSL path refuses a server leaf whose extended key usage
+        # lacks serverAuth. Measured 2026-11-13 with a synthetic chain, on the
+        # dependency floor and on current: only the leaf's EKU differed, and
+        # serverAuth completed while clientAuth alone failed verification.
+        # X509StoreContext sets no purpose, so set the SSL-server one here.
+        _set_server_purpose(store)
+        crypto.X509StoreContext(
+            store, parsed[0], chain=parsed[1:] or None
+        ).verify_certificate()
+        if self._server_profile is None:
+            return
+        if not self._server_profile._verify_peer(None, parsed[0], 0, 0, True):
+            raise ValueError("peer certificate did not match the server profile")
+
+    def _authenticated_server_identity(self, connection) -> UUID | None:
+        """Read the verified leaf's UUID from the engine's own chain.
+
+        None without a profile, which is what :class:`CertificateAuth` returns
+        in the same case: there is no verified role to read an identity from.
+        """
+        if self._server_profile is None:
+            return None
+        chain = getattr(connection, "peer_chain_der", None)
+        if not chain:
+            raise ValueError("verified server identity was unavailable")
+        leaf = crypto.load_certificate(crypto.FILETYPE_ASN1, chain[0])
+        identity = self._server_profile._certificate_identity(leaf)
+        if identity is None:
+            raise ValueError("verified server identity was unavailable")
+        return identity
+
+
 class PskAuth:
     """DTLS authentication using an existing OCF PSK credential.
 
@@ -664,17 +1016,13 @@ class PskAuth:
         """Return a representation that never includes credential material."""
         return "PskAuth()"
 
-    def _create_dtls_connection(self, *, mtu: int):
+    def create_dtls_connection(self, *, mtu: int):
         """Return a DTLS connection carrying this credential.
 
-        Private, and found by ``DtlsCoapSession`` and the diagnostic through
-        ``getattr`` rather than through ``AuthenticationProvider``: that
-        Protocol is ``runtime_checkable`` and gated on with ``isinstance``,
-        so a required method here would reject third-party providers.
-
-        The engine speaks one ciphersuite and no X.509, and it frames the
-        identity with an explicit length, which is the whole reason this
-        path exists alongside :meth:`configure_context`.
+        Satisfies :class:`DtlsConnectionProvider`. The engine speaks one
+        ciphersuite and no X.509, and it frames the identity with an explicit
+        length, which is the whole reason this path exists alongside
+        :meth:`configure_context`.
         """
         return self._engine(mtu=mtu)
 
