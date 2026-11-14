@@ -1,10 +1,11 @@
 """Offline tests for pr129_check.py. No appliance, no network.
 
-The session and discovery are replaced with fakes, so these cover the
+Most tests replace the session and discovery with fakes, so they cover the
 script's own decisions: which arms run, the handshake ceiling, the gap floor,
-and what reaches the output. Two tests read the installed library's source,
-so that a change to the log line or the alert wording the script depends on
-fails here and not silently on someone's hardware.
+and what reaches the output. One test runs the library's real
+`DtlsCoapSession.connect()` over a fake connection that fails with an alert,
+so a change to how the library logs that failure fails here. One test reads
+the engine's source for the alert wording, which the fake cannot exercise.
 """
 
 import inspect
@@ -12,6 +13,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+from OpenSSL import SSL
 
 import pr129_check as check
 from smartthings_local.errors import (
@@ -72,6 +74,11 @@ class FakeSession:
         self.closed = True
 
 
+def _directory(ports, answered=True):
+    return SimpleNamespace(
+        found=bool(ports), ports=tuple(ports), response_received=answered)
+
+
 @pytest.fixture
 def harness(monkeypatch, tmp_path):
     FakeSession.created = []
@@ -81,7 +88,7 @@ def harness(monkeypatch, tmp_path):
         lambda self: ([], None))
     monkeypatch.setattr(
         check, "discover_ocf_secure_ports",
-        lambda host, **kw: SimpleNamespace(found=True, ports=(49155,)))
+        lambda host, **kw: _directory((49155,)))
     sleeps = []
     monkeypatch.setattr(check.time, "sleep", sleeps.append)
     cert = tmp_path / "c.pem"
@@ -176,15 +183,86 @@ def test_the_ceiling_cannot_be_raised(harness):
 def test_ambiguous_ports_are_refused(harness, capsys, monkeypatch):
     monkeypatch.setattr(
         check, "discover_ocf_secure_ports",
-        lambda host, **kw: SimpleNamespace(found=True, ports=(1, 2)))
+        lambda host, **kw: _directory((1, 2)))
     harness(SECRET_HOST)
     assert "refusing to guess" in capsys.readouterr().out
     assert FakeSession.created == []
 
 
-def test_the_library_still_logs_the_line_the_script_reads():
-    source = inspect.getsource(dtls_session.DtlsCoapSession.connect)
-    assert '"dtls handshake failed at the TLS layer: %s"' in source
+def test_an_answer_with_no_secure_port_still_counts_as_an_answer(
+        harness, capsys, monkeypatch):
+    monkeypatch.setattr(
+        check, "discover_ocf_secure_ports",
+        lambda host, **kw: _directory(()))
+    harness(SECRET_HOST)
+    out = capsys.readouterr().out
+    assert "answered but lists no secure port" in out
+    assert "did not answer" not in out
+    assert FakeSession.created == []
+
+
+def test_silence_reads_as_no_answer(harness, capsys, monkeypatch):
+    monkeypatch.setattr(
+        check, "discover_ocf_secure_ports",
+        lambda host, **kw: _directory((), answered=False))
+    monkeypatch.setattr(check, "LIVENESS_BUDGET_S", 0.05)
+    harness(SECRET_HOST)
+    assert "did not answer" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("error, status", [
+    (KeyboardInterrupt, 130),
+    (RuntimeError, 1),
+])
+def test_every_exit_reminds_the_user_to_re_enable(
+        harness, capsys, monkeypatch, error, status):
+    def boom(self, label, host):
+        raise error()
+    monkeypatch.setattr(check._Run, "appliance", boom)
+    assert harness(SECRET_HOST) == status
+    assert "Re-enable your integration now." in capsys.readouterr().out
+
+
+def test_record_overflow_is_named():
+    assert "record_overflow" in check._describe_reason(
+        "peer sent fatal alert 22")
+
+
+class _AlertConnection:
+    """A connection whose handshake fails the way the engine's does."""
+
+    def do_handshake(self):
+        raise SSL.Error("peer sent fatal alert 48")
+
+
+class _AlertAuth:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def configure_context(self, context):
+        raise AssertionError("the context path must not be used")
+
+    def create_dtls_connection(self, *, mtu):
+        return _AlertConnection()
+
+    def _load_client_credential(self):
+        return [], None
+
+
+def test_the_real_session_hands_the_alert_to_the_script(
+        harness, capsys, monkeypatch):
+    """Runs the library's own connect(), so its log call is what is tested.
+
+    A change of level, logger or wording in that call fails this test.
+    """
+    monkeypatch.setattr(check, "DtlsCoapSession", dtls_session.DtlsCoapSession)
+    monkeypatch.setattr(
+        check.FragmentingCertificateAuth, "from_files",
+        staticmethod(lambda *a, **k: _AlertAuth()))
+    harness("127.0.0.1")
+    out = capsys.readouterr().out
+    assert "fatal alert 48 (unknown_ca)" in out
+    assert "no reason logged" not in out
 
 
 def test_the_engine_still_words_a_peer_alert_the_same_way():

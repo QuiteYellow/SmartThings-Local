@@ -14,9 +14,10 @@ Per appliance, at most two DTLS handshakes, each in its own session:
          length in force, GET /oic/d (small), close.
   Arm 2  max_fragment_length 512, the length already measured on these units
          on 2026-10-25. Handshake, GET /device/0 (the large state read), close.
-         Runs only if arm 1's handshake completed. At this commit the client
-         asks for 1024-byte blocks on the first block of a read whatever the
-         negotiated length, so this arm reports what #129 does as shipped.
+         Runs only if arm 1's handshake completed. At this commit the first
+         request of a read carries no Block2 option, so the appliance chooses
+         the block size, and nothing in the client lowers it to the negotiated
+         length. This arm reports what #129 does as shipped.
 
 What it reports:
 
@@ -93,7 +94,8 @@ LIVENESS_BUDGET_S = 60.0
 DEFAULT_LOCAL_PORT = 26960
 
 _ALERT_NAMES = {
-    10: "unexpected_message", 20: "bad_record_mac", 40: "handshake_failure",
+    10: "unexpected_message", 20: "bad_record_mac", 22: "record_overflow",
+    40: "handshake_failure",
     42: "bad_certificate", 43: "unsupported_certificate",
     44: "certificate_revoked", 45: "certificate_expired",
     46: "certificate_unknown", 47: "illegal_parameter", 48: "unknown_ca",
@@ -155,12 +157,21 @@ class _Run:
             time.sleep(remaining)
 
     def secure_port(self, host):
-        """Return (port or None, seconds until the directory answered)."""
+        """Return (port or None, seconds until the directory answered).
+
+        The seconds are None only when the directory never answered. An
+        answer that lists no usable port still counts as an answer, because
+        this is also the check for whether the appliance left the network.
+        """
         started = time.monotonic()
         while time.monotonic() - started < LIVENESS_BUDGET_S:
             result = discover_ocf_secure_ports(host, timeout=3.0, retries=0)
-            if result.found:
+            if result.response_received:
                 elapsed = time.monotonic() - started
+                if not result.found:
+                    print("    the directory answered but lists no secure "
+                          "port")
+                    return None, elapsed
                 if len(result.ports) != 1:
                     print(f"    the directory lists {len(result.ports)} secure "
                           "ports; refusing to guess which one")
@@ -334,17 +345,21 @@ def main(argv=None):
           f"{sys.version_info.major}.{sys.version_info.minor}, "
           f"handshake ceiling {args.max_handshakes}, fixed local port")
     run = _Run(args, reasons.reasons)
+    status = 0
     try:
         for number, host in enumerate(args.hosts, start=1):
             run.appliance(f"appliance {number}", host)
     except KeyboardInterrupt:
-        print("\nstopped")
+        print("\nstopped by Ctrl-C")
+        status = 130
     except Exception as exc:  # noqa: BLE001 -- the class only, never the text
         print(f"\nstopped by {type(exc).__name__}")
-        return 1
+        status = 1
+    # Every exit after the prompt reminds the user, because the prompt told
+    # them to disable their integration.
     print(f"\nhandshakes used: {run.handshakes} of {args.max_handshakes}")
     print("Re-enable your integration now.")
-    return 0
+    return status
 
 
 if __name__ == "__main__":
