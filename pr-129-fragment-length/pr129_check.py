@@ -42,8 +42,9 @@ this script's local port for more than 10 minutes. That was measured on a
 dryer on 2026-11-13. Your integration uses its own port, but disable it for
 these appliances during the run anyway, so that two clients do not contend.
 With two appliances the run takes about 4 minutes. Most of that is a 60 s
-quiet time before each handshake, which starts again when the appliance
-answers after a drop-off.
+quiet time before each handshake after the first, which starts again when
+the appliance answers after a drop-off. Each drop-off adds its recovery
+time, so a run where the appliances drop off can take 6 minutes or more.
 
 Install and run, on a machine on the appliances' network (Python 3.11+).
 Run it on the host itself, not in a container on Docker's bridge network:
@@ -358,7 +359,8 @@ def _confirm():
         "If a handshake times out, the appliance can refuse new handshakes\n"
         "from this script's local port for more than 10 minutes. Wait at\n"
         "least 15 minutes before a second run, or pass a different\n"
-        "--local-port. With two appliances the run takes about 4 minutes.\n"
+        "--local-port. With two appliances the run takes about 4 minutes,\n"
+        "or 6 minutes or more if the appliances drop off the network.\n"
     )
     try:
         input("Press Enter to start, or Ctrl-C to stop. ")
