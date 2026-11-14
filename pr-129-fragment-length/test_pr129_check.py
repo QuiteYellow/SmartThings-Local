@@ -44,6 +44,7 @@ class FakeSession:
         self.length = auth._max_fragment_length
         self.behaviour = self.plan[self.length]
         self.closed = False
+        self.reads = []
         FakeSession.created.append(self)
 
     def connect(self, timeout):
@@ -69,7 +70,9 @@ class FakeSession:
         pass
 
     def get(self, path, timeout):
-        outcome = self.behaviour["get"]
+        self.reads.append("/" + "/".join(path))
+        outcome = self.behaviour.get("by_path", {}).get(
+            tuple(path), self.behaviour.get("get"))
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
@@ -112,7 +115,8 @@ def harness(monkeypatch, tmp_path):
 def test_both_arms_run_when_the_first_completes(harness, capsys):
     FakeSession.plan = {
         1024: {"connect": None, "get": (69, b"x" * 150)},
-        512: {"connect": None, "get": (69, b"x" * 9000)},
+        512: {"connect": None, "get": (69, b"x" * 150),
+              "by_path": {("device", "0"): (69, b"x" * 9000)}},
     }
     assert harness(SECRET_HOST) == 0
     out = capsys.readouterr().out
@@ -122,6 +126,8 @@ def test_both_arms_run_when_the_first_completes(harness, capsys):
                for s in FakeSession.created)
     assert "GET /oic/d: 2.05, 150 bytes" in out
     assert "GET /device/0: 2.05, 9000 bytes" in out
+    assert [s.reads for s in FakeSession.created] == [
+        ["/oic/d"], ["/oic/d", "/device/0"]]
     assert "handshakes used: 2 of 4" in out
     assert SECRET_HOST not in out
     # The gap floor holds whatever the timing: one wait between the arms.
@@ -160,12 +166,18 @@ def test_a_reason_carrying_an_address_is_withheld(harness, capsys):
 def test_fragment_limit_timeout_is_reported(harness, capsys):
     FakeSession.plan = {
         1024: {"connect": None, "get": (69, b"x")},
-        512: {"connect": None, "get": FragmentLimitTimeoutError(512)},
+        512: {"connect": None, "get": (69, b"x" * 149),
+              "by_path": {("device", "0"): FragmentLimitTimeoutError(512)}},
     }
     harness(SECRET_HOST)
     out = capsys.readouterr().out
-    assert "FragmentLimitTimeoutError, the first block never arrived " \
-        "(length 512)" in out
+    arm2 = out[out.index("arm 2:"):]
+    # The small read comes first, so a timeout on /device/0 cannot hide
+    # whether the 512 session answered at all.
+    assert arm2.index("GET /oic/d: 2.05, 149 bytes") < arm2.index(
+        "GET /device/0: FragmentLimitTimeoutError, the first block never "
+        "arrived (length 512)")
+    assert FakeSession.created[1].closed
 
 
 def test_the_ceiling_holds_across_appliances(harness, capsys):
@@ -246,11 +258,16 @@ def test_every_engine_reason_still_prints():
     the allowlist lacks fails here instead of being withheld on hardware.
     """
     filled = {"{description}": "48", "{curve:04x}": "0017",
-              "{suite:04x}": "c02b", "{type(exc).__name__}": "ValueError"}
+              "{suite:04x}": "c02b", "{type(exc).__name__}": "ValueError",
+              "{hash_id}": "4", "{sig_id}": "1"}
     reasons = []
+    # A reason can be several adjacent literals across lines, so the whole
+    # run of them is captured and joined, as Python joins them.
+    call = re.compile(r'_(?:abandon|fail)\(\s*((?:f?"[^"]*"\s*)+)\)')
+    piece = re.compile(r'f?"([^"]*)"')
     for module in (_dtls_base, _dtls_cert):
-        for literal in re.findall(
-                r'_(?:abandon|fail)\(\s*f?"([^"]*)"', inspect.getsource(module)):
+        for run in call.findall(inspect.getsource(module)):
+            literal = "".join(piece.findall(run))
             for placeholder, value in filled.items():
                 literal = literal.replace(placeholder, value)
             assert "{" not in literal, literal
@@ -318,3 +335,34 @@ def test_the_engine_still_words_a_peer_alert_the_same_way():
     source = inspect.getsource(_dtls_base)
     assert 'f"peer sent fatal alert {description}"' in source
     assert check._PEER_ALERT.search("peer sent fatal alert 48")
+
+
+def test_the_quiet_time_starts_when_the_appliance_answers_again(
+        harness, capsys, monkeypatch):
+    """A drop-off after arm 1 must not shorten the wait before arm 2."""
+    clock = [1000.0]
+    monkeypatch.setattr(check.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        check.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    polls = []
+
+    def directory(host, **kw):
+        polls.append(clock[0])
+        # Call 1 is the first discovery. Calls 2 to 9, the liveness polls
+        # after arm 1, are silent: 3 s each plus the script's 2 s pause,
+        # so the appliance answers again 40 s after the handshake.
+        if 2 <= len(polls) <= 9:
+            clock[0] += 3.0
+            return _directory((), answered=False)
+        return _directory((49155,))
+
+    monkeypatch.setattr(check, "discover_ocf_secure_ports", directory)
+    FakeSession.plan = {
+        1024: {"connect": None, "get": (69, b"x")},
+        512: {"connect": None, "get": (69, b"x")},
+    }
+    harness(SECRET_HOST)
+    out = capsys.readouterr().out
+    assert "plaintext CoAP answered after 40.0 s" in out
+    # The full floor, counted from the answer, not from the handshake end.
+    assert f"waiting {check.MIN_GAP_S:.0f} s before the next handshake" in out

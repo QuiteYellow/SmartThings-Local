@@ -13,11 +13,15 @@ Per appliance, at most two DTLS handshakes, each in its own session:
   Arm 1  max_fragment_length 1024, the library default. Handshake, report the
          length in force, GET /oic/d (small), close.
   Arm 2  max_fragment_length 512, the length already measured on these units
-         on 2026-10-25. Handshake, GET /device/0 (the large state read), close.
-         Runs only if arm 1's handshake completed. At this commit the first
-         request of a read carries no Block2 option, so the appliance chooses
-         the block size, and nothing in the client lowers it to the negotiated
-         length. This arm reports what #129 does as shipped.
+         on 2026-10-25. Handshake, GET /oic/d, then GET /device/0 (the large
+         state read), close. Runs only if arm 1's handshake completed.
+         /oic/d goes first because a session can stop answering after a
+         large read times out. At this commit the first request of a read
+         carries no Block2 option, so the appliance chooses the block size,
+         and nothing in the client lowers it to the negotiated length. On a
+         dryer and an oven here, /device/0 timed out at 512 on 2026-11-14,
+         so a FragmentLimitTimeoutError on it is the expected result, not a
+         fault in the run.
 
 What it reports:
 
@@ -37,6 +41,9 @@ Cost: if a handshake times out, the appliance can refuse new handshakes from
 this script's local port for more than 10 minutes. That was measured on a
 dryer on 2026-11-13. Your integration uses its own port, but disable it for
 these appliances during the run anyway, so that two clients do not contend.
+With two appliances the run takes about 4 minutes. Most of that is a 60 s
+quiet time before each handshake, which starts again when the appliance
+answers after a drop-off.
 
 Install and run, on a machine on the appliances' network (Python 3.11+).
 Run it on the host itself, not in a container on Docker's bridge network:
@@ -98,19 +105,23 @@ except ImportError:
 # The hard ceiling on DTLS handshakes for the whole run: two per appliance,
 # two appliances. --max-handshakes can lower it, never raise it.
 HANDSHAKE_CEILING = 4
-# The minimum time between the end of one handshake and the start of the next,
-# whatever the flags say. Recovery from an abandoned handshake on these
-# appliances is measured in minutes, so this is a floor, not a tuning knob.
-MIN_GAP_S = 30.0
+# The minimum quiet time before a handshake, whatever the flags say. It
+# counts from the end of the last handshake, or from when the appliance
+# answered plaintext again if that was later, so a drop-off cannot eat into
+# it. Recovery from an abandoned handshake on these appliances is measured in
+# minutes, so this is a floor, not a tuning knob.
+MIN_GAP_S = 60.0
 # Short on purpose. The engine retransmits a flight after 1 s, then 2 s, then
 # 4 s, and each repeat of the cookie ClientHello asks the appliance for its
 # whole flight again. If the appliance ignores the fragment length, that
 # flight is the one that takes it off the network, so 15 s would trigger the
 # drop up to four times (#20, issuecomment-5950814708). 3 s allows one repeat.
-# Measured handshakes with a fragment length took 0.6 to 1.0 s here.
+# Measured handshakes with a fragment length took 0.6 to 1.3 s on a dryer
+# and an oven here (the longest, 1.23 s, from this script on 2026-11-14).
 HANDSHAKE_TIMEOUT_S = 3.0
-# How long to wait for the plaintext directory after an arm. The drop-off on
-# #20 lasted 9.2 to 10.5 s on both units.
+# How long to wait for the plaintext directory after an arm. On #20 the
+# drop-off lasted 9.2 to 10.5 s in the first capture, and 22.8 and 26.2 s in
+# the MTU matrix run (issuecomment-6401470854).
 LIVENESS_BUDGET_S = 60.0
 # Outside Linux's default ephemeral range (32768-60999), so no other process
 # holds it, and away from 26900, which the #20 MTU matrix script used.
@@ -130,8 +141,11 @@ _PEER_ALERT = re.compile(r"peer sent fatal alert (\d+)")
 # The words of the engine's own refusal reasons at b40b720 (_dtls_cert.py and
 # _dtls_base.py), such as "server offered unexpected curve 0x0017" or
 # "malformed ServerHello". A reason is printed only if every word is one of
-# these. An allowlist, not a blocklist, so an IPv6 address, a hostname or a
-# serial cannot pass by being a shape nobody thought to block.
+# these. An allowlist, not a blocklist, so an IPv6 address, a dotted
+# hostname or a serial cannot pass by being a shape nobody thought to block.
+# A single-label hostname such as "oven-kitchen" has the shape of a plain
+# word and would pass; no engine reason carries outside text, so none can
+# contain one.
 _PROTOCOL_WORDS = frozenset({
     "DTLS", "1.2", "ECDH", "secp256r1", "Certificate", "CertificateRequest",
     "ServerHello", "ServerKeyExchange", "ServerHelloDone", "HelloVerifyRequest",
@@ -140,6 +154,7 @@ _PROTOCOL_WORDS = frozenset({
 _SAFE_WORD = re.compile(
     r"[a-z]+(-[a-z]+)*"            # plain words
     r"|0x[0-9a-f]{1,4}"            # a curve or ciphersuite code
+    r"|\(\d{1,3},\d{1,3}\)"        # a signature algorithm pair, as "(4,1)"
     r"|[A-Z][A-Za-z0-9]{0,39}Error"  # an exception class name
 )
 
@@ -186,15 +201,15 @@ class _Run:
         self.args = args
         self.reasons = reasons
         self.handshakes = 0
-        self.last_handshake_end = None
+        self.quiet_since = None
         self.host = None
 
     def _wait_for_gap(self):
-        if self.last_handshake_end is None:
+        if self.quiet_since is None:
             return
-        remaining = MIN_GAP_S - (time.monotonic() - self.last_handshake_end)
+        remaining = MIN_GAP_S - (time.monotonic() - self.quiet_since)
         if remaining > 0:
-            print(f"    waiting {remaining:.0f} s before the next handshake")
+            print(f"  waiting {remaining:.0f} s before the next handshake")
             time.sleep(remaining)
 
     def secure_port(self, host):
@@ -221,12 +236,16 @@ class _Run:
             time.sleep(2.0)
         return None, None
 
-    def arm(self, name, host, port, fragment_length, path, read_timeout):
-        """Run one session. Return True if its handshake completed."""
+    def arm(self, name, host, port, fragment_length, reads):
+        """Run one session. Return True if its handshake completed.
+
+        `reads` is a sequence of (path, timeout), read in order.
+        """
         if self.handshakes >= self.args.max_handshakes:
             print(f"  {name}: skipped, the handshake ceiling "
                   f"({self.args.max_handshakes}) is reached")
             return False
+        print()
         self._wait_for_gap()
         print(f"  {name}: max_fragment_length {fragment_length}")
         auth = FragmentingCertificateAuth.from_files(
@@ -259,21 +278,22 @@ class _Run:
             print(f"    handshake failed: {_describe_reason(reason)}")
             return False
         finally:
-            self.last_handshake_end = time.monotonic()
-        elapsed_ms = (self.last_handshake_end - started) * 1000
+            self.quiet_since = time.monotonic()
+        elapsed_ms = (self.quiet_since - started) * 1000
         in_force = session.negotiated_fragment_length
         print(f"    handshake completed in {elapsed_ms:.0f} ms, "
               f"fragment length in force: {in_force}")
         try:
             session.start_reader()
-            self._read(session, path, read_timeout)
+            for path, read_timeout in reads:
+                self._read(session, path, read_timeout)
         finally:
             try:
                 session.close()
             except Exception:  # noqa: BLE001 -- the class only, never the text
                 print("    close raised; the appliance may still hold this "
                       "session")
-            self.last_handshake_end = time.monotonic()
+            self.quiet_since = time.monotonic()
         return True
 
     @staticmethod
@@ -297,6 +317,9 @@ class _Run:
     def liveness(self):
         """Report whether the appliance still answers plaintext CoAP."""
         port, elapsed = self.secure_port(self.host)
+        if elapsed is not None:
+            # The quiet time before the next handshake starts now.
+            self.quiet_since = time.monotonic()
         if elapsed is None:
             print(f"    plaintext CoAP: no answer within "
                   f"{LIVENESS_BUDGET_S:.0f} s")
@@ -314,7 +337,7 @@ class _Run:
             return
         print("  secure port discovered from the plaintext directory")
         completed = self.arm(
-            "arm 1", host, port, 1024, ["oic", "d"], 10.0)
+            "arm 1", host, port, 1024, [(["oic", "d"], 10.0)])
         port = self.liveness()
         if not completed:
             print("  arm 2: skipped, arm 1's handshake did not complete")
@@ -322,7 +345,10 @@ class _Run:
         if port is None:
             print("  arm 2: skipped, no secure port after arm 1")
             return
-        self.arm("arm 2", host, port, 512, ["device", "0"], 30.0)
+        # /oic/d first: a session can stop answering after a large read
+        # times out, so the small read must not come after it.
+        self.arm("arm 2", host, port, 512,
+                 [(["oic", "d"], 10.0), (["device", "0"], 30.0)])
         self.liveness()
 
 
@@ -332,7 +358,7 @@ def _confirm():
         "If a handshake times out, the appliance can refuse new handshakes\n"
         "from this script's local port for more than 10 minutes. Wait at\n"
         "least 15 minutes before a second run, or pass a different\n"
-        "--local-port.\n"
+        "--local-port. With two appliances the run takes about 4 minutes.\n"
     )
     try:
         input("Press Enter to start, or Ctrl-C to stop. ")
@@ -408,9 +434,13 @@ def main(argv=None):
 
 if __name__ == "__main__":
     # A traceback prints file paths and the exception's text, so anything
-    # that escapes main() is reported by its class only.
+    # that escapes main() is reported by its class only. That includes a
+    # Ctrl-C outside the windows main() handles itself.
     try:
         sys.exit(main())
+    except KeyboardInterrupt:
+        print("stopped by Ctrl-C", file=sys.stderr)
+        sys.exit(130)
     except Exception as exc:  # noqa: BLE001 -- the class only, never the text
         print(f"stopped by {type(exc).__name__}", file=sys.stderr)
         sys.exit(1)
