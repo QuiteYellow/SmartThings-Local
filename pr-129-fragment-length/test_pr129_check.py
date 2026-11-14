@@ -261,9 +261,10 @@ def test_the_real_session_hands_the_alert_to_the_script(
     monkeypatch.setattr(
         check.FragmentingCertificateAuth, "from_files",
         staticmethod(lambda *a, **k: _AlertAuth()))
-    # Not the script's default port, so a real run on this machine does not
-    # make the test fail to bind.
-    harness("127.0.0.1", extra=("--local-port", "47219"))
+    # Not the script's default port, so a real run with the default does not
+    # collide with this test. Below Linux's ephemeral range (32768-60999), so
+    # a temporary socket cannot hold it either.
+    harness("127.0.0.1", extra=("--local-port", "26961"))
     out = capsys.readouterr().out
     assert "fatal alert 48 (unknown_ca)" in out
     assert "no reason logged" not in out
