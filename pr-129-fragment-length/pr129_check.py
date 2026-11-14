@@ -60,7 +60,21 @@ import logging
 import re
 import sys
 import time
+import warnings
 from importlib.metadata import PackageNotFoundError, version
+
+
+def _show_warning(message, category, filename, lineno, file=None, line=None):
+    """Print a warning's class only.
+
+    The default line starts with the path of the file that raised it, and
+    that path holds the user's home directory. Set before the library import,
+    so warnings raised at import time are covered too.
+    """
+    print(f"warning: {category.__name__}", file=sys.stderr)
+
+
+warnings.showwarning = _show_warning
 
 try:
     from smartthings_local.errors import (
@@ -113,9 +127,28 @@ _ALERT_NAMES = {
     110: "unsupported_extension",
 }
 _PEER_ALERT = re.compile(r"peer sent fatal alert (\d+)")
-_SAFE_REASON = re.compile(r"[A-Za-z0-9 ,:_()./-]{1,100}")
-_IPV4 = re.compile(r"\d{1,3}(\.\d{1,3}){3}")
-_LONG_HEX = re.compile(r"[0-9A-Fa-f]{8,}")
+# The words of the engine's own refusal reasons at b40b720 (_dtls_cert.py and
+# _dtls_base.py), such as "server offered unexpected curve 0x0017" or
+# "malformed ServerHello". A reason is printed only if every word is one of
+# these. An allowlist, not a blocklist, so an IPv6 address, a hostname or a
+# serial cannot pass by being a shape nobody thought to block.
+_PROTOCOL_WORDS = frozenset({
+    "DTLS", "1.2", "ECDH", "secp256r1", "Certificate", "CertificateRequest",
+    "ServerHello", "ServerKeyExchange", "ServerHelloDone", "HelloVerifyRequest",
+    "Finished",
+})
+_SAFE_WORD = re.compile(
+    r"[a-z]+(-[a-z]+)*"            # plain words
+    r"|0x[0-9a-f]{1,4}"            # a curve or ciphersuite code
+    r"|[A-Z][A-Za-z0-9]{0,39}Error"  # an exception class name
+)
+
+
+def _is_safe_reason(reason):
+    words = reason.split()
+    return 0 < len(words) <= 20 and all(
+        word in _PROTOCOL_WORDS or _SAFE_WORD.fullmatch(word)
+        for word in (w.rstrip(",:") for w in words))
 
 
 class _HandshakeReasons(logging.Handler):
@@ -143,8 +176,7 @@ def _describe_reason(reason):
         number = int(match.group(1))
         name = _ALERT_NAMES.get(number, "unlisted")
         return f"the appliance sent fatal alert {number} ({name})"
-    if (_SAFE_REASON.fullmatch(reason) and not _IPV4.search(reason)
-            and not _LONG_HEX.search(reason)):
+    if _is_safe_reason(reason):
         return f"refused locally: {reason}"
     return "refused; the reason was withheld because it may identify something"
 
@@ -375,4 +407,10 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # A traceback prints file paths and the exception's text, so anything
+    # that escapes main() is reported by its class only.
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001 -- the class only, never the text
+        print(f"stopped by {type(exc).__name__}", file=sys.stderr)
+        sys.exit(1)

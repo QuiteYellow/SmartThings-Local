@@ -12,6 +12,8 @@ the engine's source for the alert wording, which the fake cannot exercise.
 
 import inspect
 import logging
+import re
+import warnings
 from types import SimpleNamespace
 
 import pytest
@@ -24,7 +26,7 @@ from smartthings_local.errors import (
     SessionError,
     SessionTimeoutError,
 )
-from smartthings_local.protocol import _dtls_base, dtls_session
+from smartthings_local.protocol import _dtls_base, _dtls_cert, dtls_session
 
 SECRET_HOST = "192.0.2.77"
 
@@ -223,6 +225,48 @@ def test_every_exit_reminds_the_user_to_re_enable(
     monkeypatch.setattr(check._Run, "appliance", boom)
     assert harness(SECRET_HOST) == status
     assert "Re-enable your integration now." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("reason", [
+    "fe80::1c2b:3a4d",
+    "oven-kitchen.local",
+    "serial 0ABC1DEFGH2XYZ",
+    "bad from 192.0.2.77",
+    "uuid 1b2c3d4e-0000-4000-8000-000000000000",
+    "/home/someone/certs/client.key",
+])
+def test_identifying_shapes_are_withheld(reason):
+    assert "withheld" in check._describe_reason(reason)
+
+
+def test_every_engine_reason_still_prints():
+    """Each refusal reason the installed engine can raise passes the filter.
+
+    Reads the literals from the engine's source, so a new reason with a word
+    the allowlist lacks fails here instead of being withheld on hardware.
+    """
+    filled = {"{description}": "48", "{curve:04x}": "0017",
+              "{suite:04x}": "c02b", "{type(exc).__name__}": "ValueError"}
+    reasons = []
+    for module in (_dtls_base, _dtls_cert):
+        for literal in re.findall(
+                r'_(?:abandon|fail)\(\s*f?"([^"]*)"', inspect.getsource(module)):
+            for placeholder, value in filled.items():
+                literal = literal.replace(placeholder, value)
+            assert "{" not in literal, literal
+            reasons.append(literal)
+    assert len(reasons) > 20
+    withheld = [r for r in reasons if "withheld" in check._describe_reason(r)]
+    assert withheld == []
+
+
+def test_a_warning_prints_its_class_and_no_path(capsys):
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.showwarning = check._show_warning
+        warnings.warn("detail that may name a path", DeprecationWarning)
+    err = capsys.readouterr().err
+    assert err == "warning: DeprecationWarning\n"
 
 
 def test_record_overflow_is_named():
