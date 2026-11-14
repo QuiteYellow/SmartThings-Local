@@ -32,6 +32,7 @@ that were linked from that thread, plus whatever they need to run standalone.
 | `pr-121-psk-session/` | [#121](https://github.com/QuiteYellow/SmartThings-Local/pull/121) | Whether a PSK credential works through `DtlsCoapSession` rather than a standalone probe, and whether a second session on the same local port succeeds once the first released the appliance's peer entry. |
 | `issue-20-mtu-matrix/` | [#20](https://github.com/QuiteYellow/SmartThings-Local/issues/20) | Whether an over-MTU server flight explains the drop-off: does a fragmented datagram take the appliance off the network when an unfragmented one does not, and does offering `max_fragment_length` move the appliance off a single over-MTU flight. |
 | `issue-20-handshake-matrix/` | [#20](https://github.com/QuiteYellow/SmartThings-Local/issues/20) | Which part of the ClientHello, if any, an appliance cares about at the step where #20's washer stops answering the network. |
+| `pr-129-fragment-length/` | [#129](https://github.com/QuiteYellow/SmartThings-Local/pull/129), for [#20](https://github.com/QuiteYellow/SmartThings-Local/issues/20) | Whether #129's `FragmentingCertificateAuth` completes a handshake with an appliance that leaves the network on an over-MTU flight, at a fragment length of 1024 and then 512, and whether `/oic/d` and `/device/0` can be read at those lengths. Offline tests in `test_pr129_check.py`. |
 
 A directory may vendor a copy of library code so the script runs without a
 checkout. That copy is a snapshot taken on the date in its header. It will

@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""pr129_check.py -- does PR #129's certificate engine work on your appliance?
+
+For the washer and dryer on QuiteYellow/SmartThings-Local#20, which leave the
+network when they must send a DTLS handshake flight that does not fit one
+frame. PR #129 adds `FragmentingCertificateAuth`, a client-certificate
+credential whose ClientHello offers `max_fragment_length`, so the appliance
+splits its flight to fit. This script drives that credential through the
+library's own `DtlsCoapSession`, the same path an integration would use.
+
+Per appliance, at most two DTLS handshakes, each in its own session:
+
+  Arm 1  max_fragment_length 1024, the library default. Handshake, report the
+         length in force, GET /oic/d (small), close.
+  Arm 2  max_fragment_length 512, the length already measured on these units
+         on 2026-10-25. Handshake, GET /device/0 (the large state read), close.
+         Runs only if arm 1's handshake completed. At this commit the client
+         asks for 1024-byte blocks on the first block of a read whatever the
+         negotiated length, so this arm reports what #129 does as shipped.
+
+What it reports:
+
+  - whether each handshake completed, and the fragment length in force;
+  - the reason a handshake failed, as the library logs it. A fatal alert from
+    the appliance is named, for example `unknown_ca`, which is the certificate
+    wall on issue #16;
+  - the CoAP response code and size for each read;
+  - after each arm, whether the appliance still answers plaintext CoAP, and
+    how long it took. That separates "left the network" from "refused us".
+
+What it never does: write anything, touch /oic/sec/*, retry a handshake, or
+print an address, a device UUID, a serial or certificate detail. The output
+is meant to be pasted into the issue as it stands. Read it first anyway.
+
+Cost: if a handshake times out, the appliance can refuse new handshakes from
+this script's local port for more than 10 minutes. That was measured on a
+dryer on 2026-11-13. Your integration uses its own port, but disable it for
+these appliances during the run anyway, so that two clients do not contend.
+
+Install and run, on a machine on the appliances' network (Python 3.11+):
+
+    python3 -m venv stl-129
+    stl-129/bin/pip install "smartthings-local @ git+https://github.com/QuiteYellow/SmartThings-Local@b40b7208f1880f30077336ca8175aeae7b48f5c9"
+    stl-129/bin/python pr129_check.py \\
+        --cert certs/client_fullchain.pem --key certs/client.key \\
+        <dryer-ip> <washer-ip>
+
+The certificate and key are the ones `setup_cert.py` wrote. The secure port is
+discovered from each appliance's plaintext directory; there is no default,
+because these appliances bind their DTLS socket to port 0 and the port moves
+across a reboot.
+"""
+
+import argparse
+import logging
+import re
+import sys
+import time
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    from smartthings_local.errors import (
+        EndpointError,
+        FragmentLimitTimeoutError,
+        PeerInitiatedHandshakeError,
+        SessionError,
+        SessionTimeoutError,
+    )
+    from smartthings_local.protocol.auth import FragmentingCertificateAuth
+    from smartthings_local.protocol.dtls_session import DtlsCoapSession
+    from smartthings_local.protocol.ocf_discovery import (
+        discover_ocf_secure_ports,
+    )
+except ImportError:
+    sys.exit(
+        "This needs smartthings-local from PR #129. Install it with the pip "
+        "line at the top of this script."
+    )
+
+# The hard ceiling on DTLS handshakes for the whole run: two per appliance,
+# two appliances. --max-handshakes can lower it, never raise it.
+HANDSHAKE_CEILING = 4
+# The minimum time between the end of one handshake and the start of the next,
+# whatever the flags say. Recovery from an abandoned handshake on these
+# appliances is measured in minutes, so this is a floor, not a tuning knob.
+MIN_GAP_S = 30.0
+HANDSHAKE_TIMEOUT_S = 15.0
+# How long to wait for the plaintext directory after an arm. The drop-off on
+# #20 lasted 9.2 to 10.5 s on both units.
+LIVENESS_BUDGET_S = 60.0
+# Outside Linux's default ephemeral range (32768-60999), so no other process
+# holds it, and away from 26900, which the #20 MTU matrix script used.
+DEFAULT_LOCAL_PORT = 26960
+
+_ALERT_NAMES = {
+    10: "unexpected_message", 20: "bad_record_mac", 40: "handshake_failure",
+    42: "bad_certificate", 43: "unsupported_certificate",
+    44: "certificate_revoked", 45: "certificate_expired",
+    46: "certificate_unknown", 47: "illegal_parameter", 48: "unknown_ca",
+    49: "access_denied", 50: "decode_error", 51: "decrypt_error",
+    70: "protocol_version", 71: "insufficient_security", 80: "internal_error",
+    110: "unsupported_extension",
+}
+_PEER_ALERT = re.compile(r"peer sent fatal alert (\d+)")
+_SAFE_REASON = re.compile(r"[A-Za-z0-9 ,:_()./-]{1,100}")
+_IPV4 = re.compile(r"\d{1,3}(\.\d{1,3}){3}")
+_LONG_HEX = re.compile(r"[0-9A-Fa-f]{8,}")
+
+
+class _HandshakeReasons(logging.Handler):
+    """Keep the reason the session logs when a handshake fails.
+
+    `DtlsCoapSession` raises a redacted `SessionError` by contract and logs
+    the TLS-layer reason instead, so the log is where the alert is.
+    """
+
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.reasons = []
+
+    def emit(self, record):
+        message = record.getMessage()
+        prefix = "dtls handshake failed at the TLS layer: "
+        if message.startswith(prefix):
+            self.reasons.append(message[len(prefix):])
+
+
+def _describe_reason(reason):
+    """Name a peer alert, or pass a reason through only if it is plainly safe."""
+    match = _PEER_ALERT.search(reason)
+    if match:
+        number = int(match.group(1))
+        name = _ALERT_NAMES.get(number, "unlisted")
+        return f"the appliance sent fatal alert {number} ({name})"
+    if (_SAFE_REASON.fullmatch(reason) and not _IPV4.search(reason)
+            and not _LONG_HEX.search(reason)):
+        return f"refused locally: {reason}"
+    return "refused; the reason was withheld because it may identify something"
+
+
+class _Run:
+    def __init__(self, args, reasons):
+        self.args = args
+        self.reasons = reasons
+        self.handshakes = 0
+        self.last_handshake_end = None
+        self.host = None
+
+    def _wait_for_gap(self):
+        if self.last_handshake_end is None:
+            return
+        remaining = MIN_GAP_S - (time.monotonic() - self.last_handshake_end)
+        if remaining > 0:
+            print(f"    waiting {remaining:.0f} s before the next handshake")
+            time.sleep(remaining)
+
+    def secure_port(self, host):
+        """Return (port or None, seconds until the directory answered)."""
+        started = time.monotonic()
+        while time.monotonic() - started < LIVENESS_BUDGET_S:
+            result = discover_ocf_secure_ports(host, timeout=3.0, retries=0)
+            if result.found:
+                elapsed = time.monotonic() - started
+                if len(result.ports) != 1:
+                    print(f"    the directory lists {len(result.ports)} secure "
+                          "ports; refusing to guess which one")
+                    return None, elapsed
+                return result.ports[0], elapsed
+            time.sleep(2.0)
+        return None, None
+
+    def arm(self, name, host, port, fragment_length, path, read_timeout):
+        """Run one session. Return True if its handshake completed."""
+        if self.handshakes >= self.args.max_handshakes:
+            print(f"  {name}: skipped, the handshake ceiling "
+                  f"({self.args.max_handshakes}) is reached")
+            return False
+        self._wait_for_gap()
+        print(f"  {name}: max_fragment_length {fragment_length}")
+        auth = FragmentingCertificateAuth.from_files(
+            self.args.cert, self.args.key,
+            max_fragment_length=fragment_length,
+        )
+        session = DtlsCoapSession(
+            host, port, auth=auth, local_port=self.args.local_port)
+        del self.reasons[:]
+        self.handshakes += 1
+        started = time.monotonic()
+        try:
+            session.connect(timeout=HANDSHAKE_TIMEOUT_S)
+        except PeerInitiatedHandshakeError:
+            print("    handshake refused: the appliance was opening its own "
+                  "handshake toward this port. Not retried.")
+            return False
+        except SessionTimeoutError:
+            print(f"    handshake: no answer within {HANDSHAKE_TIMEOUT_S:.0f} s")
+            return False
+        except EndpointError:
+            print("    handshake: the local socket failed (is --local-port "
+                  "in use?)")
+            return False
+        except SessionError:
+            reason = self.reasons[-1] if self.reasons else "no reason logged"
+            print(f"    handshake failed: {_describe_reason(reason)}")
+            return False
+        finally:
+            self.last_handshake_end = time.monotonic()
+        elapsed_ms = (self.last_handshake_end - started) * 1000
+        in_force = session.negotiated_fragment_length
+        print(f"    handshake completed in {elapsed_ms:.0f} ms, "
+              f"fragment length in force: {in_force}")
+        try:
+            session.start_reader()
+            self._read(session, path, read_timeout)
+        finally:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001 -- the class only, never the text
+                print("    close raised; the appliance may still hold this "
+                      "session")
+            self.last_handshake_end = time.monotonic()
+        return True
+
+    @staticmethod
+    def _read(session, path, read_timeout):
+        label = "GET /" + "/".join(path)
+        started = time.monotonic()
+        try:
+            code, payload = session.get(path, timeout=read_timeout)
+        except FragmentLimitTimeoutError as exc:
+            print(f"    {label}: FragmentLimitTimeoutError, the first block "
+                  f"never arrived (length {exc.fragment_length})")
+            return
+        except Exception as exc:  # noqa: BLE001 -- the class only
+            elapsed = time.monotonic() - started
+            print(f"    {label}: {type(exc).__name__} after {elapsed:.1f} s")
+            return
+        elapsed_ms = (time.monotonic() - started) * 1000
+        print(f"    {label}: {code >> 5}.{code & 31:02d}, "
+              f"{len(payload or b'')} bytes in {elapsed_ms:.0f} ms")
+
+    def liveness(self):
+        """Report whether the appliance still answers plaintext CoAP."""
+        port, elapsed = self.secure_port(self.host)
+        if elapsed is None:
+            print(f"    plaintext CoAP: no answer within "
+                  f"{LIVENESS_BUDGET_S:.0f} s")
+        else:
+            print(f"    plaintext CoAP answered after {elapsed:.1f} s")
+        return port
+
+    def appliance(self, label, host):
+        self.host = host
+        print(f"\n{label} (<host>)")
+        port, elapsed = self.secure_port(host)
+        if port is None:
+            if elapsed is None:
+                print("  the plaintext directory did not answer; skipping")
+            return
+        print("  secure port discovered from the plaintext directory")
+        completed = self.arm(
+            "arm 1", host, port, 1024, ["oic", "d"], 10.0)
+        port = self.liveness()
+        if not completed:
+            print("  arm 2: skipped, arm 1's handshake did not complete")
+            return
+        if port is None:
+            print("  arm 2: skipped, no secure port after arm 1")
+            return
+        self.arm("arm 2", host, port, 512, ["device", "0"], 30.0)
+        self.liveness()
+
+
+def _confirm():
+    print(
+        "Before you start: disable your integration for these appliances.\n"
+        "If a handshake times out, the appliance can refuse new handshakes\n"
+        "from this script's local port for more than 10 minutes. Wait at\n"
+        "least 15 minutes before a second run, or pass a different\n"
+        "--local-port.\n"
+    )
+    try:
+        input("Press Enter to start, or Ctrl-C to stop. ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        sys.exit(1)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("hosts", nargs="+", metavar="host",
+                    help="one or two appliance addresses")
+    ap.add_argument("--cert", required=True,
+                    help="client certificate chain from setup_cert.py")
+    ap.add_argument("--key", required=True,
+                    help="client private key from setup_cert.py")
+    ap.add_argument("--local-port", type=int, default=DEFAULT_LOCAL_PORT,
+                    help="source port held for every handshake "
+                         f"(default {DEFAULT_LOCAL_PORT})")
+    ap.add_argument("--max-handshakes", type=int, default=HANDSHAKE_CEILING,
+                    help=f"at most {HANDSHAKE_CEILING}, the default")
+    ap.add_argument("--yes", action="store_true",
+                    help="skip the prompt before the run starts")
+    args = ap.parse_args(argv)
+    if len(args.hosts) > 2:
+        ap.error("pass one or two appliances")
+    if not 1 <= args.max_handshakes <= HANDSHAKE_CEILING:
+        ap.error(f"--max-handshakes must be 1 to {HANDSHAKE_CEILING}")
+    if not 1024 <= args.local_port <= 65535:
+        ap.error("--local-port must be 1024 to 65535")
+    # Fail on a bad credential here, before anything goes on the wire. The
+    # provider reads its files lazily, at the first connect, so load them
+    # once now with the same loader the engine uses.
+    try:
+        FragmentingCertificateAuth.from_files(
+            args.cert, args.key)._load_client_credential()
+    except Exception as exc:  # noqa: BLE001 -- the class only, never the text
+        ap.error(f"cannot use --cert/--key ({type(exc).__name__})")
+
+    # Library loggers go nowhere except the handler that keeps the reason;
+    # Python's last-resort handler would otherwise print their raw text.
+    logging.getLogger("smartthings_local").addHandler(logging.NullHandler())
+    reasons = _HandshakeReasons()
+    logging.getLogger("smartthings_local.protocol.dtls_session").addHandler(
+        reasons)
+
+    if not args.yes:
+        _confirm()
+    try:
+        installed = version("smartthings-local")
+    except PackageNotFoundError:
+        installed = "unknown"
+    print(f"smartthings-local {installed}, Python "
+          f"{sys.version_info.major}.{sys.version_info.minor}, "
+          f"handshake ceiling {args.max_handshakes}, fixed local port")
+    run = _Run(args, reasons.reasons)
+    try:
+        for number, host in enumerate(args.hosts, start=1):
+            run.appliance(f"appliance {number}", host)
+    except KeyboardInterrupt:
+        print("\nstopped")
+    except Exception as exc:  # noqa: BLE001 -- the class only, never the text
+        print(f"\nstopped by {type(exc).__name__}")
+        return 1
+    print(f"\nhandshakes used: {run.handshakes} of {args.max_handshakes}")
+    print("Re-enable your integration now.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
