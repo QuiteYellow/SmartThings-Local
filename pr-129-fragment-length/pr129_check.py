@@ -38,7 +38,10 @@ this script's local port for more than 10 minutes. That was measured on a
 dryer on 2026-11-13. Your integration uses its own port, but disable it for
 these appliances during the run anyway, so that two clients do not contend.
 
-Install and run, on a machine on the appliances' network (Python 3.11+):
+Install and run, on a machine on the appliances' network (Python 3.11+).
+Run it on the host itself, not in a container on Docker's bridge network:
+these appliances answer from a different port than the one addressed, and
+the bridge NAT drops those replies (#110).
 
     python3 -m venv stl-129
     stl-129/bin/pip install "smartthings-local @ git+https://github.com/QuiteYellow/SmartThings-Local@b40b7208f1880f30077336ca8175aeae7b48f5c9"
@@ -85,7 +88,13 @@ HANDSHAKE_CEILING = 4
 # whatever the flags say. Recovery from an abandoned handshake on these
 # appliances is measured in minutes, so this is a floor, not a tuning knob.
 MIN_GAP_S = 30.0
-HANDSHAKE_TIMEOUT_S = 15.0
+# Short on purpose. The engine retransmits a flight after 1 s, then 2 s, then
+# 4 s, and each repeat of the cookie ClientHello asks the appliance for its
+# whole flight again. If the appliance ignores the fragment length, that
+# flight is the one that takes it off the network, so 15 s would trigger the
+# drop up to four times (#20, issuecomment-5950814708). 3 s allows one repeat.
+# Measured handshakes with a fragment length took 0.6 to 1.0 s here.
+HANDSHAKE_TIMEOUT_S = 3.0
 # How long to wait for the plaintext directory after an arm. The drop-off on
 # #20 lasted 9.2 to 10.5 s on both units.
 LIVENESS_BUDGET_S = 60.0
@@ -204,7 +213,10 @@ class _Run:
                   "handshake toward this port. Not retried.")
             return False
         except SessionTimeoutError:
-            print(f"    handshake: no answer within {HANDSHAKE_TIMEOUT_S:.0f} s")
+            print(f"    handshake: not completed within "
+                  f"{HANDSHAKE_TIMEOUT_S:.0f} s. One attempt is not "
+                  "conclusive; the plaintext check below says whether the "
+                  "appliance left the network.")
             return False
         except EndpointError:
             print("    handshake: the local socket failed (is --local-port "

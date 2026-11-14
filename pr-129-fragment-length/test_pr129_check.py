@@ -1,4 +1,6 @@
-"""Offline tests for pr129_check.py. No appliance, no network.
+"""Offline tests for pr129_check.py. No appliance, and no traffic.
+
+One test binds a local UDP socket and sends nothing on it.
 
 Most tests replace the session and discovery with fakes, so they cover the
 script's own decisions: which arms run, the handshake ceiling, the gap floor,
@@ -134,7 +136,7 @@ def test_peer_alert_is_named_and_arm_two_is_skipped(harness, capsys):
 
 
 @pytest.mark.parametrize("error, text", [
-    (SessionTimeoutError, "no answer within"),
+    (SessionTimeoutError, "not completed within"),
     (PeerInitiatedHandshakeError, "opening its own handshake"),
 ])
 def test_other_handshake_failures_skip_arm_two(harness, capsys, error, text):
@@ -259,7 +261,9 @@ def test_the_real_session_hands_the_alert_to_the_script(
     monkeypatch.setattr(
         check.FragmentingCertificateAuth, "from_files",
         staticmethod(lambda *a, **k: _AlertAuth()))
-    harness("127.0.0.1")
+    # Not the script's default port, so a real run on this machine does not
+    # make the test fail to bind.
+    harness("127.0.0.1", extra=("--local-port", "47219"))
     out = capsys.readouterr().out
     assert "fatal alert 48 (unknown_ca)" in out
     assert "no reason logged" not in out
