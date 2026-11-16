@@ -64,6 +64,19 @@ def _load_pem_chain(ctx: SSL.Context, cert_pem: str, key_pem: str) -> None:
     ctx.check_privatekey()
 
 
+def _configure_classic_certificate_profile(context: SSL.Context) -> None:
+    """Force certificate-backed DTLS onto the profile Samsung accepts.
+
+    OpenSSL 3 configures TLS 1.3 cipher suites separately from the classic
+    cipher list. A narrow classic list alone still produces a ClientHello that
+    advertises TLS 1.3 suites and extensions, and some Samsung certificate
+    stacks answer that flight with a fatal handshake_failure before they get
+    to certificate validation.
+    """
+    context.set_cipher_list(_DTLS_CIPHERS)
+    context.set_options(SSL.OP_NO_TLSv1_3 | SSL.OP_NO_TICKET)
+
+
 @runtime_checkable
 class AuthenticationProvider(Protocol):
     """Configure authentication for a newly created DTLS context."""
@@ -387,7 +400,7 @@ def _configure_certificate_server(
     # intermediate is SHA-1 signed). This is the only channel that reaches
     # the OpenSSL instance cryptography bundles; ctypes and cffi bindings
     # do not expose SSL_CTX_set_security_level on this build.
-    context.set_cipher_list(_DTLS_CIPHERS)
+    _configure_classic_certificate_profile(context)
 
 
 class ServerCertificateAuth:

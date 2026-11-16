@@ -96,6 +96,9 @@ def test_handshake_error_is_classified_without_backend_text(monkeypatch):
         def set_cipher_list(self, *args):
             pass
 
+        def set_options(self, *args):
+            pass
+
         def use_certificate_chain_file(self, *args):
             pass
 

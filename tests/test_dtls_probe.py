@@ -941,7 +941,6 @@ def test_diagnostic_certificate_provider_matches_inline_pem_credentials(
         'Certificate',
         'ServerKeyExchange',
         'ServerHelloDone',
-        'NewSessionTicket',
     )
 
 
