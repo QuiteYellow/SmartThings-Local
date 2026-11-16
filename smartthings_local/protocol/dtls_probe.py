@@ -40,7 +40,13 @@ from dataclasses import dataclass
 from OpenSSL import SSL
 
 from ..errors import ProbeError
-from .auth import PskAuth, _DTLS_CIPHERS, _OCF_ROOT_CA, _load_pem_chain
+from .auth import (
+    PskAuth,
+    _configure_classic_certificate_profile,
+    _DTLS_CIPHERS,
+    _OCF_ROOT_CA,
+    _load_pem_chain,
+)
 from .coap import split_dtls
 from .dtls_handshake import _drive_dtls_handshake, _validate_mtu
 from .endpoint import open_host_filtered_udp_socket
@@ -214,7 +220,7 @@ def _client_hello_flight(*, mtu):
     context = SSL.Context(SSL.DTLS_METHOD)
     context.load_verify_locations(_OCF_ROOT_CA)
     context.set_verify(SSL.VERIFY_PEER, lambda *args: True)
-    context.set_cipher_list(_DTLS_CIPHERS)
+    _configure_classic_certificate_profile(context)
 
     connection = SSL.Connection(context, None)
     connection.set_connect_state()
@@ -800,7 +806,10 @@ def _diagnostic_context(*, auth, cert_pem, key_pem, cert_path, key_path):
     ctx = SSL.Context(SSL.DTLS_METHOD)
     ctx.load_verify_locations(_OCF_ROOT_CA)
     ctx.set_verify(SSL.VERIFY_PEER, _accept_any_peer_chain)
-    ctx.set_cipher_list(_DTLS_CIPHERS)
+    if auth is None:
+        _configure_classic_certificate_profile(ctx)
+    else:
+        ctx.set_cipher_list(_DTLS_CIPHERS)
     if auth is not None:
         auth.configure_context(ctx)
         # Providers configure a context to *gate* on trust: CertificateAuth

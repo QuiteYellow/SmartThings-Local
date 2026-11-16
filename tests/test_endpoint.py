@@ -311,6 +311,9 @@ def test_session_uses_host_filtered_socket_send_and_recv(monkeypatch):
         def set_cipher_list(self, *args):
             pass
 
+        def set_options(self, *args):
+            pass
+
         def use_certificate_chain_file(self, *args):
             pass
 
