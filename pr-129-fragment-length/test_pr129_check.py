@@ -127,7 +127,7 @@ def test_both_arms_run_when_the_first_completes(harness, capsys):
     assert "GET /oic/d: 2.05, 150 bytes" in out
     assert "GET /device/0: 2.05, 9000 bytes" in out
     assert [s.reads for s in FakeSession.created] == [
-        ["/oic/d"], ["/oic/d", "/device/0"]]
+        ["/oic/d", "/device/0"], ["/oic/d", "/device/0"]]
     assert "handshakes used: 2 of 4" in out
     assert SECRET_HOST not in out
     # The gap floor holds whatever the timing: one wait between the arms.
@@ -180,6 +180,20 @@ def test_fragment_limit_timeout_is_reported(harness, capsys):
     assert FakeSession.created[1].closed
 
 
+def test_arm_one_reads_device0_at_1024(harness, capsys):
+    """The primed read targets 1024, so arm 1 reads /device/0 after /oic/d."""
+    FakeSession.plan = {
+        1024: {"connect": None, "get": (69, b"x" * 150),
+               "by_path": {("device", "0"): (69, b"x" * 4607)}},
+        512: {"connect": None, "get": (69, b"x" * 150)},
+    }
+    harness(SECRET_HOST)
+    out = capsys.readouterr().out
+    arm1 = out[out.index("arm 1:"):out.index("arm 2:")]
+    assert arm1.index("GET /oic/d: 2.05, 150 bytes") < arm1.index(
+        "GET /device/0: 2.05, 4607 bytes")
+
+
 def test_the_ceiling_holds_across_appliances(harness, capsys):
     FakeSession.plan = {
         1024: {"connect": None, "get": (69, b"x")},
@@ -205,23 +219,90 @@ def test_ambiguous_ports_are_refused(harness, capsys, monkeypatch):
     assert FakeSession.created == []
 
 
+def _fake_clock(monkeypatch):
+    """Advance a fake clock on sleep, and on each discovery by its timeout."""
+    clock = [1000.0]
+    monkeypatch.setattr(check.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        check.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    return clock
+
+
 def test_an_answer_with_no_secure_port_still_counts_as_an_answer(
         harness, capsys, monkeypatch):
-    monkeypatch.setattr(
-        check, "discover_ocf_secure_ports",
-        lambda host, **kw: _directory(()))
+    clock = _fake_clock(monkeypatch)
+
+    def directory(host, timeout, retries):
+        clock[0] += timeout
+        return _directory(())
+
+    monkeypatch.setattr(check, "discover_ocf_secure_ports", directory)
     harness(SECRET_HOST)
     out = capsys.readouterr().out
-    assert "answered but lists no secure port" in out
+    assert "the directory answered, but no secure port came through" in out
     assert "did not answer" not in out
     assert FakeSession.created == []
 
 
+def test_a_slow_directory_is_asked_again_until_the_port_comes_through(
+        harness, capsys, monkeypatch):
+    """#20 run 2: the washer answered, but too slowly for one attempt."""
+    clock = _fake_clock(monkeypatch)
+    calls = []
+
+    def directory(host, **kw):
+        calls.append(kw)
+        clock[0] += 1.5
+        # The first two attempts answer without the port.
+        return _directory(() if len(calls) <= 2 else (49155,))
+
+    monkeypatch.setattr(check, "discover_ocf_secure_ports", directory)
+    FakeSession.plan = {
+        1024: {"connect": None, "get": (69, b"x")},
+        512: {"connect": None, "get": (69, b"x")},
+    }
+    harness(SECRET_HOST)
+    out = capsys.readouterr().out
+    assert "secure port discovered from the plaintext directory" in out
+    assert "no secure port" not in out
+    assert len(FakeSession.created) == 2
+    # Short probes until the first answer, then long attempts with a retry.
+    assert calls[0] == {"timeout": check.PROBE_TIMEOUT_S, "retries": 0}
+    assert calls[1] == {"timeout": check.DISCOVERY_TIMEOUT_S, "retries": 1}
+
+
+def test_no_discovery_attempt_runs_past_the_budget(harness, monkeypatch):
+    """An attempt near the end is cut to the time left, so the message's
+    "within 60 s" holds."""
+    clock = _fake_clock(monkeypatch)
+    attempts = []
+
+    def directory(host, timeout, retries):
+        attempts.append((clock[0], timeout))
+        clock[0] += timeout
+        return _directory(())
+
+    monkeypatch.setattr(check, "discover_ocf_secure_ports", directory)
+    harness(SECRET_HOST)
+    start = attempts[0][0]
+    assert all(at + timeout <= start + check.LIVENESS_BUDGET_S
+               for at, timeout in attempts)
+
+
+def test_the_prompt_gives_the_worst_case_for_the_paths(capsys, monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    check._confirm(2, 3)
+    assert "add up to 6 minutes" in capsys.readouterr().out
+
+
 def test_silence_reads_as_no_answer(harness, capsys, monkeypatch):
-    monkeypatch.setattr(
-        check, "discover_ocf_secure_ports",
-        lambda host, **kw: _directory((), answered=False))
-    monkeypatch.setattr(check, "LIVENESS_BUDGET_S", 0.05)
+    clock = _fake_clock(monkeypatch)
+
+    def directory(host, timeout, retries):
+        clock[0] += timeout
+        return _directory((), answered=False)
+
+    monkeypatch.setattr(check, "discover_ocf_secure_ports", directory)
     harness(SECRET_HOST)
     assert "did not answer" in capsys.readouterr().out
 
@@ -366,3 +447,33 @@ def test_the_quiet_time_starts_when_the_appliance_answers_again(
     assert "plaintext CoAP answered after 40.0 s" in out
     # The full floor, counted from the answer, not from the handshake end.
     assert f"waiting {check.MIN_GAP_S:.0f} s before the next handshake" in out
+
+
+def test_paths_are_read_in_order_after_oic_d(harness, capsys):
+    FakeSession.plan = {
+        1024: {"connect": None, "get": (69, b"x" * 150)},
+        512: {"connect": None, "get": (69, b"x" * 150)},
+    }
+    harness(SECRET_HOST, extra=("--path", "/information/vs/0",
+                                "--path", "/oic/res"))
+    assert [s.reads for s in FakeSession.created] == [
+        ["/oic/d", "/information/vs/0", "/oic/res"]] * 2
+
+
+@pytest.mark.parametrize("bad", [
+    "oic/res", "/oic/res?if=oic.if.ll", "/oic//res", "/oic/sec/doxm",
+    "/oic/sec",
+])
+def test_unsafe_or_malformed_paths_are_refused(harness, bad):
+    with pytest.raises(SystemExit):
+        harness(SECRET_HOST, extra=("--path", bad))
+    assert FakeSession.created == []
+
+
+def test_more_paths_than_the_cap_are_refused(harness):
+    extra = []
+    for number in range(check.MAX_PATHS + 1):
+        extra += ["--path", f"/r{number}/vs/0"]
+    with pytest.raises(SystemExit):
+        harness(SECRET_HOST, extra=tuple(extra))
+    assert FakeSession.created == []
