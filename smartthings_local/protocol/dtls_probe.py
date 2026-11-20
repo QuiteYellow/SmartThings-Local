@@ -40,7 +40,13 @@ from dataclasses import dataclass
 from OpenSSL import SSL
 
 from ..errors import ProbeError
-from .auth import PskAuth, _DTLS_CIPHERS, _OCF_ROOT_CA, _load_pem_chain
+from .auth import (
+    PskAuth,
+    _connection_factory,
+    _DTLS_CIPHERS,
+    _OCF_ROOT_CA,
+    _load_pem_chain,
+)
 from .coap import split_dtls
 from .dtls_handshake import _drive_dtls_handshake, _validate_mtu
 from .endpoint import open_host_filtered_udp_socket
@@ -830,12 +836,21 @@ def _diagnostic_connection(
     accepts it either way and nothing further down would notice a credential
     being handed to the wrong engine.
 
-    Nothing is relaxed for a provider that brings its own engine, because
-    there is nothing to relax: a diagnostic must report the appliance's own
-    alert rather than a local verdict, and an engine with no X.509 reaches
-    that by construction instead of by re-asserting accept-any.
+    A diagnostic must report the appliance's own alert rather than a local
+    verdict. A provider whose engine verifies a chain therefore has to build
+    a connection that does not, and this package's
+    ``FragmentingCertificateAuth`` does that through
+    ``_create_diagnostic_connection``, which is asked first. Without that
+    hook, the engine would refuse an untrusted chain before its own flight,
+    and the caller would get a local error instead of the appliance's alert.
+    An engine with no X.509, such as ``PskAuth``'s, needs no hook. A
+    third-party engine is used as it is built: this module cannot relax a
+    check it does not own.
     """
-    factory = getattr(auth, "_create_dtls_connection", None)
+    diagnostic = getattr(auth, '_create_diagnostic_connection', None)
+    if diagnostic is not None:
+        return diagnostic(mtu=mtu)
+    factory = _connection_factory(auth)
     if factory is not None:
         return factory(mtu=mtu)
 

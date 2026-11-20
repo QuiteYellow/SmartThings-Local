@@ -17,6 +17,7 @@ SUPPORTED_DOWNSTREAM_IMPORTS = {
         "AuthorizationError",
         "BlockwiseError",
         "EndpointError",
+        "FragmentLimitTimeoutError",
         "HandshakePeerCleanupError",
         "MalformedMessageError",
         "ObserveError",
@@ -32,6 +33,9 @@ SUPPORTED_DOWNSTREAM_IMPORTS = {
     "smartthings_local.protocol.auth": (
         "AuthenticationProvider",
         "CertificateAuth",
+        "DtlsConnection",
+        "DtlsConnectionProvider",
+        "FragmentingCertificateAuth",
         "PskAuth",
         "SamsungServerProfile",
         "SamsungServerRole",

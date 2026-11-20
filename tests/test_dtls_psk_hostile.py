@@ -447,3 +447,54 @@ def test_a_full_table_still_reassembles_a_message_already_in_it(client):
     client._handle_handshake_fragment(fragment(0, 2, b"\x00\x00"))
     assert client._failed is None
     assert 0 not in client._pending
+
+
+# -- a refusal before our flight frees the peer ---------------------------
+#
+# Each refusal of a server message before our own flight keeps one
+# epoch-zero fatal handshake_failure for the driver to send, so the
+# appliance does not hold a half-open handshake for us. The base class owns
+# the HelloVerifyRequest cap and the ServerHello checks, so the PSK engine
+# gets this too. A fatal alert from the peer keeps nothing: the peer has
+# already ended the handshake.
+
+_FATAL_HANDSHAKE_FAILURE = bytes([2, 40])
+
+
+def _assert_one_abandon_alert(engine):
+    alert = engine._take_abandon_alert()
+    assert alert[0] == 21
+    assert alert[3:5] == b"\x00\x00"
+    assert alert[13:] == _FATAL_HANDSHAKE_FAILURE
+    assert engine._take_abandon_alert() == b""
+
+
+def test_the_hello_verify_request_cap_keeps_the_alert(client):
+    for index in range(40):
+        body = b"\xfe\xfd" + bytes([4]) + bytes([index, index, index, index])
+        client._handle_hello_verify_request(body, index)
+        if client._failed:
+            break
+    assert client._failed == "server kept re-issuing HelloVerifyRequest"
+    _assert_one_abandon_alert(client)
+
+
+def test_a_malformed_server_hello_keeps_the_alert(client):
+    client._handle_server_hello(b"\x00")
+    assert client._failed == "short ServerHello"
+    _assert_one_abandon_alert(client)
+
+
+def test_a_fatal_alert_from_the_peer_keeps_none(client):
+    client.bio_write(record(21, 0, 0, _FATAL_HANDSHAKE_FAILURE))
+    with pytest.raises(DtlsError, match="peer sent fatal alert"):
+        client.do_handshake()
+    assert client._take_abandon_alert() == b""
+
+
+def test_a_refusal_after_the_handshake_keeps_none(established):
+    """At epoch 1 there is no half-open handshake to end."""
+    established._send_epoch = 1
+    established._abandon("handshake message too large")
+    assert established._failed == "handshake message too large"
+    assert established._take_abandon_alert() == b""
