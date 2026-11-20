@@ -127,7 +127,7 @@ def test_both_arms_run_when_the_first_completes(harness, capsys):
     assert "GET /oic/d: 2.05, 150 bytes" in out
     assert "GET /device/0: 2.05, 9000 bytes" in out
     assert [s.reads for s in FakeSession.created] == [
-        ["/oic/d"], ["/oic/d", "/device/0"]]
+        ["/oic/d", "/device/0"], ["/oic/d", "/device/0"]]
     assert "handshakes used: 2 of 4" in out
     assert SECRET_HOST not in out
     # The gap floor holds whatever the timing: one wait between the arms.
@@ -178,6 +178,20 @@ def test_fragment_limit_timeout_is_reported(harness, capsys):
         "GET /device/0: FragmentLimitTimeoutError, the first block never "
         "arrived (length 512)")
     assert FakeSession.created[1].closed
+
+
+def test_arm_one_reads_device0_at_1024(harness, capsys):
+    """The primed read targets 1024, so arm 1 reads /device/0 after /oic/d."""
+    FakeSession.plan = {
+        1024: {"connect": None, "get": (69, b"x" * 150),
+               "by_path": {("device", "0"): (69, b"x" * 4607)}},
+        512: {"connect": None, "get": (69, b"x" * 150)},
+    }
+    harness(SECRET_HOST)
+    out = capsys.readouterr().out
+    arm1 = out[out.index("arm 1:"):out.index("arm 2:")]
+    assert arm1.index("GET /oic/d: 2.05, 150 bytes") < arm1.index(
+        "GET /device/0: 2.05, 4607 bytes")
 
 
 def test_the_ceiling_holds_across_appliances(harness, capsys):
@@ -366,3 +380,33 @@ def test_the_quiet_time_starts_when_the_appliance_answers_again(
     assert "plaintext CoAP answered after 40.0 s" in out
     # The full floor, counted from the answer, not from the handshake end.
     assert f"waiting {check.MIN_GAP_S:.0f} s before the next handshake" in out
+
+
+def test_paths_are_read_in_order_after_oic_d(harness, capsys):
+    FakeSession.plan = {
+        1024: {"connect": None, "get": (69, b"x" * 150)},
+        512: {"connect": None, "get": (69, b"x" * 150)},
+    }
+    harness(SECRET_HOST, extra=("--path", "/information/vs/0",
+                                "--path", "/oic/res"))
+    assert [s.reads for s in FakeSession.created] == [
+        ["/oic/d", "/information/vs/0", "/oic/res"]] * 2
+
+
+@pytest.mark.parametrize("bad", [
+    "oic/res", "/oic/res?if=oic.if.ll", "/oic//res", "/oic/sec/doxm",
+    "/oic/sec",
+])
+def test_unsafe_or_malformed_paths_are_refused(harness, bad):
+    with pytest.raises(SystemExit):
+        harness(SECRET_HOST, extra=("--path", bad))
+    assert FakeSession.created == []
+
+
+def test_more_paths_than_the_cap_are_refused(harness):
+    extra = []
+    for number in range(check.MAX_PATHS + 1):
+        extra += ["--path", f"/r{number}/vs/0"]
+    with pytest.raises(SystemExit):
+        harness(SECRET_HOST, extra=tuple(extra))
+    assert FakeSession.created == []

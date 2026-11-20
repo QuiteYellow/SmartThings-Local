@@ -1,27 +1,35 @@
 #!/usr/bin/env python3
 """pr129_check.py -- does PR #129's certificate engine work on your appliance?
 
-For the washer and dryer on QuiteYellow/SmartThings-Local#20, which leave the
-network when they must send a DTLS handshake flight that does not fit one
-frame. PR #129 adds `FragmentingCertificateAuth`, a client-certificate
-credential whose ClientHello offers `max_fragment_length`, so the appliance
-splits its flight to fit. This script drives that credential through the
-library's own `DtlsCoapSession`, the same path an integration would use.
+For appliances that need a negotiated fragment length: the washer and dryer on
+QuiteYellow/SmartThings-Local#20, which leave the network when they must send a
+DTLS handshake flight that does not fit one frame, and the TP1X boards on
+mbillow/localthings#504. PR #129 adds `FragmentingCertificateAuth`, a
+client-certificate credential whose ClientHello offers `max_fragment_length`,
+so the appliance splits its flight to fit. This script drives that credential
+through the library's own `DtlsCoapSession`, the same path an integration would
+use.
 
 Per appliance, at most two DTLS handshakes, each in its own session:
 
   Arm 1  max_fragment_length 1024, the library default. Handshake, report the
-         length in force, GET /oic/d (small), close.
-  Arm 2  max_fragment_length 512, the length already measured on these units
-         on 2026-10-25. Handshake, GET /oic/d, then GET /device/0 (the large
-         state read), close. Runs only if arm 1's handshake completed.
-         /oic/d goes first because a session can stop answering after a
-         large read times out. At this commit the first request of a read
-         carries no Block2 option, so the appliance chooses the block size,
-         and nothing in the client lowers it to the negotiated length. On a
-         dryer and an oven here, /device/0 timed out at 512 on 2026-11-14,
-         so a FragmentLimitTimeoutError on it is the expected result, not a
-         fault in the run.
+         length in force, GET /oic/d (small), then GET each --path in order
+         (default /device/0, the large state read), close.
+  Arm 2  max_fragment_length 512, the length already measured on the #20
+         units on 2026-10-25. The same reads, close. Runs only if arm 1's
+         handshake completed.
+
+         /oic/d goes first in each arm because a session can stop answering
+         after a large read fails. For the same reason a failed --path usually
+         leaves the later ones in that arm unanswered, so list the ones you
+         expect to be smaller first. At this commit a read under a fragment
+         length first sends a primer: a GET that asks for block 0 at a size
+         that fits. The appliance firmware does not answer the primer, but it
+         keeps the size, and the plain GET that follows on the same token comes
+         back in blocks of that size. On a dryer here, /device/0 (4607 bytes)
+         came back in 512-byte blocks at 1024 on 2026-11-19. Whether these
+         units do the same is what this run measures. A
+         FragmentLimitTimeoutError on /device/0 means they do not.
 
 What it reports:
 
@@ -46,19 +54,28 @@ quiet time before each handshake after the first, which starts again when
 the appliance answers after a drop-off. Each drop-off adds its recovery
 time, so a run where the appliances drop off can take 6 minutes or more.
 
-Install and run, on a machine on the appliances' network (Python 3.11+).
+Install and run, on a machine on the appliances' network (Python 3.11+ and git).
 Run it on the host itself, not in a container on Docker's bridge network:
 these appliances answer from a different port than the one addressed, and
 the bridge NAT drops those replies (#110).
 
     python3 -m venv stl-129
-    stl-129/bin/pip install "smartthings-local @ git+https://github.com/QuiteYellow/SmartThings-Local@b40b7208f1880f30077336ca8175aeae7b48f5c9"
+    stl-129/bin/pip install "smartthings-local @ git+https://github.com/QuiteYellow/SmartThings-Local@f74a26e2fd37708861feb3c55368532bff57973d"
     stl-129/bin/python pr129_check.py \\
         --cert certs/client_fullchain.pem --key certs/client.key \\
         <dryer-ip> <washer-ip>
 
-The certificate and key are the ones `setup_cert.py` wrote. The secure port is
-discovered from each appliance's plaintext directory; there is no default,
+For other resources, name them with --path, once per resource, for example
+on a TP1X board:
+
+    stl-129/bin/python pr129_check.py --cert ... --key ... \\
+        --path /information/vs/0 --path /oic/res <board-ip>
+
+--path takes GET-only resource paths: no query, and nothing under /oic/sec.
+
+The certificate and key are the ones `setup_cert.py` wrote, or the client
+certificate chain and key your integration uses, as PEM files. The secure port
+is discovered from each appliance's plaintext directory; there is no default,
 because these appliances bind their DTLS socket to port 0 and the port moves
 across a reboot.
 """
@@ -127,6 +144,25 @@ LIVENESS_BUDGET_S = 60.0
 # Outside Linux's default ephemeral range (32768-60999), so no other process
 # holds it, and away from 26900, which the #20 MTU matrix script used.
 DEFAULT_LOCAL_PORT = 26960
+
+# Per large read. /device/0 on a dryer took 2.2 s in 512-byte blocks; an oven
+# here returns about 13 KB, so 30 s leaves room for 64-byte-block pacing too.
+LARGE_READ_TIMEOUT_S = 30.0
+MAX_PATHS = 6
+
+
+def _path(text):
+    """Parse one --path into segments. GET only: no query, no /oic/sec."""
+    if not text.startswith("/") or "?" in text or "#" in text:
+        raise argparse.ArgumentTypeError(
+            "a path starts with / and carries no query")
+    segments = text.strip("/").split("/")
+    if not all(segments):
+        raise argparse.ArgumentTypeError("a path has no empty segment")
+    if segments[:2] == ["oic", "sec"]:
+        raise argparse.ArgumentTypeError("this script reads nothing under "
+                                         "/oic/sec")
+    return segments
 
 _ALERT_NAMES = {
     10: "unexpected_message", 20: "bad_record_mac", 22: "record_overflow",
@@ -212,6 +248,11 @@ class _Run:
         if remaining > 0:
             print(f"  waiting {remaining:.0f} s before the next handshake")
             time.sleep(remaining)
+
+    def reads(self):
+        """/oic/d first, then each --path, as (segments, timeout)."""
+        return [(["oic", "d"], 10.0)] + [
+            (path, LARGE_READ_TIMEOUT_S) for path in self.args.paths]
 
     def secure_port(self, host):
         """Return (port or None, seconds until the directory answered).
@@ -337,8 +378,7 @@ class _Run:
                 print("  the plaintext directory did not answer; skipping")
             return
         print("  secure port discovered from the plaintext directory")
-        completed = self.arm(
-            "arm 1", host, port, 1024, [(["oic", "d"], 10.0)])
+        completed = self.arm("arm 1", host, port, 1024, self.reads())
         port = self.liveness()
         if not completed:
             print("  arm 2: skipped, arm 1's handshake did not complete")
@@ -348,8 +388,7 @@ class _Run:
             return
         # /oic/d first: a session can stop answering after a large read
         # times out, so the small read must not come after it.
-        self.arm("arm 2", host, port, 512,
-                 [(["oic", "d"], 10.0), (["device", "0"], 30.0)])
+        self.arm("arm 2", host, port, 512, self.reads())
         self.liveness()
 
 
@@ -382,11 +421,19 @@ def main(argv=None):
                          f"(default {DEFAULT_LOCAL_PORT})")
     ap.add_argument("--max-handshakes", type=int, default=HANDSHAKE_CEILING,
                     help=f"at most {HANDSHAKE_CEILING}, the default")
+    ap.add_argument("--path", dest="paths", action="append", type=_path,
+                    metavar="PATH",
+                    help="a resource to GET after /oic/d, once per resource "
+                         f"(at most {MAX_PATHS}; default /device/0)")
     ap.add_argument("--yes", action="store_true",
                     help="skip the prompt before the run starts")
     args = ap.parse_args(argv)
     if len(args.hosts) > 2:
         ap.error("pass one or two appliances")
+    if args.paths is None:
+        args.paths = [["device", "0"]]
+    if len(args.paths) > MAX_PATHS:
+        ap.error(f"pass at most {MAX_PATHS} --path values")
     if not 1 <= args.max_handshakes <= HANDSHAKE_CEILING:
         ap.error(f"--max-handshakes must be 1 to {HANDSHAKE_CEILING}")
     if not 1024 <= args.local_port <= 65535:
