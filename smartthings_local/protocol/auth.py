@@ -388,6 +388,10 @@ def _configure_certificate_server(
     # the OpenSSL instance cryptography bundles; ctypes and cffi bindings
     # do not expose SSL_CTX_set_security_level on this build.
     context.set_cipher_list(_DTLS_CIPHERS)
+    # Offer no session_ticket extension. PR #33's profile for the newer
+    # laundry certificate cohort disables session tickets, and this package
+    # never resumes a session, so the option changes only the ClientHello.
+    context.set_options(SSL.OP_NO_TICKET)
 
 
 class ServerCertificateAuth:

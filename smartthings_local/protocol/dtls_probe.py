@@ -215,6 +215,7 @@ def _client_hello_flight(*, mtu):
     context.load_verify_locations(_OCF_ROOT_CA)
     context.set_verify(SSL.VERIFY_PEER, lambda *args: True)
     context.set_cipher_list(_DTLS_CIPHERS)
+    context.set_options(SSL.OP_NO_TICKET)
 
     connection = SSL.Connection(context, None)
     connection.set_connect_state()
@@ -801,6 +802,7 @@ def _diagnostic_context(*, auth, cert_pem, key_pem, cert_path, key_path):
     ctx.load_verify_locations(_OCF_ROOT_CA)
     ctx.set_verify(SSL.VERIFY_PEER, _accept_any_peer_chain)
     ctx.set_cipher_list(_DTLS_CIPHERS)
+    ctx.set_options(SSL.OP_NO_TICKET)
     if auth is not None:
         auth.configure_context(ctx)
         # Providers configure a context to *gate* on trust: CertificateAuth

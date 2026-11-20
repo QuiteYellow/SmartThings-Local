@@ -279,6 +279,9 @@ def test_certificate_auth_context_setup_matches_legacy_happy_path():
         def set_cipher_list(self, ciphers):
             self.calls.append(("set_cipher_list", ciphers))
 
+        def set_options(self, options):
+            self.calls.append(("set_options", options))
+
         def use_certificate_chain_file(self, path):
             self.calls.append(("use_certificate_chain_file", path))
 
@@ -298,6 +301,7 @@ def test_certificate_auth_context_setup_matches_legacy_happy_path():
         "load_verify_locations",
         "set_verify",
         "set_cipher_list",
+        "set_options",
         "use_certificate_chain_file",
         "use_privatekey_file",
         "check_privatekey",
@@ -306,6 +310,10 @@ def test_certificate_auth_context_setup_matches_legacy_happy_path():
     assert context.calls[2] == (
         "set_cipher_list",
         b"ECDHE-ECDSA-AES128-GCM-SHA256:@SECLEVEL=0",
+    )
+    assert context.calls[3] == (
+        "set_options",
+        SSL.OP_NO_TICKET,
     )
     callback = context.verify_callback
     assert callback(None, None, 0, 0, True) is True

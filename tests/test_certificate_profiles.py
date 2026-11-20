@@ -792,6 +792,16 @@ def test_python_floor_curve_fallback_has_the_same_wire_contract(
     assert 35 not in extensions
 
 
+def test_default_certificate_client_hello_offers_no_session_ticket(
+    generated_chain,
+):
+    _ciphers, extensions = _parse_client_hello(
+        _first_client_hello(_configured_context(generated_chain))
+    )
+
+    assert 35 not in extensions
+
+
 def test_profile_fails_closed_when_exact_openssl_support_is_unavailable(
     monkeypatch,
 ):
@@ -874,7 +884,10 @@ def test_default_and_profile_verification_are_selected_per_provider(
     assert default_context.verify_callback(None, None, 0, 0, True) is True
     assert default_context.verify_callback(None, None, 0, 0, False) is False
     assert not profile_calls
-    assert all(call[0] != "set_options" for call in default_context.calls)
+    assert (
+        "set_options",
+        SSL.OP_NO_TICKET,
+    ) in default_context.calls
 
     profiled_context = RecordingContext()
     profile = SamsungServerProfile.bound_device(_IDENTITY)
@@ -920,6 +933,10 @@ def test_default_and_profile_verification_are_selected_per_provider(
         }
         for call in server_only_context.calls
     )
+    assert (
+        "set_options",
+        SSL.OP_NO_TICKET,
+    ) in server_only_context.calls
     assert (
         server_only_context.verify_callback(
             None,
