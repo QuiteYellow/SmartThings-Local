@@ -109,10 +109,13 @@ class FragmentLimitTimeoutError(SessionTimeoutError):
     """A read gave up on its first block while a fragment length was in force.
 
     These appliances cannot send a record larger than a negotiated
-    `max_fragment_length`, so a resource whose representation exceeds it never
-    arrives at all. Reported on mbillow/localthings#504 by @fredrikbae, who
-    measured it on a TP1X board: the response never comes and the session is
-    unusable afterwards.
+    `max_fragment_length`, so a response that exceeds it never arrives at all.
+    Reported on mbillow/localthings#504 by @fredrikbae, who measured it on a
+    TP1X board: the response never comes and the session is unusable
+    afterwards. A read primes block 0 to a size that fits, so on the firmware
+    measured here a representation over 1024 bytes arrives in smaller blocks.
+    That firmware never splits a body of 1024 bytes or less, so such a body
+    that is over the length still ends here.
 
     **This names the conditions, not a proven cause.** What the library knows
     is that the first block of the transfer drew nothing and that a fragment

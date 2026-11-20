@@ -83,6 +83,7 @@ from .coap import (
     SIZE1,
     SIZE2,
     TYPE_CON,
+    TYPE_NON,
     URI_PATH,
     URI_QUERY,
     Block2Accumulator,
@@ -164,6 +165,43 @@ def _block1_szx(base_options, extra_options, body_length, limit):
             return szx
     raise ValueError(
         f'no Block1 size fits the negotiated fragment length of {limit}')
+
+
+# The options a Block2 response can carry, each at its longest: ETag,
+# Content-Format, Block2 and Size2. _block2_szx sizes a response with all of
+# them, so the block it picks fits whatever subset the server sends.
+_BLOCK2_RESPONSE_OPTIONS = (
+    (ETAG, bytes(8)),
+    (CONTENT_FORMAT, bytes(2)),
+    (BLOCK2, bytes(3)),
+    (SIZE2, bytes(4)),
+)
+
+
+def _block2_szx(limit):
+    """Return the Block2 SZX for a read under ``limit``, or None.
+
+    None means a read needs no primer: no length is in force, or a response
+    carrying a full BLOCK_SZX block already fits it. Otherwise this is the
+    largest SZX whose response fits. The appliance firmware answers block 0
+    at BLOCK_SZX unless primed (see _send_block2_primer), and a response
+    over the length ends the session.
+    """
+    if limit is None:
+        return None
+    for szx in range(BLOCK_SZX, -1, -1):
+        size = _request_size(_BLOCK2_RESPONSE_OPTIONS, bytes(1 << (szx + 4)))
+        if size <= limit:
+            return None if szx == BLOCK_SZX else szx
+    raise ValueError(
+        f'no Block2 size fits the negotiated fragment length of {limit}')
+
+
+# How long a primed read waits for an answer to the primer itself before it
+# sends the plain GET. The firmware measured here never answers the primer;
+# a server that does answers it as block 0. 0.3 s is the gap the 2026-11-19
+# hardware run used between the two requests.
+_PRIMER_SETTLE_S = 0.3
 
 
 # Base per-attempt wait for a write retransmission, doubled per attempt
@@ -2006,6 +2044,11 @@ class DtlsCoapSession:
             extra_options=extra_options,
         )
         try:
+            if num == 0:
+                message = self._send_block2_primer(
+                    tok, ev, container, path_segs, query, extra_options)
+                if message is not None:
+                    return message
             for attempt in range(_BLOCK_MAX_ATTEMPTS):
                 # Close the reader-death registration race: after this request
                 # is visible to reader-finally, recheck that the reader still
@@ -2065,6 +2108,55 @@ class DtlsCoapSession:
             self._unregister_pending_request(tok, mid, exchange)
         raise self._read_timeout(num)
 
+    def _send_block2_primer(
+            self, tok, ev, container, path_segs, query, extra_options):
+        """Set the size of block 0 before a read under a fragment length.
+
+        The appliance firmware sends block 0 at 1024 bytes, and a request for
+        a smaller block 0 gets no reply. In TizenRT's iotivity_1.2-rel fork,
+        a GET with Block2 NUM 0 takes the first-block branch
+        (cablockwisetransfer.c:1045-1064), which stores the requested SZX
+        under the token and client port for 60 s (:56) and does not pass the
+        request to the handler (:483-490). The plain GET that follows on the
+        same token is handled normally, and its response is cut at the stored
+        size (:2405-2436, :1575). Measured on a dryer on 2026-11-19: /device/0
+        came back in 512-byte blocks at a negotiated length of 1024.
+
+        The primer is a NON GET with Block2 NUM 0 at _block2_szx's size, on
+        the read's own token. Returns block 0 if the server answered the
+        primer itself, as RFC 7959 §2.4 lets it, and None when the caller
+        must send the plain GET. Does nothing when no primer is needed.
+        """
+        szx = _block2_szx(self.negotiated_fragment_length)
+        if szx is None:
+            return None
+        self._check_live()
+        self._send_dgram(build_get_request(
+            TYPE_NON,
+            self._next_mid(),
+            tok,
+            path_segs,
+            query,
+            block_number=0,
+            block_szx=szx,
+            extra_options=extra_options,
+        ))
+        if not self._wait_live(ev, _PRIMER_SETTLE_S):
+            return None
+        with self._state_lock:
+            error = container.get('err')
+            message = container.get('message')
+            if (error is None and message is not None
+                    and self._block_num_matches(message, 0, szx)):
+                return message
+            for key in ('code', 'mtype', 'mid', 'options', 'payload',
+                        'message'):
+                container.pop(key, None)
+            ev.clear()
+        if error is not None:
+            raise error
+        return None
+
     @property
     def negotiated_fragment_length(self):
         """The DTLS fragment length in force, or None.
@@ -2075,7 +2167,10 @@ class DtlsCoapSession:
         which asks before connecting.
 
         These appliances cannot send a record larger than a negotiated length,
-        so this is the ceiling on any single representation a read can return.
+        so this is the ceiling on any single response. A read primes block 0
+        to a size under it, so a representation over 1024 bytes arrives in
+        smaller blocks; a body of 1024 bytes or less is sent whole by the
+        firmware measured here, so this is its ceiling.
 
         A completed handshake does not mean the length is in force. A server
         that does not echo the extension still completes it, and this is then

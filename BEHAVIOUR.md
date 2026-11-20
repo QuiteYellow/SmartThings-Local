@@ -17,5 +17,6 @@ Each line is a behaviour someone chose on purpose, and why. If a result contradi
 ## Requests
 
 - Under a negotiated fragment length, every CoAP message fits the length whole, and `post()` uses Block1 at the largest block size that fits. One CoAP message is one record, and a record over the length is refused. (2026-11-13)
+- Under a negotiated fragment length that a 1024-byte block does not fit, `get()` sends a NON GET with Block2 NUM 0 at the largest size that fits, then a plain GET on the same token. The firmware answers neither a request for a smaller block 0 nor anything over the length, but it keeps the asked size for the plain GET (measured 2026-11-19). (2026-11-19)
 - A request that cannot fit raises `ValueError` before anything is sent. The engine's own refusal is a bare `SSL.Error`, which no caller handles. (2026-11-13)
 - The private `_create_dtls_connection` hook still works and warns with `FutureWarning`. The default filters hide a `DeprecationWarning` that is attributed to package code, so the integration that uses the hook would never see it. (2026-11-13)
