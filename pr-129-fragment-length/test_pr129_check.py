@@ -219,12 +219,24 @@ def test_ambiguous_ports_are_refused(harness, capsys, monkeypatch):
     assert FakeSession.created == []
 
 
+def _fake_clock(monkeypatch):
+    """Advance a fake clock on sleep, and on each discovery by its timeout."""
+    clock = [1000.0]
+    monkeypatch.setattr(check.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        check.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    return clock
+
+
 def test_an_answer_with_no_secure_port_still_counts_as_an_answer(
         harness, capsys, monkeypatch):
-    monkeypatch.setattr(
-        check, "discover_ocf_secure_ports",
-        lambda host, **kw: _directory(()))
-    monkeypatch.setattr(check, "LIVENESS_BUDGET_S", 0.05)
+    clock = _fake_clock(monkeypatch)
+
+    def directory(host, timeout, retries):
+        clock[0] += timeout
+        return _directory(())
+
+    monkeypatch.setattr(check, "discover_ocf_secure_ports", directory)
     harness(SECRET_HOST)
     out = capsys.readouterr().out
     assert "the directory answered, but no secure port came through" in out
@@ -235,10 +247,7 @@ def test_an_answer_with_no_secure_port_still_counts_as_an_answer(
 def test_a_slow_directory_is_asked_again_until_the_port_comes_through(
         harness, capsys, monkeypatch):
     """#20 run 2: the washer answered, but too slowly for one attempt."""
-    clock = [1000.0]
-    monkeypatch.setattr(check.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(
-        check.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    clock = _fake_clock(monkeypatch)
     calls = []
 
     def directory(host, **kw):
@@ -257,15 +266,43 @@ def test_a_slow_directory_is_asked_again_until_the_port_comes_through(
     assert "secure port discovered from the plaintext directory" in out
     assert "no secure port" not in out
     assert len(FakeSession.created) == 2
-    assert calls[0] == {"timeout": check.DISCOVERY_TIMEOUT_S, "retries": 1}
-    assert check.DISCOVERY_TIMEOUT_S > 5.76
+    # Short probes until the first answer, then long attempts with a retry.
+    assert calls[0] == {"timeout": check.PROBE_TIMEOUT_S, "retries": 0}
+    assert calls[1] == {"timeout": check.DISCOVERY_TIMEOUT_S, "retries": 1}
+
+
+def test_no_discovery_attempt_runs_past_the_budget(harness, monkeypatch):
+    """An attempt near the end is cut to the time left, so the message's
+    "within 60 s" holds."""
+    clock = _fake_clock(monkeypatch)
+    attempts = []
+
+    def directory(host, timeout, retries):
+        attempts.append((clock[0], timeout))
+        clock[0] += timeout
+        return _directory(())
+
+    monkeypatch.setattr(check, "discover_ocf_secure_ports", directory)
+    harness(SECRET_HOST)
+    start = attempts[0][0]
+    assert all(at + timeout <= start + check.LIVENESS_BUDGET_S
+               for at, timeout in attempts)
+
+
+def test_the_prompt_gives_the_worst_case_for_the_paths(capsys, monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    check._confirm(2, 3)
+    assert "add up to 6 minutes" in capsys.readouterr().out
 
 
 def test_silence_reads_as_no_answer(harness, capsys, monkeypatch):
-    monkeypatch.setattr(
-        check, "discover_ocf_secure_ports",
-        lambda host, **kw: _directory((), answered=False))
-    monkeypatch.setattr(check, "LIVENESS_BUDGET_S", 0.05)
+    clock = _fake_clock(monkeypatch)
+
+    def directory(host, timeout, retries):
+        clock[0] += timeout
+        return _directory((), answered=False)
+
+    monkeypatch.setattr(check, "discover_ocf_secure_ports", directory)
     harness(SECRET_HOST)
     assert "did not answer" in capsys.readouterr().out
 

@@ -21,15 +21,19 @@ Per appliance, at most two DTLS handshakes, each in its own session:
 
          /oic/d goes first in each arm because a session can stop answering
          after a large read fails. For the same reason a failed --path usually
-         leaves the later ones in that arm unanswered, so list the ones you
-         expect to be smaller first. At this commit a read under a fragment
-         length first sends a primer: a GET that asks for block 0 at a size
-         that fits. The appliance firmware does not answer the primer, but it
-         keeps the size, and the plain GET that follows on the same token comes
-         back in blocks of that size. On a dryer here, /device/0 (4607 bytes)
-         came back in 512-byte blocks at 1024 on 2026-11-19. Whether these
-         units do the same is what this run measures. A
-         FragmentLimitTimeoutError on /device/0 means they do not.
+         leaves the later ones in that arm unanswered. At this commit a read
+         under a fragment length first sends a primer: a GET that asks for
+         block 0 at a size that fits. The appliance firmware does not answer
+         the primer, but it keeps the size, and the plain GET that follows on
+         the same token comes back in blocks of that size. On a dryer here,
+         /device/0 (4607 bytes) came back in 512-byte blocks at 1024 on
+         2026-11-19. That firmware never splits a body of 1024 bytes or less,
+         though, so such a body over the length still fails: at 512, any body
+         of 513 to 1024 bytes, and at 1024, one just under 1024 once the
+         headers are added. So list the resources you expect to be over 1024
+         bytes first, and the ones that may fit whole last. Whether these units
+         do the same is what this run measures. A FragmentLimitTimeoutError on
+         /device/0 means they do not.
 
 What it reports:
 
@@ -49,10 +53,12 @@ Cost: if a handshake times out, the appliance can refuse new handshakes from
 this script's local port for more than 10 minutes. That was measured on a
 dryer on 2026-11-13. Your integration uses its own port, but disable it for
 these appliances during the run anyway, so that two clients do not contend.
-With two appliances the run takes about 4 minutes. Most of that is a 60 s
-quiet time before each handshake after the first, which starts again when
-the appliance answers after a drop-off. Each drop-off adds its recovery
-time, so a run where the appliances drop off can take 6 minutes or more.
+With two appliances the run takes about 4 minutes. Most of that is a 60 s quiet
+time before each handshake after the first, which starts again when the
+appliance answers after a drop-off. Each read that fails adds up to 30 s, and
+there is one per --path in each arm, so each --path can add up to 2 minutes
+over two appliances. Each drop-off adds its recovery time too. The prompt
+before the run gives the worst case for the paths you passed.
 
 Install and run, on a machine on the appliances' network (Python 3.11+ and git).
 Run it on the host itself, not in a container on Docker's bridge network:
@@ -142,10 +148,16 @@ HANDSHAKE_TIMEOUT_S = 3.0
 # the MTU matrix run (issuecomment-6401470854).
 LIVENESS_BUDGET_S = 60.0
 
-# Per discovery attempt: both directory lookups and every Block2 block. On
-# #20 run 2 the washer's directory replies took 0.76 to 5.76 s, so 3 s with
-# no retry gave up partway and read as "no secure port".
-DISCOVERY_TIMEOUT_S = 10.0
+# Discovery, per attempt: one deadline covers both directory lookups and
+# every Block2 block, and the library gives the filtered doxm lookup at most
+# 1 s of it. Until the directory first answers, attempts stay short, so the
+# check after an arm sees a returning appliance within seconds. After that,
+# attempts are long: on #20 run 2 the washer's doxm replies came after the
+# 1 s, and its multi-block directory took 2.0 s for block 0 and 1.6 s for
+# block 1, with a 6 s burst of silence. 3 s gave up partway and read as "no
+# secure port".
+PROBE_TIMEOUT_S = 3.0
+DISCOVERY_TIMEOUT_S = 30.0
 # Outside Linux's default ephemeral range (32768-60999), so no other process
 # holds it, and away from 26900, which the #20 MTU matrix script used.
 DEFAULT_LOCAL_PORT = 26960
@@ -269,13 +281,20 @@ class _Run:
 
         A slow directory can answer without the port coming through in one
         attempt, so an answer without a port is asked again, like silence,
-        until LIVENESS_BUDGET_S runs out.
+        until LIVENESS_BUDGET_S runs out. No attempt runs past the budget.
         """
         started = time.monotonic()
         answered = None
-        while time.monotonic() - started < LIVENESS_BUDGET_S:
+        while True:
+            remaining = LIVENESS_BUDGET_S - (time.monotonic() - started)
+            if remaining < 1.0:
+                break
+            if answered is None:
+                timeout, retries = min(PROBE_TIMEOUT_S, remaining), 0
+            else:
+                timeout, retries = min(DISCOVERY_TIMEOUT_S, remaining), 1
             result = discover_ocf_secure_ports(
-                host, timeout=DISCOVERY_TIMEOUT_S, retries=1)
+                host, timeout=timeout, retries=retries)
             if result.response_received:
                 if answered is None:
                     answered = time.monotonic() - started
@@ -285,7 +304,8 @@ class _Run:
                               "secure ports; refusing to guess which one")
                         return None, answered
                     return result.ports[0], answered
-            time.sleep(2.0)
+            time.sleep(min(
+                2.0, LIVENESS_BUDGET_S - (time.monotonic() - started)))
         if answered is not None:
             print("    the directory answered, but no secure port came "
                   f"through within {LIVENESS_BUDGET_S:.0f} s")
@@ -405,14 +425,17 @@ class _Run:
         self.liveness()
 
 
-def _confirm():
+def _confirm(appliances, paths):
+    # Every read after /oic/d can fail at LARGE_READ_TIMEOUT_S, in both arms.
+    worst = appliances * 2 * paths * LARGE_READ_TIMEOUT_S / 60
     print(
         "Before you start: disable your integration for these appliances.\n"
         "If a handshake times out, the appliance can refuse new handshakes\n"
         "from this script's local port for more than 10 minutes. Wait at\n"
         "least 15 minutes before a second run, or pass a different\n"
-        "--local-port. With two appliances the run takes about 4 minutes,\n"
-        "or 6 minutes or more if the appliances drop off the network.\n"
+        "--local-port. With two appliances the run takes about 4 minutes.\n"
+        f"If every read after /oic/d fails, add up to {worst:.0f} minutes, and\n"
+        "each time an appliance drops off adds its recovery time.\n"
     )
     try:
         input("Press Enter to start, or Ctrl-C to stop. ")
@@ -468,7 +491,7 @@ def main(argv=None):
         reasons)
 
     if not args.yes:
-        _confirm()
+        _confirm(len(args.hosts), len(args.paths))
     try:
         installed = version("smartthings-local")
     except PackageNotFoundError:
