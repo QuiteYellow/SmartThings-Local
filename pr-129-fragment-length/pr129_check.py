@@ -141,6 +141,11 @@ HANDSHAKE_TIMEOUT_S = 3.0
 # drop-off lasted 9.2 to 10.5 s in the first capture, and 22.8 and 26.2 s in
 # the MTU matrix run (issuecomment-6401470854).
 LIVENESS_BUDGET_S = 60.0
+
+# Per discovery attempt: both directory lookups and every Block2 block. On
+# #20 run 2 the washer's directory replies took 0.76 to 5.76 s, so 3 s with
+# no retry gave up partway and read as "no secure port".
+DISCOVERY_TIMEOUT_S = 10.0
 # Outside Linux's default ephemeral range (32768-60999), so no other process
 # holds it, and away from 26900, which the #20 MTU matrix script used.
 DEFAULT_LOCAL_PORT = 26960
@@ -259,24 +264,32 @@ class _Run:
 
         The seconds are None only when the directory never answered. An
         answer that lists no usable port still counts as an answer, because
-        this is also the check for whether the appliance left the network.
+        this is also the check for whether the appliance left the network,
+        and the seconds count to the first answer.
+
+        A slow directory can answer without the port coming through in one
+        attempt, so an answer without a port is asked again, like silence,
+        until LIVENESS_BUDGET_S runs out.
         """
         started = time.monotonic()
+        answered = None
         while time.monotonic() - started < LIVENESS_BUDGET_S:
-            result = discover_ocf_secure_ports(host, timeout=3.0, retries=0)
+            result = discover_ocf_secure_ports(
+                host, timeout=DISCOVERY_TIMEOUT_S, retries=1)
             if result.response_received:
-                elapsed = time.monotonic() - started
-                if not result.found:
-                    print("    the directory answered but lists no secure "
-                          "port")
-                    return None, elapsed
-                if len(result.ports) != 1:
-                    print(f"    the directory lists {len(result.ports)} secure "
-                          "ports; refusing to guess which one")
-                    return None, elapsed
-                return result.ports[0], elapsed
+                if answered is None:
+                    answered = time.monotonic() - started
+                if result.found:
+                    if len(result.ports) != 1:
+                        print(f"    the directory lists {len(result.ports)} "
+                              "secure ports; refusing to guess which one")
+                        return None, answered
+                    return result.ports[0], answered
             time.sleep(2.0)
-        return None, None
+        if answered is not None:
+            print("    the directory answered, but no secure port came "
+                  f"through within {LIVENESS_BUDGET_S:.0f} s")
+        return None, answered
 
     def arm(self, name, host, port, fragment_length, reads):
         """Run one session. Return True if its handshake completed.

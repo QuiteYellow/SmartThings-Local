@@ -224,11 +224,41 @@ def test_an_answer_with_no_secure_port_still_counts_as_an_answer(
     monkeypatch.setattr(
         check, "discover_ocf_secure_ports",
         lambda host, **kw: _directory(()))
+    monkeypatch.setattr(check, "LIVENESS_BUDGET_S", 0.05)
     harness(SECRET_HOST)
     out = capsys.readouterr().out
-    assert "answered but lists no secure port" in out
+    assert "the directory answered, but no secure port came through" in out
     assert "did not answer" not in out
     assert FakeSession.created == []
+
+
+def test_a_slow_directory_is_asked_again_until_the_port_comes_through(
+        harness, capsys, monkeypatch):
+    """#20 run 2: the washer answered, but too slowly for one attempt."""
+    clock = [1000.0]
+    monkeypatch.setattr(check.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        check.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    calls = []
+
+    def directory(host, **kw):
+        calls.append(kw)
+        clock[0] += 1.5
+        # The first two attempts answer without the port.
+        return _directory(() if len(calls) <= 2 else (49155,))
+
+    monkeypatch.setattr(check, "discover_ocf_secure_ports", directory)
+    FakeSession.plan = {
+        1024: {"connect": None, "get": (69, b"x")},
+        512: {"connect": None, "get": (69, b"x")},
+    }
+    harness(SECRET_HOST)
+    out = capsys.readouterr().out
+    assert "secure port discovered from the plaintext directory" in out
+    assert "no secure port" not in out
+    assert len(FakeSession.created) == 2
+    assert calls[0] == {"timeout": check.DISCOVERY_TIMEOUT_S, "retries": 1}
+    assert check.DISCOVERY_TIMEOUT_S > 5.76
 
 
 def test_silence_reads_as_no_answer(harness, capsys, monkeypatch):
